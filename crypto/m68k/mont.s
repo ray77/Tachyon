@@ -127,3 +127,180 @@ _rsa_mont_mul_asm:
 	lea	512(sp),sp
 	movem.l	(sp)+,d2-d7/a2-a6
 	rts
+
+; int rsa_mont_sqr_asm(a0 = a, a2 = n, a3 = r, d0 = limbs, d1 = n0inv)
+;   Montgomery square: the a*a half uses the symmetry a_j*a_(i-j) = a_(i-j)*a_j, so
+;   only pairs j < i-j are multiplied and the column sum is doubled, plus the middle
+;   square for even columns. The m*n half is unchanged. 1.5 n^2 MULU instead of 2 n^2.
+	xdef	_rsa_mont_sqr_asm
+_rsa_mont_sqr_asm:
+	movem.l	d2-d7/a2-a6,-(sp)
+	lea	-512(sp),sp		; m[256]
+	move.l	sp,a6
+	move.w	d0,d2			; n
+	move.w	d1,d3			; n0inv
+	moveq	#0,d5
+	moveq	#0,d6
+	moveq	#0,d7
+	moveq	#0,d0			; i
+	move.w	d2,d1
+	add.w	d1,d1
+	lea	(a2,d1.w),a5
+	move.l	a5,-(sp)		; 0(sp) = n end (n + 2n)
+	subq.w	#4,sp			; 0(sp) = scratch word pair (count), 4(sp) = n end
+; ---- phase 1 --------------------------------------------------------------------
+.q1:
+	move.l	d6,-(sp)		; save carried accumulator
+	move.w	d7,-(sp)
+	moveq	#0,d6
+	moveq	#0,d7
+	; pairs: j = 0 .. (i-1)/2 : pa = a, pb = a + 2i + 2 (predecrement reads a[i] first)
+	move.w	d0,d1
+	subq.w	#1,d1
+	bmi.s	.q1_pairs_done		; i = 0: no pairs
+	lsr.w	#1,d1			; (i-1)/2 = count-1
+	move.l	a0,a4
+	move.w	d0,d4
+	add.w	d4,d4
+	lea	2(a0,d4.w),a5
+.q1p:
+	move.w	(a4)+,d4
+	mulu.w	-(a5),d4
+	add.l	d4,d6
+	addx.w	d5,d7
+	dbf	d1,.q1p
+.q1_pairs_done:
+	add.l	d6,d6			; double the pair sum
+	addx.w	d7,d7
+	btst	#0,d0
+	bne.s	.q1_nomid
+	move.w	d0,d4			; middle: a[i/2]^2
+	lsr.w	#1,d4
+	add.w	d4,d4
+	move.w	(a0,d4.w),d4
+	mulu.w	d4,d4
+	add.l	d4,d6
+	addx.w	d5,d7
+.q1_nomid:
+	move.w	(sp)+,d4		; restore carried accumulator: add it in
+	move.l	(sp)+,d1
+	add.l	d1,d6
+	addx.w	d5,d7
+	add.w	d4,d7
+	; m*n: pm = m, pn = n + 2i + 2, count = i
+	move.l	a6,a4
+	tst.w	d0
+	beq.s	.q1m_done
+	move.w	d0,d1
+	add.w	d1,d1
+	lea	2(a2,d1.w),a5
+	move.w	d0,d1
+	subq.w	#1,d1
+.q1m:
+	move.w	(a4)+,d4
+	mulu.w	-(a5),d4
+	add.l	d4,d6
+	addx.w	d5,d7
+	dbf	d1,.q1m
+.q1m_done:
+	move.w	d6,d4
+	mulu.w	d3,d4
+	move.w	d4,(a4)			; m[i]
+	mulu.w	(a2),d4
+	add.l	d4,d6
+	addx.w	d5,d7
+	clr.w	d6
+	swap	d6
+	swap	d7
+	or.l	d7,d6
+	moveq	#0,d7
+	addq.w	#1,d0
+	cmp.w	d2,d0
+	blt	.q1
+; ---- phase 2: columns n .. 2n-2 ------------------------------------------------------
+.q2:
+	move.l	d6,-(sp)
+	move.w	d7,-(sp)
+	moveq	#0,d6
+	moveq	#0,d7
+	; pairs: j = jstart .. (i-1)/2 with jstart = i-n+1; count = (i-1)/2 - jstart + 1
+	move.w	d0,d1
+	subq.w	#1,d1
+	lsr.w	#1,d1			; (i-1)/2
+	move.w	d0,d4
+	sub.w	d2,d4
+	addq.w	#1,d4			; jstart
+	sub.w	d4,d1			; count-1
+	bmi.s	.q2_pairs_done
+	add.w	d4,d4
+	lea	(a0,d4.w),a4		; pa = a + 2*jstart
+	move.w	d2,d4
+	add.w	d4,d4
+	lea	(a0,d4.w),a5		; pb = a + 2n: predecrement reads a[n-1] = a[i - jstart] first
+.q2p:
+	move.w	(a4)+,d4
+	mulu.w	-(a5),d4
+	add.l	d4,d6
+	addx.w	d5,d7
+	dbf	d1,.q2p
+.q2_pairs_done:
+	add.l	d6,d6
+	addx.w	d7,d7
+	btst	#0,d0
+	bne.s	.q2_nomid
+	move.w	d0,d4
+	lsr.w	#1,d4
+	add.w	d4,d4
+	move.w	(a0,d4.w),d4
+	mulu.w	d4,d4
+	add.l	d4,d6
+	addx.w	d5,d7
+.q2_nomid:
+	move.w	(sp)+,d4
+	move.l	(sp)+,d1
+	add.l	d1,d6
+	addx.w	d5,d7
+	add.w	d4,d7
+	; m*n: pm = m + 2*jstart, pn = n + 2n, count = 2n-1-i
+	move.w	d0,d1
+	sub.w	d2,d1
+	addq.w	#1,d1
+	add.w	d1,d1
+	lea	(a6,d1.w),a4
+	move.l	4(sp),a5
+	move.w	d2,d1
+	add.w	d2,d1
+	sub.w	d0,d1
+	subq.w	#2,d1
+.q2m:
+	move.w	(a4)+,d4
+	mulu.w	-(a5),d4
+	add.l	d4,d6
+	addx.w	d5,d7
+	dbf	d1,.q2m
+	move.w	d0,d1
+	sub.w	d2,d1
+	add.w	d1,d1
+	move.w	d6,(a3,d1.w)		; r[i-n]
+	clr.w	d6
+	swap	d6
+	swap	d7
+	or.l	d7,d6
+	moveq	#0,d7
+	addq.w	#1,d0
+	move.w	d2,d1
+	add.w	d2,d1
+	subq.w	#1,d1
+	cmp.w	d1,d0
+	blt	.q2
+	addq.w	#8,sp			; scratch + saved n end
+	move.w	d2,d1
+	subq.w	#1,d1
+	add.w	d1,d1
+	move.w	d6,(a3,d1.w)
+	clr.w	d6
+	swap	d6
+	move.l	d6,d0
+	lea	512(sp),sp
+	movem.l	(sp)+,d2-d7/a2-a6
+	rts

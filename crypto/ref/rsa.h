@@ -36,6 +36,8 @@ void rsa_mont_mul_c(const rsa_pub *k, const uint16_t *a, const uint16_t *b, uint
 #include "x25519.h"
 int rsa_mont_mul_asm(FE16_REG("a0") const uint16_t *a, FE16_REG("a1") const uint16_t *b, FE16_REG("a2") const uint16_t *n,
                      FE16_REG("a3") uint16_t *r, FE16_REG("d0") int limbs, FE16_REG("d1") int n0inv);
+int rsa_mont_sqr_asm(FE16_REG("a0") const uint16_t *a, FE16_REG("a2") const uint16_t *n,
+                     FE16_REG("a3") uint16_t *r, FE16_REG("d0") int limbs, FE16_REG("d1") int n0inv);
 #endif
 
 #endif

@@ -540,6 +540,21 @@ int main(void)
                 for (i = 0; i < 128; i++) if (r1[i] != r2[i]) bad = 1;
             }
             out(bad ? "FAIL " : "PASS "); out("rsa_mont_mul asm == C on 20 operand pairs\n"); ok &= !bad;
+            bad = 0;
+            for (t = 0; t < 20 && !bad; t++) {
+                for (i = 0; i < 128; i++) ra[i] = rnd16();
+                ra[127] &= 0x7fff;
+                if (t == 0) for (i = 0; i < 128; i++) ra[i] = 0xffff;
+                if (t == 0) ra[127] = 0x7fff;
+                rsa_mont_mul_c(&rk, ra, ra, r1);
+                rsa_mont_mul(&rk, ra, ra, r2);          /* a == b -> squaring path */
+                for (i = 0; i < 128; i++) if (r1[i] != r2[i]) bad = 1;
+            }
+            out(bad ? "FAIL " : "PASS "); out("rsa_mont_sqr asm == C on 20 operands\n"); ok &= !bad;
+            t0 = ticks_now();
+            for (t = 0; t < 5; t++) rsa_mont_mul(&rk, ra, ra, r2);
+            t1 = ticks_now();
+            report("rsa_mont_sqr 2048-bit (asm)", t1 - t0, 5);
             t0 = ticks_now();
             for (t = 0; t < 5; t++) rsa_mont_mul(&rk, ra, rb, r2);
             t1 = ticks_now();

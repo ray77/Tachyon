@@ -143,7 +143,7 @@ build/amiga/blitaes.s: bench/amiga/blit_unity.c crypto/blit/blitaes.c crypto/bli
 	@mkdir -p build/amiga
 	$(VC) $(VCFLAGS) -Icrypto/blit bench/amiga/blit_unity.c -o=$@
 
-build/amiga/blitaes: bench/amiga/startup_blit.s build/amiga/blitaes.s crypto/m68k/fe16.s crypto/m68k/aes.s
+build/amiga/blitaes: bench/amiga/startup_blit.s build/amiga/blitaes.s crypto/m68k/fe16.s crypto/m68k/aes.s crypto/m68k/blitexec.s
 	$(VASM) $(VASMFLAGS) -o $@ bench/amiga/startup_blit.s
 
 run-blitaes: build/amiga/blitaes

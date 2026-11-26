@@ -19,7 +19,32 @@ Nebenläufigkeit: `fe16_mul` (Fast RAM) 3,40 ms bei stehendem Blitter, **3,52 ms
 
 Korrektheit: Blitter-Ergebnis gegen CPU-Ergebnis bitidentisch (PASS).
 
-## 2. Hypothese „bit-sliced AES auf dem Blitter“ – Rechnung mit den Messwerten
+## 2. Hypothese „bit-sliced AES auf dem Blitter“ – umgesetzt und gemessen (Nacht 26./27.11.)
+
+**Ergebnis: funktioniert, bitgenau, 4,4 KB/s auf dem Blitter allein – 62 % der CPU-T-Tabellen (7,06 KB/s), aber zusätzlich und parallel.** Erste Rechnung weiter unten zum Vergleich.
+
+Konstruktion (`tools/blitaes/gen_blitaes.py`, `crypto/blit/`, `bench/blitaes_bench.c`, `make run-blitaes`):
+* 1024 Blöcke (16 KiB) je Batch. Die Daten liegen als 16 „Zeilen“ k à 1 KiB (Blöcke 64k..64k+63) im Chip-RAM. **Der Blitter transponiert selbst**: vier Stufen Bitmatrix-Transposition (16×16 je Block-Chunk), je Stufe 16 Blits à 512 Wörter: aufsteigend mit Barrel-Shift rechts und Maske über den C-Kanal (Minterm C?B:A), absteigend (DESC) für die Linksverschiebung (Minterm C?A:B). Danach ist Zeile k, Chunk q das Lane-Wort für Bit 15−k des Chunks über 16 Blöcke – genau das Layout, das die Runden brauchen. 80 ms hinein, 60 ms heraus (gegen 1,9 + 2,5 s in C auf der CPU).
+* SubBytes: Boyar–Peralta-Schaltung mit 113 Gattern (NIST-SLP, exhaustiv geprüft, U0/S0 = MSB) → 226 Blits à 512 zusammenhängende Wörter je Runde (XOR 0x3C, AND 0xC0, XNOR 0xC3), 29 Temporärpuffer durch Lebensdaueranalyse. 180 ms je Runde.
+* ShiftRows kostenlos (Spaltenrotation in den MixColumns-Quelladressen). MixColumns + AddRoundKey spaltenweise: je Lane (Bit, Zeile, Spalte) 5–7 Quell-Lanes als Ketten von 3-Quellen-XOR-Blits (64 Ein-Wort-Zeilen, Modulo 14), der Rundenschlüssel als ein Wort je Lane über den C-Kanal mit Modulo −2 (liest dasselbe Wort 64-mal). 432 Blits je Runde, 82 ms. Schlussrunde 128 Blits, 20 ms. Whitening als ein Blit (Schlüsselmuster über B-Modulo −128).
+* Verifikation: Software-Blitter-Modell auf dem Host (Shifts, DESC, Modulos, Minterme) → AES-128/256 gegen die Byte-Referenz, dann identisches Programm auf dem echten Blitter (FS-UAE): 1024 Blöcke bitgenau, erster Hardware-Lauf.
+
+| Phase (16 KiB, AES-256, Display an) | Zeit |
+|---|---:|
+| Schlüssel-Lanes + Masken (CPU) | 140 ms |
+| Kopie hinein (CPU, C) | 140 ms |
+| Whitening + Transposition (65 Blits) | 80 ms |
+| 14 × SubBytes (226 Blits à 512 Wörter) | 14 × 180 ms |
+| 13 × MixColumns+Key (432 Blits à 64 Wörter) | 13 × 82 ms |
+| Schlussrunde (128 Blits) | 20 ms |
+| Transposition heraus (64 Blits) | 60 ms |
+| **Blitter gesamt** | **3,76 s = 4,36 KB/s** |
+| Kopie heraus (CPU, C) | 160 ms |
+| CPU-T-Tabellen zum Vergleich (1024 Blöcke) | 2,32 s = 7,06 KB/s |
+
+Einordnung: Mit C-Setup kostet jeder Blit ≈ 900 Takte Overhead (bei 1024 Blits je Runde ≈ 0,9 M Takte = 130 ms je Runde – fast die Hälfte der MixColumns-Zeit); ein Assembler-Executor (≈ 250 Takte) ist der nächste Schritt, danach Copper-Steuerung (0 % CPU) und Display-DMA-Abschaltung (+40 % Blitter-Durchsatz). CPU und Blitter zusammen: ≈ 11 KB/s AES-256 für Medien statt 7. Nicht umsonst: ≈ 100 KiB Chip-RAM, zwei AES-Implementierungen.
+
+## 2a. Erste Rechnung (vor der Umsetzung)
 
 Anordnung: ein 16-Bit-Wort trägt dasselbe Bit derselben Bytes aus 16 Blöcken; eine S-Box-Gatteroperation über alle 16 Bytepositionen ist ein Blit über 16 Wörter je 16 Blöcke. Für 1024 Blöcke (16 KiB) also 1024-Wort-Blits à 2,06 ms (1,40 ms ohne Display). Boyar-Peralta-S-Box: 113 Gatter; MixColumns + AddRoundKey mit 3-Quellen-XOR ≈ 256 Blits; ShiftRows kostenlos (Adress-Umbenennung).
 

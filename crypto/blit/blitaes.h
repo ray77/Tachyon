@@ -1,8 +1,9 @@
 /*
  * WhatsA500 - bit-sliced AES on the Blitter (research track, docs/CUSTOM-CHIPS.md).
- * The Blitter program comes from tools/blitaes/gen_blitaes.py; this file holds
- * the CPU side (lane packing, round keys, execution) with a software model of
- * the Blitter so the whole construction is testable on the host.
+ * Program from tools/blitaes/gen_blitaes.py (v2: the Blitter also transposes the
+ * data into lanes, so the CPU only copies 16 KiB in and out). This file holds the
+ * CPU side (constants, round keys) and a software model of the Blitter so the whole
+ * construction is testable on the host.
  */
 #ifndef WHATSA500_BLITAES_H
 #define WHATSA500_BLITAES_H
@@ -10,16 +11,13 @@
 #include "aes.h"
 #include "blitaes_prog.h"
 
-#define BA_BLOCKS (16 * BA_L)            /* blocks per batch */
+#define BA_BLOCKS (16 * BA_L)            /* 1024 blocks = 16 KiB per batch */
 
-/* round key lanes: 15 x 128 words, lane (b,r,c) of round k is 0xFFFF if bit b of rk[16k+4c+r] is set */
-void ba_keys(const aes_key *k, uint16_t *keys);
-/* pack BA_BLOCKS plaintext blocks (XORed with the whitening key rk[0]) into the STATE lanes */
-void ba_pack(const aes_key *k, const uint8_t *in, uint16_t *state);
-void ba_unpack(const uint16_t *state, uint8_t *out);
-/* run one program section with the software Blitter model (arena = base of the Chip RAM layout) */
+/* fills KEYS (15 x 128 lane words), KEYPAT (key repeated 8x) and MASKS in the arena */
+void ba_setup(const aes_key *k, uint8_t *arena);
+/* software Blitter: runs n entries of p; round selects the key lanes */
 void ba_exec_soft(uint8_t *arena, const ba_blit *p, int n, int round);
-/* full encryption of BA_BLOCKS blocks through the software model */
+/* full encryption of BA_BLOCKS blocks through the software model; in/out may alias */
 void ba_encrypt_soft(const aes_key *k, uint8_t *arena, const uint8_t *in, uint8_t *out);
 
 #endif

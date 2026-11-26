@@ -56,7 +56,8 @@ void rsa_mont_mul_c(const rsa_pub *k, const uint16_t *a, const uint16_t *b, uint
 void rsa_mont_mul(const rsa_pub *k, const uint16_t *a, const uint16_t *b, uint16_t *r)
 {
 #ifdef FE16_ASM
-    int top = rsa_mont_mul_asm(a, b, k->n, r, k->limbs, k->n0inv);
+    int top = (a == b) ? rsa_mont_sqr_asm(a, k->n, r, k->limbs, k->n0inv)
+                       : rsa_mont_mul_asm(a, b, k->n, r, k->limbs, k->n0inv);
     if (top || bn_cmp(r, k->n, k->limbs) >= 0) bn_sub(r, r, k->n, k->limbs);
 #else
     rsa_mont_mul_c(k, a, b, r);

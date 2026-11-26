@@ -46,6 +46,7 @@ __divu:
 	include	"crypto/m68k/fe16.s"
 	
 	include	"crypto/m68k/aes.s"
+	include	"crypto/m68k/blitexec.s"
 	
 
 ; --- generated C modules -------------------------------------------------
