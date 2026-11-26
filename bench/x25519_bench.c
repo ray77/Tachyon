@@ -26,6 +26,8 @@
 #include "noise_vector.h"
 #include "rsa.h"
 #include "rsa_vector.h"
+#include "x509.h"
+#include "../tests/certs/wa_rsa_chain.h"
 
 
 struct ExecBase *SysBase;
@@ -553,6 +555,17 @@ int main(void)
         report("rsa-2048 public op (17 mont_mul + 2 conversions)", t1 - t0, 1);
         r = rsa_verify_pkcs1_sha256(&rk, rv_msg, RV_MSG_LEN, rv_sig, 256) == RV_VALID;
         out(r ? "PASS " : "FAIL "); out("rsa-2048 PKCS#1 v1.5 SHA-256 verify == Go\n"); ok &= r;
+    }
+
+    {   /* live web.whatsapp.com RSA chain: parse + verify leaf->intermediate->pinned G2 key (2 RSA-2048 ops) */
+        static x509_cert xc[3];
+        int r;
+        t0 = ticks_now();
+        r = x509_parse(&xc[0], wa_cert0, sizeof wa_cert0) & x509_parse(&xc[1], wa_cert1, sizeof wa_cert1) & x509_parse(&xc[2], wa_cert2, sizeof wa_cert2);
+        r &= x509_verify_chain(xc, 2, xc[2].n, xc[2].n_len, xc[2].e, "web.whatsapp.com", "20261126000000Z");
+        t1 = ticks_now();
+        out(r ? "PASS " : "FAIL "); out("x509 chain web.whatsapp.com (RSA-2048 x2) verifies\n"); ok &= r;
+        report("x509 parse + chain verify (2 RSA-2048 PKCS#1 verifies)", t1 - t0, 1);
     }
 
     blitter_bench();
