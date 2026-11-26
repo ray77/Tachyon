@@ -75,9 +75,18 @@ int rsa_pub_set(rsa_pub *k, const uint8_t *n_be, uint32_t len, uint32_t e)
     n0 = k->n[0]; inv = 1;
     for (i = 0; i < 5; i++) inv = (inv * (2 - n0 * inv)) & 0xffff;
     k->n0inv = (uint16_t)((0x10000 - inv) & 0xffff);
-    /* rr = R^2 mod n: start from R mod n = 2^(16*limbs) - n (n has its top bit set), then double 16*limbs times */
-    { uint16_t zero[RSA_MAX_LIMBS]; for (i = 0; i < limbs; i++) zero[i] = 0; bn_sub(k->rr, zero, k->n, limbs); }
-    for (i = 0; i < 16 * limbs; i++) bn_dbl_mod(k->rr, k->n, limbs);
+    /* rr = R^2 mod n. R mod n = 2^(16*limbs) - n (n has its top bit set). Doubling 16*limbs times is
+     * ~7 s on the 68000 in C; instead: x = R*2^k mod n by k doublings with 2^k * 2^k... = R^2 needs
+     * R * 2^(16*limbs): take x = R * 2^(16*limbs / 2^s) and square s times with mont_mul (a*b/R):
+     * mont_mul(R*2^j, R*2^j) = R*2^(2j). With j = 16*limbs/32 and s = 5: R * 2^(16*limbs) = R^2 mod n. */
+    {
+        uint16_t zero[RSA_MAX_LIMBS];
+        int j = (16 * limbs) >> 5, s_;
+        for (i = 0; i < limbs; i++) zero[i] = 0;
+        bn_sub(k->rr, zero, k->n, limbs);                      /* R mod n */
+        for (i = 0; i < j; i++) bn_dbl_mod(k->rr, k->n, limbs);  /* R * 2^j */
+        for (s_ = 0; s_ < 5; s_++) rsa_mont_mul(k, k->rr, k->rr, k->rr);
+    }
     return 1;
 }
 
