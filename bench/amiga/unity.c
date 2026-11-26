@@ -10,4 +10,5 @@
 #include "../../crypto/ref/aes.c"
 #include "../../crypto/ref/drbg.c"
 #include "../../crypto/ref/noise.c"
+#include "../../crypto/ref/rsa.c"
 #include "../x25519_bench.c"

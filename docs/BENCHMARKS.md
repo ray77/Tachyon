@@ -196,3 +196,7 @@ Einordnung:
 * Noise-Transport: ein typischer Frame (≤ 1 KiB) kostet jetzt ≈ 0,2 s; Medien (MB) bleiben mit ≈ 5 KB/s ein Problem → Kandidat für Blitter-Bitslicing (siehe nächster Schritt) oder Akzeptanz (1 MB ≈ 3 min).
 
 Fehler auf dem Weg (dokumentiert in docs/TOOLCHAIN.md): vbcc-Fehlkompilierung von `int8_t`-Byte-Casts in `comb_select` (nur auf dem Ziel sichtbar, Host korrekt); S-Box-Generator mit Shifts statt Rotationen; GHASH-16-Bit-Shift mit vertauschter `move.w`/`swap`-Reihenfolge. Alle drei durch die asm-gegen-C-Vergleiche im Harness gefunden, zwei davon in Sekunden mit `make vamos`.
+
+## 2026-11-26 – Schritt 9: Blitter vs CPU (Custom-Chip-Hypothese)
+
+Details und Bewertung in docs/CUSTOM-CHIPS.md. Kurz: 3-Quellen-XOR über 2 KiB CPU 6,70 ms, Blitter 2,06 ms (1,40 ms ohne Bitplane-DMA); Fixkosten ≈ 900 Takte je Blit; CPU in Fast RAM verliert bei laufendem Blitter 3,5 %, mit BLITHOG wird sie blockiert. Bit-sliced AES auf dem Blitter rechnet sich zu 1,5–2,2 KB/s gegen 5,45 KB/s auf der CPU → nicht umgesetzt. Blitter bleibt für WebSocket-Maskierung, Keystream-XOR und die Anzeige vorgesehen.

@@ -19,7 +19,7 @@ VASMFLAGS := -quiet -Fhunkexe -kick1hunks -nowarn=62 -m68000
 
 HOST_CFLAGS := -O2 -Wall -Wextra -std=c99 -Icrypto/ref
 
-CRYPTO_SRC := crypto/ref/x25519_ref.c crypto/ref/sha512.c crypto/ref/ed25519.c crypto/ref/sha256.c crypto/ref/aes.c crypto/ref/drbg.c crypto/ref/noise.c
+CRYPTO_SRC := crypto/ref/x25519_ref.c crypto/ref/sha512.c crypto/ref/ed25519.c crypto/ref/sha256.c crypto/ref/aes.c crypto/ref/drbg.c crypto/ref/noise.c crypto/ref/rsa.c
 BENCH_SRC  := bench/x25519_bench.c
 # no linker available on macOS: one unity translation unit -> one .s -> vasm -Fhunkexe
 UNITY_SRC  := bench/amiga/unity.c
@@ -46,6 +46,10 @@ build/noise_test: tests/noise_test.c $(CRYPTO_SRC) crypto/ref/noise.h
 	@mkdir -p build
 	$(HOSTCC) $(HOST_CFLAGS) tests/noise_test.c $(CRYPTO_SRC) -o $@
 
+build/rsa_test: tests/rsa_test.c crypto/ref/rsa.c crypto/ref/rsa.h crypto/ref/sha256.c
+	@mkdir -p build
+	$(HOSTCC) $(HOST_CFLAGS) tests/rsa_test.c crypto/ref/rsa.c crypto/ref/sha256.c -o $@
+
 build/drbg_test: tests/drbg_test.c crypto/ref/drbg.c crypto/ref/drbg.h crypto/ref/sha256.c
 	@mkdir -p build
 	$(HOSTCC) $(HOST_CFLAGS) tests/drbg_test.c crypto/ref/drbg.c crypto/ref/sha256.c -o $@
@@ -54,13 +58,14 @@ build/aes_test: tests/aes_test.c crypto/ref/aes.c crypto/ref/aes.h
 	@mkdir -p build
 	$(HOSTCC) $(HOST_CFLAGS) tests/aes_test.c crypto/ref/aes.c -o $@
 
-host-test: build/x25519_test build/ed25519_test build/sha256_test build/aes_test build/drbg_test build/noise_test
+host-test: build/x25519_test build/ed25519_test build/sha256_test build/aes_test build/drbg_test build/noise_test build/rsa_test
 	./build/x25519_test tests/vectors/x25519_random.txt
 	./build/ed25519_test tests/vectors
 	./build/sha256_test
 	./build/aes_test tests/vectors/aesgcm_random.txt
 	./build/drbg_test tests/vectors/hmac_drbg.txt
 	./build/noise_test tests/vectors/noise_random.txt
+	./build/rsa_test tests/vectors/rsa_random.txt
 
 vectors:
 	go run ./tools/genvectors -mode x25519 -n 256 > tests/vectors/x25519_random.txt

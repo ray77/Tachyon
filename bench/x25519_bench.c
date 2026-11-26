@@ -24,6 +24,8 @@
 #include "xeddsa_vector.h"
 #include "noise.h"
 #include "noise_vector.h"
+#include "rsa.h"
+#include "rsa_vector.h"
 
 
 struct ExecBase *SysBase;
@@ -510,6 +512,24 @@ int main(void)
         r = 1; for (i = 0; i < NV_FRAMECT_LEN && i < (int)sizeof cplct_out; i++) if (cplct_out[i] != nv_framect[i]) r = 0;
         out(r ? "PASS " : "FAIL "); out("noise transport frame 0 == whatsmeow vector\n"); ok &= r;
         out("transport frame "); out_dec(NV_FRAME_LEN); report(" bytes", t1 - t0, 1);
+    }
+
+    {   /* RSA-2048 public operations (TLS fallback path), C reference */
+        static rsa_pub rk;
+        static uint8_t got[256];
+        int r;
+        t0 = ticks_now();
+        r = rsa_pub_set(&rk, rv_n, 256, RV_E);
+        t1 = ticks_now();
+        report("rsa_pub_set (n0inv, R^2 mod n)", t1 - t0, 1);
+        t0 = ticks_now();
+        r &= rsa_public_op(&rk, rv_x, got);
+        t1 = ticks_now();
+        for (i = 0; i < 256; i++) if (got[i] != rv_xe[i]) r = 0;
+        out(r ? "PASS " : "FAIL "); out("rsa-2048 x^65537 mod n == Go\n"); ok &= r;
+        report("rsa-2048 public op (17 mont_mul + 2 conversions)", t1 - t0, 1);
+        r = rsa_verify_pkcs1_sha256(&rk, rv_msg, RV_MSG_LEN, rv_sig, 256) == RV_VALID;
+        out(r ? "PASS " : "FAIL "); out("rsa-2048 PKCS#1 v1.5 SHA-256 verify == Go\n"); ok &= r;
     }
 
     blitter_bench();

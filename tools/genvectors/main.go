@@ -138,6 +138,8 @@ func main() {
 		}
 	case "noise":
 		noiseVectors(*n)
+	case "rsa":
+		rsaVectors(*n)
 	case "sha512":
 		for i := 0; i < *n; i++ {
 			msg := randBytes(i * 13)
