@@ -32,5 +32,10 @@ int  rsa_encrypt_pkcs1(const rsa_pub *k, const uint8_t *msg, uint32_t msglen, co
 /* Montgomery product r = a*b*R^-1 mod n (exposed for the assembler comparison) */
 void rsa_mont_mul(const rsa_pub *k, const uint16_t *a, const uint16_t *b, uint16_t *r);
 void rsa_mont_mul_c(const rsa_pub *k, const uint16_t *a, const uint16_t *b, uint16_t *r);
+#ifdef FE16_ASM
+#include "x25519.h"
+int rsa_mont_mul_asm(FE16_REG("a0") const uint16_t *a, FE16_REG("a1") const uint16_t *b, FE16_REG("a2") const uint16_t *n,
+                     FE16_REG("a3") uint16_t *r, FE16_REG("d0") int limbs, FE16_REG("d1") int n0inv);
+#endif
 
 #endif

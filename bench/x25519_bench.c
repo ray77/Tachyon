@@ -522,6 +522,29 @@ int main(void)
         r = rsa_pub_set(&rk, rv_n, 256, RV_E);
         t1 = ticks_now();
         report("rsa_pub_set (n0inv, R^2 mod n)", t1 - t0, 1);
+        {   /* asm vs C Montgomery product on random operands < n */
+            static uint16_t ra[128], rb[128], r1[128], r2[128];
+            int t, bad = 0;
+            for (t = 0; t < 20 && !bad; t++) {
+                for (i = 0; i < 128; i++) { ra[i] = rnd16(); rb[i] = rnd16(); }
+                ra[127] &= 0x7fff; rb[127] &= 0x7fff;     /* below n (n has the top bit set) */
+                if (t == 0) for (i = 0; i < 128; i++) { ra[i] = 0xffff; rb[i] = rk.n[i]; } /* edge: a = R-1, b = n -> 0 */
+                if (t == 1) for (i = 0; i < 128; i++) { ra[i] = rk.n[i]; rb[i] = rk.n[i]; }
+                if (t <= 1) { ra[127] &= 0x7fff; rb[127] &= 0x7fff; }
+                rsa_mont_mul_c(&rk, ra, rb, r1);
+                rsa_mont_mul(&rk, ra, rb, r2);
+                for (i = 0; i < 128; i++) if (r1[i] != r2[i]) bad = 1;
+            }
+            out(bad ? "FAIL " : "PASS "); out("rsa_mont_mul asm == C on 20 operand pairs\n"); ok &= !bad;
+            t0 = ticks_now();
+            for (t = 0; t < 5; t++) rsa_mont_mul(&rk, ra, rb, r2);
+            t1 = ticks_now();
+            report("rsa_mont_mul 2048-bit (asm)", t1 - t0, 5);
+            t0 = ticks_now();
+            rsa_mont_mul_c(&rk, ra, rb, r1);
+            t1 = ticks_now();
+            report("rsa_mont_mul 2048-bit (C)", t1 - t0, 1);
+        }
         t0 = ticks_now();
         r &= rsa_public_op(&rk, rv_x, got);
         t1 = ticks_now();

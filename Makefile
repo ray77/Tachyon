@@ -92,7 +92,7 @@ crypto/m68k/sha256.s: tools/gen_sha256_asm.py
 crypto/m68k/aes.s: tools/gen_aes_asm.py
 	python3 $< > $@
 
-build/amiga/x25519bench: bench/amiga/startup.s $(AMIGA_ASM) crypto/m68k/fe16.s crypto/m68k/sha256.s crypto/m68k/aes.s
+build/amiga/x25519bench: bench/amiga/startup.s $(AMIGA_ASM) crypto/m68k/fe16.s crypto/m68k/sha256.s crypto/m68k/aes.s crypto/m68k/mont.s
 	$(VASM) $(VASMFLAGS) -o $@ $<
 
 amiga: build/amiga/x25519bench

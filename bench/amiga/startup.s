@@ -46,6 +46,7 @@ __divu:
 	include	"crypto/m68k/fe16.s"
 	include	"crypto/m68k/sha256.s"
 	include	"crypto/m68k/aes.s"
+	include	"crypto/m68k/mont.s"
 
 ; --- generated C modules -------------------------------------------------
 	include	"build/amiga/x25519bench.s"
