@@ -86,10 +86,9 @@ static int parse_extensions(x509_cert *c, der *exts)
     if (!der_expect(exts, 0x30, &seq)) return 0;
     while (seq.len) {
         der ext, oid, val; uint8_t t;
-        int critical = 0;
         if (!der_expect(&seq, 0x30, &ext)) return 0;
         if (!der_expect(&ext, 0x06, &oid)) return 0;
-        if (ext.len && ext.p[0] == 0x01) { der b; if (!der_expect(&ext, 0x01, &b) || b.len != 1) return 0; critical = b.p[0] != 0; }
+        if (ext.len && ext.p[0] == 0x01) { der b; if (!der_expect(&ext, 0x01, &b) || b.len != 1) return 0; }   /* critical flag: tolerated, see below */
         if (!der_expect(&ext, 0x04, &val)) return 0;
         if (oid.len == 3 && mem_eq(oid.p, OID_SAN, 3)) {
             der names;
@@ -100,7 +99,7 @@ static int parse_extensions(x509_cert *c, der *exts)
             if (!der_expect(&val, 0x30, &bc)) return 0;
             if (bc.len && bc.p[0] == 0x01) { if (!der_tlv(&bc, &t, &flag) || flag.len != 1) return 0; c->is_ca = flag.p[0] != 0; }
         }
-        (void)critical;     /* unknown critical extensions are tolerated: we only use the chain for key transport */
+        /* unknown critical extensions are tolerated: the chain is only used for RSA key transport */
     }
     return 1;
 }

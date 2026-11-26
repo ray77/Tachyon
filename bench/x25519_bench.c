@@ -28,6 +28,8 @@
 #include "rsa_vector.h"
 #include "x509.h"
 #include "../tests/certs/wa_rsa_chain.h"
+#include "tls12.h"
+#include "tls_vector.h"
 
 
 struct ExecBase *SysBase;
@@ -566,6 +568,23 @@ int main(void)
         t1 = ticks_now();
         out(r ? "PASS " : "FAIL "); out("x509 chain web.whatsapp.com (RSA-2048 x2) verifies\n"); ok &= r;
         report("x509 parse + chain verify (2 RSA-2048 PKCS#1 verifies)", t1 - t0, 1);
+    }
+
+    {   /* TLS 1.2 RSA client handshake replayed against a recorded Go server session (deterministic DRBG seed):
+         * ClientHello, certificate verify, RSA premaster encryption, PRF, AES-128-GCM Finished exchange. */
+        static tls12 tl; static x509_cert sc; static hmac_drbg rng;
+        int r;
+        r = x509_parse(&sc, tv_cert, sizeof tv_cert);
+        rng.instantiated = 0; drbg_instantiate(&rng, tv_seed, 64);
+        t0 = ticks_now();
+        r &= tls12_client_start(&tl, "tls-test.localhost", sc.n, sc.n_len, sc.e, 0, &rng);
+        tl.out_len = 0;
+        r &= tls12_input(&tl, tv_server, sizeof tv_server);
+        t1 = ticks_now();
+        r &= tl.state == TLS_ST_CONNECTED;
+        out(r ? "PASS " : "FAIL "); out("tls 1.2 RSA client handshake replay reaches CONNECTED\n"); ok &= r;
+        if (!r) { out("  state "); out_dec((ULONG)tl.state); out(" error "); out(tls12_errstr(tl.error)); out("\n"); }
+        report("tls 1.2 client handshake (1 cert verify + RSA encrypt + PRF + GCM)", t1 - t0, 1);
     }
 
     blitter_bench();

@@ -19,13 +19,13 @@ VASMFLAGS := -quiet -Fhunkexe -kick1hunks -nowarn=62 -m68000
 
 HOST_CFLAGS := -O2 -Wall -Wextra -std=c99 -Icrypto/ref
 
-CRYPTO_SRC := crypto/ref/x25519_ref.c crypto/ref/sha512.c crypto/ref/ed25519.c crypto/ref/sha256.c crypto/ref/aes.c crypto/ref/drbg.c crypto/ref/noise.c crypto/ref/rsa.c crypto/ref/x509.c
+CRYPTO_SRC := crypto/ref/x25519_ref.c crypto/ref/sha512.c crypto/ref/ed25519.c crypto/ref/sha256.c crypto/ref/aes.c crypto/ref/drbg.c crypto/ref/noise.c crypto/ref/rsa.c crypto/ref/x509.c crypto/ref/tls12.c
 BENCH_SRC  := bench/x25519_bench.c
 # no linker available on macOS: one unity translation unit -> one .s -> vasm -Fhunkexe
 UNITY_SRC  := bench/amiga/unity.c
 AMIGA_ASM  := build/amiga/x25519bench.s
 
-.PHONY: all host-test amiga run vamos vectors clean
+.PHONY: all host-test amiga run vamos vectors clean tls-test
 
 all: host-test amiga
 
@@ -53,6 +53,17 @@ build/rsa_test: tests/rsa_test.c crypto/ref/rsa.c crypto/ref/rsa.h crypto/ref/sh
 build/x509_test: tests/x509_test.c crypto/ref/x509.c crypto/ref/x509.h crypto/ref/rsa.c crypto/ref/sha256.c tests/certs/wa_rsa_chain.h
 	@mkdir -p build
 	$(HOSTCC) $(HOST_CFLAGS) tests/x509_test.c crypto/ref/x509.c crypto/ref/rsa.c crypto/ref/sha256.c -o $@
+
+build/tls_test: tests/tls_test.c $(CRYPTO_SRC) crypto/ref/tls12.h
+	@mkdir -p build
+	$(HOSTCC) $(HOST_CFLAGS) tests/tls_test.c $(CRYPTO_SRC) -o $@
+
+# TLS 1.2 RSA client against a loopback Go server (tools/tlsserver), one connection
+tls-test: build/tls_test
+	@mkdir -p build
+	go run ./tools/tlsserver -listen 127.0.0.1:4433 -cert build/tls_test_cert.der -n 1 > build/tlsserver.log 2>&1 & \
+	for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do grep -q READY build/tlsserver.log 2>/dev/null && break; sleep 0.5; done; \
+	./build/tls_test build/tls_test_cert.der 4433 tests/vectors/tls_session.bin; r=$$?; sleep 0.5; cat build/tlsserver.log; exit $$r
 
 build/drbg_test: tests/drbg_test.c crypto/ref/drbg.c crypto/ref/drbg.h crypto/ref/sha256.c
 	@mkdir -p build
