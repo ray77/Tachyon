@@ -1,0 +1,8 @@
+*.o
+*.exe
+*.hunk
+build/
+*.dSYM/
+.DS_Store
+host-build/
+bench/smoke/hello
