@@ -4,4 +4,6 @@
  * assembler file with unique local labels.
  */
 #include "../../crypto/ref/x25519_ref.c"
+#include "../../crypto/ref/sha512.c"
+#include "../../crypto/ref/ed25519.c"
 #include "../x25519_bench.c"

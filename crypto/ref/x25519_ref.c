@@ -83,22 +83,23 @@ void fe16_add_c(fe16 h, const fe16 f, const fe16 g)
 }
 
 /* h = f - g + 4p  (4p = 2^257 - 76, so the sum is always positive and < 2^259),
- * then folded back below 2^256. */
+ * then folded back below 2^256. The subtraction runs first so that h may alias
+ * f or g (all fe16 operations are alias-safe for every argument combination). */
 void fe16_sub_c(fe16 h, const fe16 f, const fe16 g)
 {
     uint32_t c = 0, b = 0, hi;
     int i;
-    /* f + (2^256 - 76): limb 0 adds 0xFFB4, limbs 1..15 add 0xFFFF */
+    /* f - g with borrow chain */
     for (i = 0; i < 16; i++) {
-        c += (uint32_t)f[i] + (i == 0 ? 0xFFB4u : 0xFFFFu);
-        h[i] = (uint16_t)c;
-        c >>= 16;
-    }
-    /* - g */
-    for (i = 0; i < 16; i++) {
-        uint32_t d = (uint32_t)h[i] - g[i] - b;
+        uint32_t d = (uint32_t)f[i] - g[i] - b;
         h[i] = (uint16_t)d;
         b = d >> 31;
+    }
+    /* + (2^256 - 76): limb 0 adds 0xFFB4, limbs 1..15 add 0xFFFF */
+    for (i = 0; i < 16; i++) {
+        c += (uint32_t)h[i] + (i == 0 ? 0xFFB4u : 0xFFFFu);
+        h[i] = (uint16_t)c;
+        c >>= 16;
     }
     hi = c + 1 - b;             /* multiples of 2^256 still to fold in: 0, 1 or 2 */
     hi = fe16_fold(h, hi);

@@ -105,3 +105,29 @@ Konsequenz für den Verbindungsaufbau: Schlüsselpaare (Basispunkt-Multiplikatio
 Korrektheit: beide Varianten limb-für-limb gleich der C-Version auf 1000 Inputs, RFC 7748 bestanden. Karatsuba ist jetzt Standard. Zweite Ebene (4-Limb-Blöcke) lohnt nicht: 144 Produkte sparen weitere 48 × 80 ≈ 3,8 k, der Verwaltungsaufwand verdoppelt sich aber auf ≈ 5 k.
 
 Aufschlüsselung der 8,28 s: Mul 1300 × 3,47 = 4,51 s; Sqr 1270 × 2,38 = 3,02 s; Add/Sub/Mul121665 0,58 s; Ladder in C ≈ 0,16 s.
+
+## 2026-11-26 – Schritt 5: SHA-512, Ed25519- und XEdDSA-Verifikation (Baseline, C auf asm-Feldarithmetik)
+
+Neu: `crypto/ref/sha512.c` (32-Bit-Wortpaare, kein 64-Bit-Runtime), `crypto/ref/ed25519.c` (erweiterte Edwards-Koordinaten, ref10-Formeln: Addition 9M, Verdopplung 4M+4S; Dekodierung mit `pow22523`; `sc_reduce` als TweetNaCl-`modL` in int32; Shamir-Doppel-Skalarmultiplikation ohne Fenster; XEdDSA-Konvertierung wie libsignal). Alles variable Laufzeit, da nur öffentliche Daten. Host: RFC 8032 (4 Vektoren + Negativtests), 64 Go-`crypto/ed25519`-Vektoren (48 gültig/16 manipuliert), 64 libsignal-`CalculateSignature`-Vektoren (48/16), 32 SHA-512-Vektoren – alle bestanden.
+
+| Operation | Zeit/Op | Takte (≈) | Anmerkung |
+|---|---:|---:|---|
+| `ed25519_verify` (RFC 8032 TEST 3) | **14,80 s** | 105 M | 256 Verdopplungen ≈ 6,0 s, ≈ 192 Additionen ≈ 6,0 s, Dekodierung + 1 Inversion ≈ 1,3 s |
+| `xeddsa_verify` (libsignal-Vektor) | **15,70 s** | 111 M | + Montgomery→Edwards-Inversion ≈ 0,65 s, Punkt A liegt anders |
+| `sha512` (1 Block, C) | 67,4 ms | 478 k | vbcc-C mit 32-Bit-Paaren; 2–3 Blöcke pro Verifikation |
+| X25519 (Kontrolle) | 8,26 / 8,28 s | | unverändert |
+
+Korrektheit auf dem Ziel: SHA-512("abc"), RFC 8032 TEST 3, libsignal-Vektor, manipulierte Signatur abgelehnt.
+
+Noise-Handshake online heute: 3 × 8,3 + 2 × 15,7 ≈ **56 s** (mit gepinntem Zwischenzertifikat ≈ 41 s).
+
+Nebenbefund: `fe16_sub` war bei `h == g` nicht alias-sicher (C und asm schrieben h vor dem Subtrahieren). Reihenfolge getauscht (erst f − g, dann + 2^256 − 76), Ergebnisbits unverändert; alle fe16-Operationen sind jetzt für jede Alias-Kombination sicher. X25519 war nicht betroffen (kein `h == g` im Ladder-Code).
+
+### Nächste Hebel für die Verifikation (Erwartung)
+
+| Maßnahme | Ersparnis |
+|---|---:|
+| Verdopplung 3M+4S statt 4M+4S | 256 × 3,5 ms ≈ 0,9 s |
+| Festbasis-Tabelle für B (4-Bit-Fenster, 512 Niels-Punkte ≈ 48 KiB, gemischte Addition 7M) statt Shamir-Anteil | ≈ 2,5 s |
+| wNAF (w = 5) für A: 52 statt ≈ 128 Additionen | ≈ 2,3 s |
+| Ziel | ≈ 9–10 s pro Verifikation |

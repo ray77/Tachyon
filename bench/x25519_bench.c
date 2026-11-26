@@ -17,6 +17,9 @@
 #include <proto/exec.h>
 #include <proto/dos.h>
 #include "x25519.h"
+#include "sha512.h"
+#include "ed25519.h"
+#include "xeddsa_vector.h"
 
 struct ExecBase *SysBase;
 struct DosLibrary *DOSBase;
@@ -305,6 +308,44 @@ int main(void)
     for (i = 0; i < (int)n; i++) fe16_mul121665_c(c, a);
     t1 = ticks_now();
     report("fe16_mul121665_c", t1 - t0, n);
+
+    /* signatures: SHA-512, Ed25519 (RFC 8032 TEST 3), XEdDSA (libsignal vector) */
+    {
+        static const uint8_t pk3[32] = { 0xfc,0x51,0xcd,0x8e,0x62,0x18,0xa1,0xa3,0x8d,0xa4,0x7e,0xd0,0x02,0x30,0xf0,0x58,
+                                         0x08,0x16,0xed,0x13,0xba,0x33,0x03,0xac,0x5d,0xeb,0x91,0x15,0x48,0x90,0x80,0x25 };
+        static const uint8_t msg3[2] = { 0xaf, 0x82 };
+        uint8_t sig3[64] = { 0x62,0x91,0xd6,0x57,0xde,0xec,0x24,0x02,0x48,0x27,0xe6,0x9c,0x3a,0xbe,0x01,0xa3,
+                                          0x0c,0xe5,0x48,0xa2,0x84,0x74,0x3a,0x44,0x5e,0x36,0x80,0xd7,0xdb,0x5a,0xc3,0xac,
+                                          0x18,0xff,0x9b,0x53,0x8d,0x16,0xf2,0x90,0xae,0x67,0xf7,0x60,0x98,0x4d,0xc6,0x59,
+                                          0x4a,0x7c,0x15,0xe9,0x71,0x6e,0xd2,0x8d,0xc0,0x27,0xbe,0xce,0xea,0x1e,0xc4,0x0a };
+        static const uint8_t abc[3] = { 'a', 'b', 'c' };
+        static const uint8_t abc_hash0[8] = { 0xdd,0xaf,0x35,0xa1,0x93,0x61,0x7a,0xba };
+        uint8_t digest[64];
+        int r;
+        n = 200;
+        t0 = ticks_now();
+        for (i = 0; i < (int)n; i++) sha512(digest, abc, 3);
+        t1 = ticks_now();
+        r = 1; for (i = 0; i < 8; i++) if (digest[i] != abc_hash0[i]) r = 0;
+        out(r ? "PASS " : "FAIL "); out("sha512(abc)\n"); ok &= r;
+        report("sha512 (1 block, C)", t1 - t0, n);
+
+        t0 = ticks_now();
+        r = ed25519_verify(sig3, msg3, 2, pk3);
+        t1 = ticks_now();
+        out(r ? "PASS " : "FAIL "); out("ed25519_verify RFC 8032 TEST 3\n"); ok &= r;
+        report("ed25519_verify", t1 - t0, 1);
+
+        t0 = ticks_now();
+        r = xeddsa_verify(xeddsa_sig, xeddsa_msg, XEDDSA_MSG_LEN, xeddsa_pk);
+        t1 = ticks_now();
+        out(r ? "PASS " : "FAIL "); out("xeddsa_verify libsignal vector\n"); ok &= r;
+        report("xeddsa_verify", t1 - t0, 1);
+
+        sig3[0] ^= 1;
+        r = ed25519_verify(sig3, msg3, 2, pk3);
+        out(!r ? "PASS " : "FAIL "); out("ed25519_verify rejects corrupted signature\n"); ok &= !r;
+    }
 
     out(ok ? "RESULT: all vectors passed\n" : "RESULT: VECTOR MISMATCH\n");
 

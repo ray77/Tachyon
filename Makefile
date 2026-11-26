@@ -19,7 +19,7 @@ VASMFLAGS := -quiet -Fhunkexe -kick1hunks -nowarn=62 -m68000
 
 HOST_CFLAGS := -O2 -Wall -Wextra -std=c99 -Icrypto/ref
 
-CRYPTO_SRC := crypto/ref/x25519_ref.c
+CRYPTO_SRC := crypto/ref/x25519_ref.c crypto/ref/sha512.c crypto/ref/ed25519.c
 BENCH_SRC  := bench/x25519_bench.c
 # no linker available on macOS: one unity translation unit -> one .s -> vasm -Fhunkexe
 UNITY_SRC  := bench/amiga/unity.c
@@ -34,14 +34,22 @@ build/x25519_test: tests/x25519_test.c $(CRYPTO_SRC) crypto/ref/x25519.h
 	@mkdir -p build
 	$(HOSTCC) $(HOST_CFLAGS) tests/x25519_test.c $(CRYPTO_SRC) -o $@
 
-host-test: build/x25519_test
+build/ed25519_test: tests/ed25519_test.c $(CRYPTO_SRC) crypto/ref/x25519.h crypto/ref/ed25519.h crypto/ref/sha512.h
+	@mkdir -p build
+	$(HOSTCC) $(HOST_CFLAGS) tests/ed25519_test.c $(CRYPTO_SRC) -o $@
+
+host-test: build/x25519_test build/ed25519_test
 	./build/x25519_test tests/vectors/x25519_random.txt
+	./build/ed25519_test tests/vectors
 
 vectors:
-	go run ./tools/genvectors -n 256 > tests/vectors/x25519_random.txt
+	go run ./tools/genvectors -mode x25519 -n 256 > tests/vectors/x25519_random.txt
+	go run ./tools/genvectors -mode ed25519 -n 64 > tests/vectors/ed25519_random.txt
+	go run ./tools/genvectors -mode xeddsa -n 64 > tests/vectors/xeddsa_random.txt
+	go run ./tools/genvectors -mode sha512 -n 32 > tests/vectors/sha512_random.txt
 
 # ---- amiga -----------------------------------------------------------------
-$(AMIGA_ASM): $(UNITY_SRC) $(CRYPTO_SRC) $(BENCH_SRC) crypto/ref/x25519.h
+$(AMIGA_ASM): $(UNITY_SRC) $(CRYPTO_SRC) $(BENCH_SRC) crypto/ref/x25519.h crypto/ref/ed25519.h bench/xeddsa_vector.h
 	@mkdir -p build/amiga
 	$(VC) $(VCFLAGS) $(UNITY_SRC) -o=$@
 
@@ -54,7 +62,7 @@ build/amiga/x25519bench: bench/amiga/startup.s $(AMIGA_ASM) crypto/m68k/fe16.s
 amiga: build/amiga/x25519bench
 
 run: build/amiga/x25519bench
-	tools/run-fsuae.sh $< 300
+	tools/run-fsuae.sh $< 600
 
 clean:
 	rm -rf build

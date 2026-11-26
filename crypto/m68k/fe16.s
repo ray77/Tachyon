@@ -5153,127 +5153,126 @@ _fe16_sub:
 	movem.l	d2-d4/a2/a5,-(sp)	; a2 is callee-saved and walks over g
 	move.l	a0,a5			; a5 = h
 	move.w	#$FFFF,d4
-; h = f + (2^256 - 76): limb 0 + $FFB4, limbs 1..15 + $FFFF
+; h = f - g with borrow chain (first, so h may alias f or g)
 	move.w	(a1)+,d0
-	add.w	#$FFB4,d0
-	move.w	d0,(a0)+
-	move.w	(a1)+,d0
-	addx.w	d4,d0
-	move.w	d0,(a0)+
-	move.w	(a1)+,d0
-	addx.w	d4,d0
-	move.w	d0,(a0)+
-	move.w	(a1)+,d0
-	addx.w	d4,d0
-	move.w	d0,(a0)+
-	move.w	(a1)+,d0
-	addx.w	d4,d0
-	move.w	d0,(a0)+
-	move.w	(a1)+,d0
-	addx.w	d4,d0
-	move.w	d0,(a0)+
-	move.w	(a1)+,d0
-	addx.w	d4,d0
-	move.w	d0,(a0)+
-	move.w	(a1)+,d0
-	addx.w	d4,d0
-	move.w	d0,(a0)+
-	move.w	(a1)+,d0
-	addx.w	d4,d0
-	move.w	d0,(a0)+
-	move.w	(a1)+,d0
-	addx.w	d4,d0
-	move.w	d0,(a0)+
-	move.w	(a1)+,d0
-	addx.w	d4,d0
-	move.w	d0,(a0)+
-	move.w	(a1)+,d0
-	addx.w	d4,d0
-	move.w	d0,(a0)+
-	move.w	(a1)+,d0
-	addx.w	d4,d0
-	move.w	d0,(a0)+
-	move.w	(a1)+,d0
-	addx.w	d4,d0
-	move.w	d0,(a0)+
-	move.w	(a1)+,d0
-	addx.w	d4,d0
-	move.w	d0,(a0)+
-	move.w	(a1)+,d0
-	addx.w	d4,d0
-	move.w	d0,(a0)+
-	moveq	#0,d1
-	addx.w	d1,d1			; d1 = c1 (0/1)
-; h = h - g with borrow chain
-	move.l	a5,a0
-	move.w	(a0),d0
 	move.w	(a2)+,d2
 	sub.w	d2,d0			; limb 0 sets X = borrow
 	move.w	d0,(a0)+
-	move.w	(a0),d0
+	move.w	(a1)+,d0
 	move.w	(a2)+,d2
 	subx.w	d2,d0
 	move.w	d0,(a0)+
-	move.w	(a0),d0
+	move.w	(a1)+,d0
 	move.w	(a2)+,d2
 	subx.w	d2,d0
 	move.w	d0,(a0)+
-	move.w	(a0),d0
+	move.w	(a1)+,d0
 	move.w	(a2)+,d2
 	subx.w	d2,d0
 	move.w	d0,(a0)+
-	move.w	(a0),d0
+	move.w	(a1)+,d0
 	move.w	(a2)+,d2
 	subx.w	d2,d0
 	move.w	d0,(a0)+
-	move.w	(a0),d0
+	move.w	(a1)+,d0
 	move.w	(a2)+,d2
 	subx.w	d2,d0
 	move.w	d0,(a0)+
-	move.w	(a0),d0
+	move.w	(a1)+,d0
 	move.w	(a2)+,d2
 	subx.w	d2,d0
 	move.w	d0,(a0)+
-	move.w	(a0),d0
+	move.w	(a1)+,d0
 	move.w	(a2)+,d2
 	subx.w	d2,d0
 	move.w	d0,(a0)+
-	move.w	(a0),d0
+	move.w	(a1)+,d0
 	move.w	(a2)+,d2
 	subx.w	d2,d0
 	move.w	d0,(a0)+
-	move.w	(a0),d0
+	move.w	(a1)+,d0
 	move.w	(a2)+,d2
 	subx.w	d2,d0
 	move.w	d0,(a0)+
-	move.w	(a0),d0
+	move.w	(a1)+,d0
 	move.w	(a2)+,d2
 	subx.w	d2,d0
 	move.w	d0,(a0)+
-	move.w	(a0),d0
+	move.w	(a1)+,d0
 	move.w	(a2)+,d2
 	subx.w	d2,d0
 	move.w	d0,(a0)+
-	move.w	(a0),d0
+	move.w	(a1)+,d0
 	move.w	(a2)+,d2
 	subx.w	d2,d0
 	move.w	d0,(a0)+
-	move.w	(a0),d0
+	move.w	(a1)+,d0
 	move.w	(a2)+,d2
 	subx.w	d2,d0
 	move.w	d0,(a0)+
-	move.w	(a0),d0
+	move.w	(a1)+,d0
 	move.w	(a2)+,d2
 	subx.w	d2,d0
 	move.w	d0,(a0)+
-	move.w	(a0),d0
+	move.w	(a1)+,d0
 	move.w	(a2)+,d2
 	subx.w	d2,d0
+	move.w	d0,(a0)+
+	moveq	#0,d1
+	addx.w	d1,d1			; d1 = b (0/1)
+; h = h + (2^256 - 76): limb 0 + $FFB4, limbs 1..15 + $FFFF
+	move.l	a5,a0
+	add.w	#$FFB4,(a0)+		; sets X
+	move.w	(a0),d0
+	addx.w	d4,d0
+	move.w	d0,(a0)+
+	move.w	(a0),d0
+	addx.w	d4,d0
+	move.w	d0,(a0)+
+	move.w	(a0),d0
+	addx.w	d4,d0
+	move.w	d0,(a0)+
+	move.w	(a0),d0
+	addx.w	d4,d0
+	move.w	d0,(a0)+
+	move.w	(a0),d0
+	addx.w	d4,d0
+	move.w	d0,(a0)+
+	move.w	(a0),d0
+	addx.w	d4,d0
+	move.w	d0,(a0)+
+	move.w	(a0),d0
+	addx.w	d4,d0
+	move.w	d0,(a0)+
+	move.w	(a0),d0
+	addx.w	d4,d0
+	move.w	d0,(a0)+
+	move.w	(a0),d0
+	addx.w	d4,d0
+	move.w	d0,(a0)+
+	move.w	(a0),d0
+	addx.w	d4,d0
+	move.w	d0,(a0)+
+	move.w	(a0),d0
+	addx.w	d4,d0
+	move.w	d0,(a0)+
+	move.w	(a0),d0
+	addx.w	d4,d0
+	move.w	d0,(a0)+
+	move.w	(a0),d0
+	addx.w	d4,d0
+	move.w	d0,(a0)+
+	move.w	(a0),d0
+	addx.w	d4,d0
+	move.w	d0,(a0)+
+	move.w	(a0),d0
+	addx.w	d4,d0
 	move.w	d0,(a0)+
 	moveq	#0,d2
-	addx.w	d2,d2			; d2 = b (0/1)
-	addq.w	#1,d1
-	sub.w	d2,d1			; d1 = c1 + 1 - b  (0, 1 or 2 multiples of 2^256)
+	addx.w	d2,d2			; d2 = c (0/1)
+	addq.w	#1,d2
+	sub.w	d1,d2
+	move.w	d2,d1			; d1 = c + 1 - b  (0, 1 or 2 multiples of 2^256)
 	moveq	#0,d3
 ; fold pass 1
 	mulu.w	#38,d1
