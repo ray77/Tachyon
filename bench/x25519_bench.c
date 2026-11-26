@@ -19,7 +19,10 @@
 #include "x25519.h"
 #include "sha512.h"
 #include "ed25519.h"
+#include "sha256.h"
+#include "aes.h"
 #include "xeddsa_vector.h"
+
 
 struct ExecBase *SysBase;
 struct DosLibrary *DOSBase;
@@ -76,6 +79,14 @@ static void report(const char *name, ULONG ticks, ULONG n)
     out_dec(us); out(" us/op\n");
 }
 
+/* throughput: "<name>: <bytes> bytes in <ticks> ticks = <bytes/s>" */
+static void report_bps(const char *name, ULONG ticks, ULONG bytes)
+{
+    ULONG bps = ticks ? (bytes / ticks) * 50UL : 0;
+    out(name); out(": "); out_dec(bytes); out(" bytes / "); out_dec(ticks); out(" ticks = ");
+    out_dec(bps); out(" bytes/s\n");
+}
+
 static void unhex(uint8_t out[32], const char *hex)
 {
     int i;
@@ -94,6 +105,8 @@ static uint16_t rnd16(void)
     rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
     return (uint16_t)rng;
 }
+
+#include "blitter_bench.c"
 
 /* asm backends vs portable C: results must be limb-for-limb identical */
 static int compare_sqr(void)
@@ -346,6 +359,133 @@ int main(void)
         r = ed25519_verify(sig3, msg3, 2, pk3);
         out(!r ? "PASS " : "FAIL "); out("ed25519_verify rejects corrupted signature\n"); ok &= !r;
     }
+
+    /* key generation: constant-time comb vs Montgomery ladder */
+    {
+        static const uint8_t alice[32] = { 0x77,0x07,0x6d,0x0a,0x73,0x18,0xa5,0x7d,0x3c,0x16,0xc1,0x72,0x51,0xb2,0x66,0x45,
+                                           0xdf,0x4c,0x2f,0x87,0xeb,0xc0,0x99,0x2a,0xb1,0x77,0xfb,0xa5,0x1d,0xb9,0x2c,0x2a };
+        static const uint8_t alice_pub[32] = { 0x85,0x20,0xf0,0x09,0x89,0x30,0xa7,0x54,0x74,0x8b,0x7d,0xdc,0xb4,0x3e,0xf7,0x5a,
+                                               0x0d,0xbf,0x3a,0x0d,0x26,0x38,0x1a,0xf4,0xeb,0xa4,0xa9,0x8e,0xaa,0x9b,0x4e,0x6a };
+        uint8_t pub[32];
+        int r = 1;
+        t0 = ticks_now();
+        x25519_base_comb(pub, alice);
+        t1 = ticks_now();
+        for (i = 0; i < 32; i++) if (pub[i] != alice_pub[i]) r = 0;
+        out(r ? "PASS " : "FAIL "); out("x25519_base_comb RFC 7748 Alice public key\n"); ok &= r;
+        report("x25519_base_comb (keygen)", t1 - t0, 1);
+    }
+
+    /* symmetric primitives: correctness on target + throughput (C reference) */
+    {
+        static uint8_t buf[1024], buf2[1024];
+        uint8_t key[32], iv[12], tag[16], h[32];
+        static const uint8_t abc256[8] = { 0xba,0x78,0x16,0xbf,0x8f,0x01,0xcf,0xea };
+        static const uint8_t gcm_tc2_tag[16] = { 0xab,0x6e,0x47,0xd4,0x2c,0xec,0x13,0xbd,0xf5,0x3a,0x67,0xb2,0x12,0x57,0xbd,0xdf };
+        static aes_gcm_key gk;
+        int r, reps = 8;
+
+        sha256(h, (const uint8_t *)"abc", 3);
+        r = 1; for (i = 0; i < 8; i++) if (h[i] != abc256[i]) r = 0;
+        out(r ? "PASS " : "FAIL "); out("sha256(abc)\n"); ok &= r;
+        /* asm block vs C block on 200 pseudo-random blocks and states */
+        {
+            uint32_t s1[8], s2[8];
+            int t, bad = 0;
+            for (t = 0; t < 200 && !bad; t++) {
+                for (i = 0; i < 64; i++) buf[i] = (uint8_t)rnd16();
+                for (i = 0; i < 8; i++) { s1[i] = ((uint32_t)rnd16() << 16) | rnd16(); s2[i] = s1[i]; }
+                sha256_block_c(s1, buf);
+                sha256_block(s2, buf);
+                for (i = 0; i < 8; i++) if (s1[i] != s2[i]) bad = 1;
+            }
+            out(bad ? "FAIL " : "PASS "); out("sha256_block asm == C on 200 blocks\n"); ok &= !bad;
+        }
+        for (i = 0; i < 1024; i++) buf[i] = (uint8_t)i;
+        reps = 32;
+        t0 = ticks_now();
+        for (i = 0; i < reps; i++) sha256(h, buf, 1024);
+        t1 = ticks_now();
+        report_bps("sha256 (asm block)", t1 - t0, 1024UL * reps);
+        t0 = ticks_now();
+        for (i = 0; i < reps; i++) { uint32_t st[8]; int j; for (j = 0; j < 8; j++) st[j] = j; for (j = 0; j < 16; j++) sha256_block_c(st, buf + 64 * j); }
+        t1 = ticks_now();
+        report_bps("sha256 (C block)", t1 - t0, 1024UL * reps);
+        reps = 8;
+        t0 = ticks_now();
+        for (i = 0; i < reps; i++) hmac_sha256(h, key, 32, buf, 1024);
+        t1 = ticks_now();
+        report_bps("hmac-sha256", t1 - t0, 1024UL * reps);
+
+        for (i = 0; i < 32; i++) key[i] = 0;
+        for (i = 0; i < 12; i++) iv[i] = 0;
+        for (i = 0; i < 16; i++) buf2[i] = 0;
+        aes_gcm_set_key(&gk, key, 128);
+        aes_gcm_encrypt(&gk, iv, buf2, 0, buf2, 16, buf2, tag);
+        r = 1; for (i = 0; i < 16; i++) if (tag[i] != gcm_tc2_tag[i]) r = 0;
+        out(r ? "PASS " : "FAIL "); out("aes-128-gcm test case 2\n"); ok &= r;
+
+        /* asm vs C: AES-256 encrypt/decrypt blocks and GHASH on random keys/blocks */
+        {
+            uint8_t o1[16], o2[16], y1[16], y2[16];
+            int t, bade = 0, badd = 0, badg = 0;
+            for (t = 0; t < 100; t++) {
+                for (i = 0; i < 32; i++) key[i] = (uint8_t)rnd16();
+                for (i = 0; i < 16; i++) buf[i] = (uint8_t)rnd16();
+                aes_gcm_set_key(&gk, key, 256);
+                aes_encrypt_block_c(&gk.k, buf, o1);
+                aes_encrypt_block(&gk.k, buf, o2);
+                for (i = 0; i < 16; i++) if (o1[i] != o2[i]) bade = 1;
+                aes_decrypt_block_c(&gk.k, buf, o1);
+                aes_decrypt_block(&gk.k, buf, o2);
+                for (i = 0; i < 16; i++) if (o1[i] != o2[i]) badd = 1;
+                for (i = 0; i < 16; i++) { y1[i] = (uint8_t)rnd16(); y2[i] = y1[i]; buf2[i] = (uint8_t)rnd16(); }
+                ghash_mul_bit(y1, buf2, gk.h);
+                ghash_mul_tab(y2, buf2, &gk.m[0][0]);
+                for (i = 0; i < 16; i++) if (y1[i] != y2[i]) badg = 1;
+            }
+            /* localisation aid: x = 0x80 in byte 0 (= 1 in GF) must give H itself */
+            for (i = 0; i < 16; i++) { y1[i] = 0; buf2[i] = 0; }
+            buf2[0] = 0x80;
+            ghash_mul_tab(y1, buf2, &gk.m[0][0]);
+            r = 1; for (i = 0; i < 16; i++) if (y1[i] != gk.h[i]) r = 0;
+            out(r ? "PASS " : "FAIL "); out("ghash_mul_tab(e0) == H\n"); ok &= r;
+            if (!r) { out("  got "); out_hex(y1, 16); out("\n  H   "); out_hex(gk.h, 16); out("\n"); }
+            out(bade ? "FAIL " : "PASS "); out("aes_enc_block asm == C on 100 keys/blocks\n"); ok &= !bade;
+            out(badd ? "FAIL " : "PASS "); out("aes_dec_block asm == C on 100 keys/blocks\n"); ok &= !badd;
+            out(badg ? "FAIL " : "PASS "); out("ghash_mul_tab asm == bitwise on 100 inputs\n"); ok &= !badg;
+        }
+
+        for (i = 0; i < 32; i++) key[i] = (uint8_t)i;
+        t0 = ticks_now();
+        aes_gcm_set_key(&gk, key, 256);
+        t1 = ticks_now();
+        report("aes_gcm_set_key (AES-256 + GHASH tables)", t1 - t0, 1);
+        reps = 500;
+        t0 = ticks_now();
+        for (i = 0; i < reps; i++) aes_encrypt_block(&gk.k, buf, buf2);
+        t1 = ticks_now();
+        report("aes-256 block encrypt (asm)", t1 - t0, (ULONG)reps);
+        t0 = ticks_now();
+        for (i = 0; i < reps; i++) aes_decrypt_block(&gk.k, buf, buf2);
+        t1 = ticks_now();
+        report("aes-256 block decrypt (asm)", t1 - t0, (ULONG)reps);
+        t0 = ticks_now();
+        for (i = 0; i < reps; i++) ghash_mul_tab(tag, buf, &gk.m[0][0]);
+        t1 = ticks_now();
+        report("ghash block (asm)", t1 - t0, (ULONG)reps);
+        reps = 8;
+        t0 = ticks_now();
+        for (i = 0; i < reps; i++) aes_gcm_encrypt(&gk, iv, buf, 0, buf, 1024, buf2, tag);
+        t1 = ticks_now();
+        report_bps("aes-256-gcm encrypt", t1 - t0, 1024UL * reps);
+        t0 = ticks_now();
+        for (i = 0; i < reps; i++) aes_cbc_decrypt(&gk.k, (const uint8_t *)key, buf, 1024, buf2);
+        t1 = ticks_now();
+        report_bps("aes-256-cbc decrypt", t1 - t0, 1024UL * reps);
+    }
+
+    blitter_bench();
 
     out(ok ? "RESULT: all vectors passed\n" : "RESULT: VECTOR MISMATCH\n");
 

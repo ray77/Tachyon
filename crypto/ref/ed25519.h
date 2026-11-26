@@ -25,6 +25,11 @@ void ge_scalarmult(ge_p3 *R, const uint8_t k[32], const ge_p3 *P);     /* variab
 void ge_scalarmult_base(ge_p3 *R, const uint8_t k[32]);                 /* variable time */
 void ge_double_scalarmult(ge_p3 *R, const uint8_t a[32], const ge_p3 *A, const uint8_t b[32]); /* R = [a]A + [b]B */
 
+/* constant-time fixed-base multiplication with the 64x8 comb table (secret scalars) */
+void ge_scalarmult_base_ct(ge_p3 *R, const uint8_t k[32]);
+/* X25519 public key = clamp(k) * 9, via the Edwards comb and u = (Z+Y)/(Z-Y); constant time */
+void x25519_base_comb(uint8_t out[32], const uint8_t scalar[32]);
+
 /* scalar arithmetic mod L = 2^252 + 27742317777372353535851937790883648493 */
 void sc_reduce(uint8_t r[32], const uint8_t x[64]);   /* r = x mod L */
 int  sc_is_canonical(const uint8_t s[32]);             /* 1 if s < L */

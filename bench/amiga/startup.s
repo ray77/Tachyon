@@ -8,9 +8,18 @@
 	xref	_main
 _start:
 	movem.l	d2-d7/a2-a6,-(sp)
+	move.l	sp,oldsp		; the CLI stack is only 4000 bytes under Kickstart 1.3
+	lea	stack_top,sp		; so run main() on our own 64 KiB stack (BSS, Fast RAM)
 	jsr	_main
+	move.l	oldsp,sp
 	movem.l	(sp)+,d2-d7/a2-a6
 	rts
+
+	section	bss,bss
+oldsp:		ds.l	1
+stack_bottom:	ds.b	65536
+stack_top:
+	section	text,code
 
 ; --- vbcc runtime helpers normally supplied by vc.lib ------------------------
 ; __divu: unsigned 32/32 division. In: d0 = dividend, d1 = divisor.
@@ -35,6 +44,8 @@ __divu:
 
 ; --- assembler backends ----------------------------------------------------
 	include	"crypto/m68k/fe16.s"
+	include	"crypto/m68k/sha256.s"
+	include	"crypto/m68k/aes.s"
 
 ; --- generated C modules -------------------------------------------------
 	include	"build/amiga/x25519bench.s"

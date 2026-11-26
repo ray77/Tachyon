@@ -73,19 +73,11 @@ def reduce_and_fold():
         emit("\tmove.w\td1,(a2)+")
         emit("\tclr.w\td1")
         emit("\tswap\td1")
-    emit("; d1 = carry (< 39). Two fold passes: h += 38*carry, full propagation (constant time)")
-    for p in range(2):
-        emit(f"; fold pass {p+1}")
-        emit("\tmulu.w\t#38,d1")
-        emit("\tmove.l\ta5,a0")
-        emit("\tmove.l\ta5,a1")
-        for _ in range(16):
-            emit("\tmoveq\t#0,d2")
-            emit("\tmove.w\t(a0)+,d2")
-            emit("\tadd.l\td2,d1")
-            emit("\tmove.w\td1,(a1)+")
-            emit("\tclr.w\td1")
-            emit("\tswap\td1")
+    emit("; d1 = carry (< 39): 38*carry < 1482 fits a word, so both fold passes are X-flag chains")
+    emit("; fold pass 1")
+    fold_cheap()
+    emit("; fold pass 2")
+    fold_cheap()
 
 
 def prologue(name, has_g):

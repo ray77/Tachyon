@@ -166,8 +166,33 @@ static void test_sig_file(const char *path, int (*verify)(const uint8_t *, const
     printf("%s %s random vectors: %d checked (%d valid, %d invalid), %d mismatches\n", bad ? "FAIL" : "PASS", name, n, valid, n - valid, bad);
 }
 
+/* comb-based X25519 public keys must equal the Montgomery ladder reference */
+static void test_base_comb(void)
+{
+    static const uint8_t alice[32] = { 0x77,0x07,0x6d,0x0a,0x73,0x18,0xa5,0x7d,0x3c,0x16,0xc1,0x72,0x51,0xb2,0x66,0x45,
+                                       0xdf,0x4c,0x2f,0x87,0xeb,0xc0,0x99,0x2a,0xb1,0x77,0xfb,0xa5,0x1d,0xb9,0x2c,0x2a };
+    static const uint8_t alice_pub[32] = { 0x85,0x20,0xf0,0x09,0x89,0x30,0xa7,0x54,0x74,0x8b,0x7d,0xdc,0xb4,0x3e,0xf7,0x5a,
+                                           0x0d,0xbf,0x3a,0x0d,0x26,0x38,0x1a,0xf4,0xeb,0xa4,0xa9,0x8e,0xaa,0x9b,0x4e,0x6a };
+    uint8_t out[32], ref[32], k[32];
+    uint32_t rng = 0x9E3779B9u;
+    int t, i, bad = 0;
+    x25519_base_comb(out, alice);
+    result(memcmp(out, alice_pub, 32) == 0, "x25519_base_comb RFC 7748 Alice");
+    for (t = 0; t < 40; t++) {
+        for (i = 0; i < 32; i++) { rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5; k[i] = (uint8_t)rng; }
+        if (t == 0) memset(k, 0xff, 32);
+        if (t == 1) memset(k, 0x00, 32);
+        if (t == 2) { memset(k, 0x88, 32); }
+        x25519_base_comb(out, k);
+        x25519_ref_base(ref, k);
+        if (memcmp(out, ref, 32)) { bad++; if (bad < 3) { printf("FAIL comb vs ladder, scalar %d\n", t); dump("k", k, 32); dump("comb", out, 32); dump("ref", ref, 32); } }
+    }
+    result(bad == 0, "x25519_base_comb == ladder on 40 scalars (incl. all-ones, zero, 0x88)");
+}
+
 int main(int argc, char **argv)
 {
+    test_base_comb();
     const char *dir = argc > 1 ? argv[1] : "tests/vectors";
     char path[512];
     test_constants();

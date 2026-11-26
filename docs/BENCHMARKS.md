@@ -131,3 +131,68 @@ Nebenbefund: `fe16_sub` war bei `h == g` nicht alias-sicher (C und asm schrieben
 | Festbasis-Tabelle für B (4-Bit-Fenster, 512 Niels-Punkte ≈ 48 KiB, gemischte Addition 7M) statt Shamir-Anteil | ≈ 2,5 s |
 | wNAF (w = 5) für A: 52 statt ≈ 128 Additionen | ≈ 2,3 s |
 | Ziel | ≈ 9–10 s pro Verifikation |
+
+## 2026-11-26 – Schritt 6: Verifikation mit Fenstern und Festbasis-Tabelle
+
+`ge_double_scalarmult` nach ref10-Struktur: Verdopplung als p1p1 (4S + 3M, T nur berechnet, wenn eine Addition folgt), A über 8 gecachte ungerade Vielfache (Sliding Window w = 5, 8M je Addition), B über die hostseitig erzeugte Tabelle `crypto/ref/ed25519_btable.h` (B, 3B, …, 63B als affine Niels-Tripel, w = 7, 3 KiB, gemischte Addition 7M). Tabelle unabhängig mit reiner Python-Kurvenarithmetik geprüft.
+
+| Operation | vorher | jetzt |
+|---|---:|---:|
+| `ed25519_verify` | 14,80 s | **9,34 s** |
+| `xeddsa_verify` | 15,70 s | **9,98 s** |
+
+Aufschlüsselung (XEdDSA): ≈ 253 Verdopplungen à 3M+4S ≈ 20 ms → 5,0 s; ≈ 43 A-Additionen à 8M ≈ 28 ms → 1,2 s; ≈ 32 B-Additionen à 7M ≈ 24 ms → 0,8 s; T-Vervollständigungen ≈ 0,3 s; Tabelle für A (1 Verdopplung + 7 Additionen) ≈ 0,25 s; drei Exponentiationen (Montgomery→Edwards-Inversion, Wurzel beim Dekodieren, Inversion beim Kodieren) ≈ 1,9 s; SHA-512 ≈ 0,2 s.
+
+Noise-Handshake online damit: 3 × 8,3 + 2 × 10,0 ≈ **45 s** (mit gepinntem Zwischenzertifikat ≈ 35 s).
+
+Fund dabei: Der KS-1.3-CLI-Stack (4000 Bytes) reichte für `xeddsa_verify` nicht mehr; `startup.s` schaltet jetzt auf einen eigenen 64-KiB-Stack (siehe `docs/TOOLCHAIN.md`).
+
+Verbleibende Hebel bei der Verifikation: Verdopplungen dominieren (50 %) und lassen sich bei variabler Basis nicht reduzieren; die drei Exponentiationen (19 %) ließen sich auf zwei drücken, wenn `ge_tobytes` entfällt und stattdessen R dekodiert und projektiv verglichen wird – gleiche Kosten, kein Gewinn. Realistische Untergrenze ≈ 9 s, solange `fe16_mul` 3,5 ms braucht.
+
+## 2026-11-26 – Schritt 7: Faltungen in mul/sqr als X-Flag-Ketten; symmetrische Primitive in C (Baseline)
+
+Beide Faltungsdurchläufe nach der Reduktion in `fe16_mul`/`fe16_sqr` laufen jetzt als `add.w` + 15 × `addx.w` (38·c < 1482 passt ins Wort). Bitidentisch (Vergleichstest), −2 % je Multiplikation.
+
+| Operation | vorher | jetzt |
+|---|---:|---:|
+| `fe16_mul` (Karatsuba) | 3,47 ms | **3,40 ms** |
+| X25519 | 8,28 s | **8,08 s** |
+| `ed25519_verify` | 9,34 s | **9,10 s** |
+| `xeddsa_verify` | 9,98 s | **9,72 s** |
+
+Symmetrische Primitive, portable C mit vbcc (`crypto/ref/sha256.c`, `crypto/ref/aes.c`), Korrektheit auf dem Ziel bestätigt (SHA-256("abc"), GCM-Testfall 2):
+
+| Primitive (C) | Durchsatz | Einordnung |
+|---|---:|---|
+| SHA-256 | 3,5 KB/s (≈ 18 ms/Block, 130 k Takte) | unbrauchbar; Assembler erwartet ≈ 30 k Takte/Block |
+| HMAC-SHA256 | 2,95 KB/s | folgt SHA-256 |
+| AES-256 Blockverschlüsselung | 15,3 ms/Block (≈ 108 k Takte) | byteweise S-Box/xtime in vbcc-C ist 20–30× zu langsam; Ziel mit T-Tabellen ≈ 4–5 k Takte |
+| AES-256-GCM | 250 B/s | GHASH bitweise (128 Schiebeschritte je Block) dominiert; 4-Bit-Tabelle nötig |
+| AES-256-CBC Entschlüsselung | 100 B/s | InvMixColumns mit `gmul`-Schleifen; nur Referenz |
+
+Noise-Frames sind klein (wenige hundert Bytes), Medien später groß: AES-GCM und SHA-256 sind damit nach der Kurvenarithmetik die nächsten Assembler-Kandidaten – und die ersten Kandidaten für das Blitter-Experiment (AES-Bitslicing, GHASH-XOR), weil hier der CPU-Baseline-Vergleich jetzt vorliegt.
+
+## 2026-11-26 – Schritt 8: Festbasis-Comb, SHA-256- und AES/GHASH-Assembler
+
+Alle Werte A500/FS-UAE (accuracy=1), DateStamp-Ticks, alle Vektorprüfungen bestanden (`make vamos` und FS-UAE).
+
+| Operation | vorher (C) | jetzt | Faktor |
+|---|---:|---:|---:|
+| X25519-Schlüsselerzeugung (`x25519_base_comb`, 64×8 Comb-Tabelle 254 KB, constant-time) | 8,08 s (Leiter) | **3,06 s** | 2,6 |
+| SHA-256 (`_sha256_block` asm, 1 KiB-Durchsatz) | 3,85 KB/s | **9,9 KB/s** | 2,6 |
+| HMAC-SHA256 | 2,95 KB/s | 8,35 KB/s | 2,8 |
+| AES-256 Blockverschlüsselung (T-Tabellen, 4 KiB) | 15,6 ms | **2,04 ms** (≈ 14,5 k Takte) | 7,7 |
+| AES-256 Blockentschlüsselung (äquivalente inverse Chiffre) | ≈ 150 ms | **2,28 ms** | 66 |
+| GHASH-Block (Shoup, 8-Bit-Tabellen, 2 Byte je Schritt) | ≈ 50 ms | **0,56 ms** (≈ 4 k Takte) | 90 |
+| AES-256-GCM (1 KiB) | 250 B/s | **5,45 KB/s** | 22 |
+| AES-256-CBC Entschlüsselung (1 KiB) | 100 B/s | **6,7 KB/s** | 67 |
+| GCM-Schlüsselaufbau (Key-Schedule + 10 KiB GHASH-Tabellen) | – | 100 ms | einmalig je Sitzungsschlüssel |
+
+Einordnung:
+* Comb-Keygen 3,06 s statt der erwarteten ≈ 2,3 s: 64 Fenster × (8 Tabelleneinträge laden + maskiert auswählen + 7M-Addition); die Auswahl in C (3 × 8 × fe16_cmov + frombytes) kostet ≈ 0,8 s. Kandidat für Assembler, wenn Schlüsselerzeugung im Vordergrund läuft; die 812 Prekeys beim Pairing brauchen so ≈ 41 min im Hintergrund.
+* SHA-256 asm: 6,1 ms je Block ≈ 43 k Takte, erwartet waren ≈ 30 k. Rotationen kosten auf dem 68000 2 Takte je Bit; der Nachrichtenfahrplan allein (48 × σ0/σ1) liegt bei ≈ 12 k Takten. Tuning zurückgestellt (HMAC/HKDF im Handshake sind klein; Medien-Hashing ist später relevant).
+* AES: 16 Tabellenzugriffe je Runde à ≈ 50 Takte (clr, move.b aus dem Zustand, 2 × add.w, move.l (An,Dn.w), eor.l) ≈ 900 Takte/Runde, wie gerechnet. Ein-/Ausgabe byteweise (Nutzpuffer dürfen ungerade liegen – vamos verschleiert Address-Errors, echte Hardware nicht).
+* GHASH: 8 Schritte × (16-Bit-Shift 32 Takte + 2 Reduktions-Lookups + 2 × 16-Byte-Tabellen-XOR) ≈ 4 k Takte. Die Blockoperation wird damit vom AES-Anteil dominiert (14,5 k).
+* Noise-Transport: ein typischer Frame (≤ 1 KiB) kostet jetzt ≈ 0,2 s; Medien (MB) bleiben mit ≈ 5 KB/s ein Problem → Kandidat für Blitter-Bitslicing (siehe nächster Schritt) oder Akzeptanz (1 MB ≈ 3 min).
+
+Fehler auf dem Weg (dokumentiert in docs/TOOLCHAIN.md): vbcc-Fehlkompilierung von `int8_t`-Byte-Casts in `comb_select` (nur auf dem Ziel sichtbar, Host korrekt); S-Box-Generator mit Shifts statt Rotationen; GHASH-16-Bit-Shift mit vertauschter `move.w`/`swap`-Reihenfolge. Alle drei durch die asm-gegen-C-Vergleiche im Harness gefunden, zwei davon in Sekunden mit `make vamos`.

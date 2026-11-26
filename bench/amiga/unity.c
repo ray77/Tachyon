@@ -6,4 +6,7 @@
 #include "../../crypto/ref/x25519_ref.c"
 #include "../../crypto/ref/sha512.c"
 #include "../../crypto/ref/ed25519.c"
+#include "../../crypto/ref/sha256.c"
+#include "../../crypto/ref/aes.c"
+#include "../../crypto/ref/drbg.c"
 #include "../x25519_bench.c"

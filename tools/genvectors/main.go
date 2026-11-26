@@ -14,6 +14,8 @@
 package main
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -109,6 +111,31 @@ func main() {
 			}
 			fmt.Printf("%x %x %x %d\n", pk[:], msg, sig[:], valid)
 		}
+	case "aesgcm":
+		// <keybits> <key> <iv> <aad|-> <pt|-> <ct> <tag>
+		for i := 0; i < *n; i++ {
+			bits := 128
+			if i%2 == 1 {
+				bits = 256
+			}
+			key := randBytes(bits / 8)
+			iv := randBytes(12)
+			aad := randBytes((i * 7) % 40)
+			pt := randBytes((i * 13) % 300)
+			block, err := aes.NewCipher(key)
+			must(err)
+			g, err := cipher.NewGCM(block)
+			must(err)
+			out := g.Seal(nil, iv, pt, aad)
+			ct, tag := out[:len(pt)], out[len(pt):]
+			hx := func(b []byte) string {
+				if len(b) == 0 {
+					return "-"
+				}
+				return hex.EncodeToString(b)
+			}
+			fmt.Printf("%d %x %x %s %s %s %x\n", bits, key, iv, hx(aad), hx(pt), hx(ct), tag)
+		}
 	case "sha512":
 		for i := 0; i < *n; i++ {
 			msg := randBytes(i * 13)
@@ -119,5 +146,4 @@ func main() {
 		fmt.Fprintln(os.Stderr, "unknown mode")
 		os.Exit(2)
 	}
-	_ = hex.EncodeToString
 }
