@@ -55,7 +55,7 @@ func corrupt(sig []byte, i int) {
 }
 
 func main() {
-	mode := flag.String("mode", "x25519", "x25519 | ed25519 | xeddsa | sha512")
+	mode := flag.String("mode", "x25519", "x25519 | ed25519 | xeddsa | sha512 | aesgcm | noise")
 	n := flag.Int("n", 64, "number of vectors")
 	flag.Parse()
 
@@ -136,6 +136,8 @@ func main() {
 			}
 			fmt.Printf("%d %x %x %s %s %s %x\n", bits, key, iv, hx(aad), hx(pt), hx(ct), tag)
 		}
+	case "noise":
+		noiseVectors(*n)
 	case "sha512":
 		for i := 0; i < *n; i++ {
 			msg := randBytes(i * 13)

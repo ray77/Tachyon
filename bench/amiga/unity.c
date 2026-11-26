@@ -9,4 +9,5 @@
 #include "../../crypto/ref/sha256.c"
 #include "../../crypto/ref/aes.c"
 #include "../../crypto/ref/drbg.c"
+#include "../../crypto/ref/noise.c"
 #include "../x25519_bench.c"

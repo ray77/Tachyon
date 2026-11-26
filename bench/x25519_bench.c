@@ -22,6 +22,8 @@
 #include "sha256.h"
 #include "aes.h"
 #include "xeddsa_vector.h"
+#include "noise.h"
+#include "noise_vector.h"
 
 
 struct ExecBase *SysBase;
@@ -483,6 +485,31 @@ int main(void)
         for (i = 0; i < reps; i++) aes_cbc_decrypt(&gk.k, (const uint8_t *)key, buf, 1024, buf2);
         t1 = ticks_now();
         report_bps("aes-256-cbc decrypt", t1 - t0, 1024UL * reps);
+    }
+
+    {   /* full Noise_XX client handshake against a whatsmeow-generated vector, timed */
+        static noise_hs hs; static noise_transport tr;
+        static uint8_t cephpub[32], cstpub[32], st_out[32], cert_out[NV_CERT_LEN + 16], cstct_out[48], cplct_out[NV_CPL_LEN + 16];
+        int r;
+        x25519_ref_base(cephpub, nv_ceph);
+        x25519_ref_base(cstpub, nv_cst);
+        t0 = ticks_now();
+        noise_client_hello(&hs, nv_header, NV_HEADER_LEN, cephpub);
+        r = noise_client_finish(&hs, nv_ceph, nv_cst, cstpub, nv_sephpub, nv_sstct, 48, nv_certct, NV_CERTCT_LEN,
+                                nv_cpl, NV_CPL_LEN, st_out, cert_out, cstct_out, cplct_out, &tr);
+        t1 = ticks_now();
+        for (i = 0; i < 32; i++) if (st_out[i] != nv_sstpub[i]) r = 0;
+        for (i = 0; i < NV_CERT_LEN; i++) if (cert_out[i] != nv_cert[i]) r = 0;
+        for (i = 0; i < 48; i++) if (cstct_out[i] != nv_cstct[i]) r = 0;
+        for (i = 0; i < NV_CPLCT_LEN; i++) if (cplct_out[i] != nv_cplct[i]) r = 0;
+        out(r ? "PASS " : "FAIL "); out("noise_xx client handshake == whatsmeow vector\n"); ok &= r;
+        report("noise_xx client (3 X25519 + 6 GCM key setups + HKDF, excl. cert verify)", t1 - t0, 1);
+        t0 = ticks_now();
+        noise_transport_encrypt(&tr, nv_frame, NV_FRAME_LEN, cplct_out);
+        t1 = ticks_now();
+        r = 1; for (i = 0; i < NV_FRAMECT_LEN && i < (int)sizeof cplct_out; i++) if (cplct_out[i] != nv_framect[i]) r = 0;
+        out(r ? "PASS " : "FAIL "); out("noise transport frame 0 == whatsmeow vector\n"); ok &= r;
+        out("transport frame "); out_dec(NV_FRAME_LEN); report(" bytes", t1 - t0, 1);
     }
 
     blitter_bench();

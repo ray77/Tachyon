@@ -1,0 +1,78 @@
+/* Noise_XX (WhatsApp dialect) client path against vectors from whatsmeow's NoiseHandshake
+ * (tools/genvectors -mode noise). */
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include "noise.h"
+#include "x25519.h"
+
+static int failures;
+static void result(int ok, const char *what) { printf("%s %s\n", ok ? "PASS" : "FAIL", what); if (!ok) failures++; }
+
+static int unhex(uint8_t *out, const char *h, int maxlen)
+{
+    int n = 0;
+    while (h[0] && h[1] && n < maxlen) {
+        char t[3] = { h[0], h[1], 0 };
+        out[n++] = (uint8_t)strtoul(t, 0, 16); h += 2;
+    }
+    return n;
+}
+
+int main(int argc, char **argv)
+{
+    FILE *f = fopen(argc > 1 ? argv[1] : "tests/vectors/noise_random.txt", "r");
+    static char line[16384];
+    int n = 0, bad = 0;
+    if (!f) { printf("FAIL cannot open vector file\n"); return 1; }
+    while (fgets(line, sizeof line, f)) {
+        char *tok[17]; char *p = line; int i;
+        static uint8_t header[8], ceph[32], cst[32], seph[32], sst[32], cert[1024], cpl[1024];
+        static uint8_t sephpub[32], sstct[64], certct[1100], sstpub[32], cstct[64], cplct[1100], wk[32], rk[32], frame[1024], framect[1100];
+        static uint8_t cephpub[32], cstpub[32], st_out[32], cert_out[1100], cstct_out[48], cplct_out[1100], fct[1100], fpt[1100];
+        int hl, certl, cpll, certctl, cplctl, framel, framectl;
+        noise_hs hs; noise_transport t;
+        for (i = 0; i < 17; i++) { tok[i] = p; p = strpbrk(p, " \n"); if (!p) { i++; break; } *p++ = 0; }
+        if (i < 17) break;
+        hl = unhex(header, tok[0], 8); unhex(ceph, tok[1], 32); unhex(cst, tok[2], 32); unhex(seph, tok[3], 32); unhex(sst, tok[4], 32);
+        certl = unhex(cert, tok[5], 1024); cpll = unhex(cpl, tok[6], 1024);
+        unhex(sephpub, tok[7], 32); unhex(sstct, tok[8], 64); certctl = unhex(certct, tok[9], 1100);
+        unhex(sstpub, tok[10], 32); unhex(cstct, tok[11], 64); cplctl = unhex(cplct, tok[12], 1100);
+        unhex(wk, tok[13], 32); unhex(rk, tok[14], 32); framel = unhex(frame, tok[15], 1024); framectl = unhex(framect, tok[16], 1100);
+
+        x25519_ref_base(cephpub, ceph);
+        x25519_ref_base(cstpub, cst);
+        noise_client_hello(&hs, header, (uint32_t)hl, cephpub);
+        if (!noise_client_finish(&hs, ceph, cst, cstpub, sephpub, sstct, 48, certct, (uint32_t)certctl,
+                                 cpl, (uint32_t)cpll, st_out, cert_out, cstct_out, cplct_out, &t)) { bad++; printf("  vector %d: handshake failed\n", n); n++; continue; }
+        if (memcmp(st_out, sstpub, 32)) { bad++; printf("  vector %d: server static\n", n); }
+        if (memcmp(cert_out, cert, (size_t)certl)) { bad++; printf("  vector %d: cert payload\n", n); }
+        if (memcmp(cstct_out, cstct, 48)) { bad++; printf("  vector %d: client static ct\n", n); }
+        if (memcmp(cplct_out, cplct, (size_t)cplctl)) { bad++; printf("  vector %d: client payload ct\n", n); }
+        /* transport: first frame client -> server, and the server -> client direction decrypts what the
+         * read key encrypts (sanity, both sides derived here) */
+        noise_transport_encrypt(&t, frame, (uint32_t)framel, fct);
+        if (memcmp(fct, framect, (size_t)framectl)) { bad++; printf("  vector %d: transport frame\n", n); }
+        {
+            aes_gcm_key rkk; uint8_t iv[12] = { 0 };
+            aes_gcm_set_key(&rkk, rk, 256);
+            aes_gcm_encrypt(&rkk, iv, (const uint8_t *)"", 0, frame, (uint32_t)framel, fct, fct + framel);
+            if (!noise_transport_decrypt(&t, fct, (uint32_t)framel + 16, fpt) || memcmp(fpt, frame, (size_t)framel)) { bad++; printf("  vector %d: transport read\n", n); }
+            fct[0] ^= 1;
+            if (noise_transport_decrypt(&t, fct, (uint32_t)framel + 16, fpt)) { bad++; printf("  vector %d: corrupted frame accepted\n", n); }
+        }
+        n++;
+    }
+    fclose(f);
+    printf("%s noise_xx whatsmeow vectors: %d handshakes, %d mismatches\n", bad ? "FAIL" : "PASS", n, bad);
+    if (bad || n == 0) failures++;
+    {   /* a corrupted ServerHello static must be rejected before any key is mixed further */
+        static uint8_t z[32], hdr[4] = { 'W', 'A', 6, 3 }, ct[48], cert[16], o1[32], o2[16], o3[48], o4[32];
+        noise_hs hs; noise_transport t;
+        memset(ct, 0, 48);
+        noise_client_hello(&hs, hdr, 4, z);
+        result(noise_client_finish(&hs, z, z, z, z, ct, 48, cert, 16, z, 16, o1, o2, o3, o4, &t) == 0, "garbage ServerHello rejected");
+    }
+    printf(failures ? "\n%d FAILURE(S)\n" : "\nALL PASSED\n", failures);
+    return failures ? 1 : 0;
+}
