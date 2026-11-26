@@ -168,6 +168,8 @@ static int compare_##NAME(void)                                                 
     return bad == 0;                                                                \
 }
 
+COMPARE_BINARY(mul_comba, fe16_mul_c, fe16_mul_comba)
+COMPARE_BINARY(mul_kara, fe16_mul_c, fe16_mul_kara)
 COMPARE_BINARY(add, fe16_add_c, fe16_add)
 COMPARE_BINARY(sub, fe16_sub_c, fe16_sub)
 COMPARE_UNARY(mul121665, fe16_mul121665_c, fe16_mul121665)
@@ -232,7 +234,8 @@ int main(void)
     out("ExecBase version "); out_dec(SysBase->LibNode.lib_Version); out("\n");
 
     /* correctness on target */
-    ok &= compare_mul();
+    ok &= compare_mul_comba();
+    ok &= compare_mul_kara();
     ok &= compare_sqr();
     ok &= compare_add();
     ok &= compare_sub();
@@ -259,9 +262,13 @@ int main(void)
 
     n = 5000;
     t0 = ticks_now();
-    for (i = 0; i < (int)n; i++) fe16_mul(c, a, b);
+    for (i = 0; i < (int)n; i++) fe16_mul_comba(c, a, b);
     t1 = ticks_now();
-    report("fe16_mul (asm)", t1 - t0, n);
+    report("fe16_mul_comba (asm)", t1 - t0, n);
+    t0 = ticks_now();
+    for (i = 0; i < (int)n; i++) fe16_mul_kara(c, a, b);
+    t1 = ticks_now();
+    report("fe16_mul_kara (asm)", t1 - t0, n);
     n = 2000;
 
     t0 = ticks_now();

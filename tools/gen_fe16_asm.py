@@ -7,7 +7,9 @@ on the plain 68000 (vasm Motorola syntax), fully unrolled.
 Routines (vbcc __reg calling convention, arrays of 16 little-endian 16-bit limbs;
 d0/d1/a0/a1 scratch, all other registers preserved):
 
-  _fe16_mul        a0 = h, a1 = f, a2 = g   h = f*g mod p
+  _fe16_mul        a0 = h, a1 = f, a2 = g   h = f*g mod p   (alias of the default variant)
+  _fe16_mul_comba  schoolbook Comba, 256 products
+  _fe16_mul_kara   one level Karatsuba, 192 products + ~2.5k cycles of bookkeeping
   _fe16_sqr        a0 = h, a1 = f           h = f*f mod p
   _fe16_add        a0 = h, a1 = f, a2 = g   h = f+g        (ADDX chain)
   _fe16_sub        a0 = h, a1 = f, a2 = g   h = f-g+4p     (ADDX / SUBX chains)
@@ -116,18 +118,145 @@ def set_pointers(first, k):
     emit(f"\tlea\t{2*(k-first+1)}(a4),a1")
 
 
-def gen_mul():
-    prologue("_fe16_mul", True)
-    for k in range(31):
-        first = 0 if k < 16 else k - 15
-        last = k if k < 16 else 15
+def comba(n, store_last=True):
+    """n x n limb Comba product of (a3) and (a4) into (a2)+, 2n limbs.
+    Accumulator d0/d1 must be zero on entry; d3 = 0."""
+    for k in range(2 * n - 1):
+        first = 0 if k < n else k - (n - 1)
+        last = k if k < n else n - 1
         emit(f"; column {k}: f[{first}..{last}] * g[{k-first}..{k-last}]")
         set_pointers(first, k)
         for _ in range(first, last + 1):
             product()
-        column_end(k)
+        emit("\tmove.w\td0,(a2)+")
+        if k < 2 * n - 2:
+            emit("\tclr.w\td0")
+            emit("\tswap\td0")
+            emit("\tswap\td1")
+            emit("\tadd.l\td1,d0")
+            emit("\tmoveq\t#0,d1")
+        else:
+            emit("\tswap\td0")
+            emit(f"\tmove.w\td0,(a2)+\t\t; limb {2*n-1}")
+            emit("\tmoveq\t#0,d0")
+
+
+def gen_mul():
+    """schoolbook Comba, 256 products"""
+    prologue("_fe16_mul_comba", True)
+    comba(16)
     reduce_and_fold()
     epilogue()
+
+
+def gen_mul_kara():
+    """one level of Karatsuba: f = f0 + 2^128 f1, g = g0 + 2^128 g1 (8 limbs each).
+    z0 = f0*g0 -> r[0..15], z2 = f1*g1 -> r[16..31],
+    m  = (f0+f1)*(g0+g1) with the 9th-limb carries handled as masked corrections,
+    z1 = m - z0 - z2 (17 limbs, non-negative), r[8..] += z1.  192 products.
+    Stack frame: 0..63 r[32], 64..79 sf[8], 80..95 sg[8], 96..131 t[18]."""
+    emit("\txdef\t_fe16_mul_kara")
+    emit("_fe16_mul_kara:")
+    emit("\tmovem.l\td2-d7/a2-a5,-(sp)")
+    emit("\tlea\t-132(sp),sp")
+    emit("\tmove.l\ta0,a5\t\t\t; a5 = h")
+    emit("\tmove.l\ta1,a3\t\t\t; a3 = f")
+    emit("\tmove.l\ta2,a4\t\t\t; a4 = g")
+    emit("\tmoveq\t#0,d3\t\t\t; permanent zero")
+    # sf = f0 + f1, carry -> d6 (as 0/-1 mask), sg = g0 + g1, carry -> d7 (mask)
+    for (src, dst_off, maskreg) in (("a3", 64, "d6"), ("a4", 80, "d7")):
+        emit(f"; s = lo + hi of ({src}), carry mask -> {maskreg}")
+        emit(f"\tmove.l\t{src},a0")
+        emit(f"\tlea\t16({src}),a1")
+        emit(f"\tlea\t{dst_off}(sp),a2")
+        emit("\tmove.w\t(a0)+,d0")
+        emit("\tadd.w\t(a1)+,d0")
+        emit("\tmove.w\td0,(a2)+")
+        for _ in range(7):
+            emit("\tmove.w\t(a0)+,d0")
+            emit("\tmove.w\t(a1)+,d2")
+            emit("\taddx.w\td2,d0")
+            emit("\tmove.w\td0,(a2)+")
+        emit(f"\tmoveq\t#0,{maskreg}")
+        emit(f"\taddx.w\t{maskreg},{maskreg}")
+        emit(f"\tneg.w\t{maskreg}\t\t\t; 0 or $FFFF")
+    # z0 = f0*g0 -> r[0..15]
+    emit("; z0 = f0 * g0")
+    emit("\tmove.l\tsp,a2")
+    emit("\tmoveq\t#0,d0")
+    emit("\tmoveq\t#0,d1")
+    comba(8)
+    # z2 = f1*g1 -> r[16..31]  (a3/a4 advanced by 16 bytes, a2 continues)
+    emit("; z2 = f1 * g1")
+    emit("\tlea\t16(a3),a3")
+    emit("\tlea\t16(a4),a4")
+    emit("\tmoveq\t#0,d1")
+    comba(8)
+    # m = sf*sg -> t[0..15]
+    emit("; m = (f0+f1)(g0+g1) low parts -> t[0..15]")
+    emit("\tlea\t64(sp),a3")
+    emit("\tlea\t80(sp),a4")
+    emit("\tlea\t96(sp),a2")
+    emit("\tmoveq\t#0,d1")
+    comba(8)
+    emit("\tclr.w\t(a2)+\t\t\t; t[16]")
+    emit("\tclr.w\t(a2)\t\t\t; t[17] (never used, keeps the frame even)")
+    # corrections: t[8..16] += mask_g & sf ; t[8..16] += mask_f & sg ; t[16] += cf & cg
+    for (maskreg, src_off, label) in (("d7", 64, "cg * sf"), ("d6", 80, "cf * sg")):
+        emit(f"; t[8..16] += {label}")
+        emit(f"\tlea\t{src_off}(sp),a0")
+        emit("\tlea\t112(sp),a1\t\t; t[8]")
+        emit("\tmove.w\t(a0)+,d0")
+        emit(f"\tand.w\t{maskreg},d0")
+        emit("\tadd.w\td0,(a1)+")
+        for _ in range(7):
+            emit("\tmove.w\t(a0)+,d0")
+            emit(f"\tand.w\t{maskreg},d0")
+            emit("\tmove.w\t(a1),d2")
+            emit("\taddx.w\td0,d2")
+            emit("\tmove.w\td2,(a1)+")
+        emit("\tmove.w\t(a1),d2")
+        emit("\taddx.w\td3,d2")
+        emit("\tmove.w\td2,(a1)\t\t\t; t[16]")
+    emit("\tmove.w\td6,d0")
+    emit("\tand.w\td7,d0")
+    emit("\tneg.w\td0\t\t\t; cf & cg as 0/1")
+    emit("\tadd.w\td0,128(sp)\t\t; t[16] += cf*cg")
+    # z1 = t - r[0..15] - r[16..31]  (17 limbs, in place in t)
+    for (off, label) in ((0, "z0"), (32, "z2")):
+        emit(f"; t -= {label}")
+        emit("\tlea\t96(sp),a0\t\t; t")
+        emit(f"\tlea\t{off}(sp),a1")
+        emit("\tmove.w\t(a1)+,d0")
+        emit("\tsub.w\td0,(a0)+")
+        for _ in range(15):
+            emit("\tmove.w\t(a0),d2")
+            emit("\tmove.w\t(a1)+,d0")
+            emit("\tsubx.w\td0,d2")
+            emit("\tmove.w\td2,(a0)+")
+        emit("\tmove.w\t(a0),d2")
+        emit("\tsubx.w\td3,d2")
+        emit("\tmove.w\td2,(a0)\t\t\t; t[16]")
+    # r[8..24] += t[0..16], propagate carry through r[25..31]
+    emit("; r[8..] += z1")
+    emit("\tlea\t96(sp),a0\t\t; t")
+    emit("\tlea\t16(sp),a1\t\t; r[8]")
+    emit("\tmove.w\t(a0)+,d0")
+    emit("\tadd.w\td0,(a1)+")
+    for _ in range(16):
+        emit("\tmove.w\t(a1),d2")
+        emit("\tmove.w\t(a0)+,d0")
+        emit("\taddx.w\td0,d2")
+        emit("\tmove.w\td2,(a1)+")
+    for _ in range(7):
+        emit("\tmove.w\t(a1),d2")
+        emit("\taddx.w\td3,d2")
+        emit("\tmove.w\td2,(a1)+")
+    reduce_and_fold()
+    emit("\tlea\t132(sp),sp")
+    emit("\tmovem.l\t(sp)+,d2-d7/a2-a5")
+    emit("\trts")
+    emit("")
 
 
 def sqr_column_end(k):
@@ -305,6 +434,11 @@ emit("")
 emit("\tsection\ttext,code")
 emit("")
 gen_mul()
+gen_mul_kara()
+emit("; fe16_mul = the variant currently selected as default")
+emit("\txdef\t_fe16_mul")
+emit("_fe16_mul\tequ\t_fe16_mul_kara")
+emit("")
 gen_sqr()
 gen_add()
 gen_sub()

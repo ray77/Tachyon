@@ -34,6 +34,11 @@ void fe16_sub_c(fe16 h, const fe16 f, const fe16 g);
 void fe16_mul(FE16_REG("a0") uint16_t *h, FE16_REG("a1") const uint16_t *f, FE16_REG("a2") const uint16_t *g);
 /* portable C version, always available for comparison (identical results) */
 void fe16_mul_c(fe16 h, const fe16 f, const fe16 g);
+#ifdef FE16_ASM
+/* the two assembler multiplication variants; fe16_mul is an alias of one of them */
+void fe16_mul_comba(FE16_REG("a0") uint16_t *h, FE16_REG("a1") const uint16_t *f, FE16_REG("a2") const uint16_t *g);
+void fe16_mul_kara(FE16_REG("a0") uint16_t *h, FE16_REG("a1") const uint16_t *f, FE16_REG("a2") const uint16_t *g);
+#endif
 void fe16_sqr(FE16_REG("a0") uint16_t *h, FE16_REG("a1") const uint16_t *f);
 void fe16_sqr_c(fe16 h, const fe16 f);
 void fe16_mul121665(FE16_REG("a0") uint16_t *h, FE16_REG("a1") const uint16_t *f);

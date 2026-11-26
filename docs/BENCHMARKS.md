@@ -92,3 +92,16 @@ Korrektheit: alle fünf Routinen limb-für-limb gleich der C-Version auf je 1000
 Ein Produkt kostet `move.w (a0)+ / mulu.w -(a1) / add.l / addx.w` ≈ 8 + (38 + 2·Einsen + 6) + 8 + 4 ≈ 80 Takte bei zufälligen Operanden; 256 Produkte ≈ 21 k der 26,4 k Takte von `fe16_mul`. Der Rest (Spaltenwechsel ≈ 1,2 k, Reduktion ≈ 1,1 k, zwei Faltungen ≈ 1,2 k, Prolog) ist mit ≈ 0,4 k Ersparnis (X-Flag-Faltungen) fast ausgereizt. Karatsuba (eine Ebene, 192 Produkte) spart netto ≈ 3 k Takte pro Multiplikation (≈ −0,5 s), bei der Quadrierung praktisch nichts. Realistische Untergrenze dieser Architektur: **≈ 7,5 s pro X25519** auf 7,09 MHz. Weitere Faktoren gibt es nur noch über weniger Feldoperationen, nicht über schnellere.
 
 Konsequenz für den Verbindungsaufbau: Schlüsselpaare (Basispunkt-Multiplikationen) lassen sich offline im Leerlauf vorberechnen. Online bleiben die DH-Operationen des Noise-Handshakes (XX: 2–3, IK bei Wiederverbindung: 2) → 17–26 s bei 8,6 s/Op. Ob WhatsApp das toleriert, entscheidet die Protokollrecherche (Phase 1), nicht weitere Mikrooptimierung.
+
+## 2026-11-26 – Schritt 4: Karatsuba (eine Ebene) für `fe16_mul`
+
+`_fe16_mul_kara`: f = f0 + 2^128·f1, g analog (je 8 Limbs). z0 = f0·g0, z2 = f1·g1, m = (f0+f1)(g0+g1) mit den beiden 9. Limbs als maskierte Korrekturen (konstante Laufzeit), z1 = m − z0 − z2 (17 Limbs), r[8..] += z1. 192 statt 256 MULU.W, dafür ≈ 110 zusätzliche Wort-Add/Sub mit Carry und ein 132-Byte-Stackrahmen. Beide Varianten bleiben im Generator; `_fe16_mul` ist ein `equ`-Alias auf die gewählte.
+
+| Operation | Comba | Karatsuba | Differenz |
+|---|---:|---:|---:|
+| `fe16_mul` | 3,728 ms (26,4 k Takte) | **3,472 ms (24,6 k Takte)** | −6,9 % (−1,8 k Takte; Prognose −2,4 k) |
+| X25519 | 8,60 s | **8,28 s** | −0,32 s |
+
+Korrektheit: beide Varianten limb-für-limb gleich der C-Version auf 1000 Inputs, RFC 7748 bestanden. Karatsuba ist jetzt Standard. Zweite Ebene (4-Limb-Blöcke) lohnt nicht: 144 Produkte sparen weitere 48 × 80 ≈ 3,8 k, der Verwaltungsaufwand verdoppelt sich aber auf ≈ 5 k.
+
+Aufschlüsselung der 8,28 s: Mul 1300 × 3,47 = 4,51 s; Sqr 1270 × 2,38 = 3,02 s; Add/Sub/Mul121665 0,58 s; Ladder in C ≈ 0,16 s.
