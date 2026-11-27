@@ -19,6 +19,8 @@
 #include "creds.h"
 #include "wabinary.h"
 #include "noise.h"
+#include "prekeys.h"
+#include "inflate.h"
 
 int wa_probe_sim_pair(wa_probe_io *pio, const uint8_t *first_frame, uint32_t len);
 int wa_probe_sim_login(wa_probe_io *pio, const uint8_t *first_frame, uint32_t len);
@@ -40,6 +42,8 @@ static uint8_t *pd_frame, *ps_frame; static uint32_t pd_len, ps_len;
 static uint8_t queue[8][4096]; static uint32_t qlen[8], qhead, qtail;           /* server -> client frames (decrypted node frames) */
 static int coalesce;                                                              /* deliver the next two queued frames in ONE WebSocket message */
 static int closed_by_server, closed_after_queue, stage, codes_shown, ticks, pongs, keepalives, acks, signs, errors, closes;
+static int counts, uploads, actives, stanza_acks, upload_keys, bad_upload; static char ack_class[2][16], ack_id[2][16], ack_to[2][40];
+static wa_prekeys prekeys; static int prekeys_saved; static void save_prekeys(void *ctx) { (void)ctx; prekeys_saved++; }
 static uint32_t scan_at_code;                                                     /* which code the "phone" scans (1-based); 0 = never */
 static uint32_t exp_first_ms = 3000, exp_next_ms = 1500;
 static uint8_t sign_frame[2048]; static uint32_t sign_len;
@@ -49,6 +53,30 @@ static uint8_t arena_mem[16384];
 static void enqueue(const uint8_t *frame, uint32_t len) { memcpy(queue[qtail & 7], frame, len); qlen[qtail & 7] = len; qtail++; }
 static void enqueue_node(const wab_node *n) { uint8_t b[512]; uint32_t l; if (wab_encode_frame(n, b, sizeof b, &l) == WAB_OK) enqueue(b, l); }
 
+/* <iq from=s.whatsapp.net type=result id=ID>[child]</iq> */
+static void enqueue_result(const wab_value *id, const wab_node *child)
+{
+    wab_node n; wab_attr a[3];
+    wab_node_init(&n, "iq");
+    a[0].key = wab_s("from"); a[0].val = wab_jid_value("", "s.whatsapp.net", 0);
+    a[1].key = wab_s("type"); a[1].val = wab_text("result");
+    a[2].key = wab_s("id"); a[2].val = *id;
+    n.attrs = a; n.n_attrs = 3;
+    if (child) { n.val.kind = WAB_LIST; n.children = child; n.n_children = 1; }
+    enqueue_node(&n);
+}
+/* a compressed frame: flags 02, then a zlib stream with one stored block (inflate's Huffman paths are covered by
+ * make inflate-test; this exercises the frame path in the core) */
+static void enqueue_compressed_node(const wab_node *n)
+{
+    uint8_t b[1024], f[1100]; uint32_t l, o = 0, ad;
+    if (wab_encode_node(n, b, sizeof b, &l) != WAB_OK) { CHECK(!"encode"); return; }
+    f[o++] = 0x02; f[o++] = 0x78; f[o++] = 0x01;                /* flags; CMF, FLG */
+    f[o++] = 0x01; f[o++] = (uint8_t)l; f[o++] = (uint8_t)(l >> 8); f[o++] = (uint8_t)~l; f[o++] = (uint8_t)(~l >> 8);
+    memcpy(f + o, b, l); o += l;
+    ad = wa_adler32(b, l); f[o++] = (uint8_t)(ad >> 24); f[o++] = (uint8_t)(ad >> 16); f[o++] = (uint8_t)(ad >> 8); f[o++] = (uint8_t)ad;
+    enqueue(f, o);
+}
 static void enqueue_stream_error(const char *code)
 {
     wab_node n; wab_attr a[1];
@@ -100,8 +128,54 @@ static int io_send(void *ctx, const uint8_t *p, uint32_t n)
             CHECK(e == WAB_OK);
             if (e == WAB_OK) {
                 const wab_value *type = wab_get_attr(nd, "type"), *id = wab_get_attr(nd, "id"), *xmlns = wab_get_attr(nd, "xmlns");
-                CHECK(wab_str_eq(&nd->tag, "iq"));
-                if (xmlns && wab_str_eq(&xmlns->str, "w:p")) { keepalives++; CHECK(type && wab_str_eq(&type->str, "get")); CHECK(wab_get_child(nd, "ping") != 0); }
+                CHECK(wab_str_eq(&nd->tag, "iq") || wab_str_eq(&nd->tag, "ack"));
+                if (wab_str_eq(&nd->tag, "ack")) {
+                    const wab_value *cl = wab_get_attr(nd, "class"), *to = wab_get_attr(nd, "to"); int k = stanza_acks < 2 ? stanza_acks : 1;
+                    stanza_acks++;
+                    if (cl && cl->kind == WAB_STR) snprintf(ack_class[k], sizeof ack_class[k], "%.*s", (int)cl->str.len, (const char *)cl->str.p);
+                    if (id && id->kind == WAB_STR) snprintf(ack_id[k], sizeof ack_id[k], "%.*s", (int)id->str.len, (const char *)id->str.p);
+                    if (to && to->kind == WAB_JID) snprintf(ack_to[k], sizeof ack_to[k], "%.*s@%.*s", (int)to->jid.user.len, (const char *)to->jid.user.p, (int)to->jid.server.len, (const char *)to->jid.server.p);
+                    CHECK(wab_get_attr(nd, "type") != 0);              /* receipt type / notification type copied */
+                }
+                else if (xmlns && wab_str_eq(&xmlns->str, "w:p")) { keepalives++; CHECK(type && wab_str_eq(&type->str, "get")); CHECK(wab_get_child(nd, "ping") != 0); }
+                else if (xmlns && wab_str_eq(&xmlns->str, "encrypt") && wab_get_child(nd, "count")) {
+                    wab_node c; wab_attr ca[1];
+                    counts++; CHECK(type && wab_str_eq(&type->str, "get"));
+                    wab_node_init(&c, "count"); ca[0].key = wab_s("value"); ca[0].val = wab_text(counts == 1 ? "0" : "3"); c.attrs = ca; c.n_attrs = 1;
+                    enqueue_result(id, &c);
+                }
+                else if (xmlns && wab_str_eq(&xmlns->str, "encrypt") && wab_get_child(nd, "list")) {
+                    const wab_node *reg = wab_get_child(nd, "registration"), *ty = wab_get_child(nd, "type"), *idn = wab_get_child(nd, "identity"), *list = wab_get_child(nd, "list"), *skey = wab_get_child(nd, "skey");
+                    uint32_t k;
+                    uploads++; CHECK(type && wab_str_eq(&type->str, "set"));
+                    CHECK(reg && reg->val.kind == WAB_BYTES && reg->val.str.len == 4 && reg->val.str.p[2] == 0x12 && reg->val.str.p[3] == 0x34);
+                    CHECK(ty && ty->val.kind == WAB_BYTES && ty->val.str.len == 1 && ty->val.str.p[0] == 5);
+                    CHECK(idn && idn->val.kind == WAB_BYTES && idn->val.str.len == 32);
+                    CHECK(list && list->val.kind == WAB_LIST && list->n_children == 3);
+                    for (k = 0; list && k < list->n_children; k++) {
+                        const wab_node *key = &list->children[k], *kid = wab_get_child(key, "id"), *kv = wab_get_child(key, "value");
+                        upload_keys++;
+                        if (!(wab_str_eq(&key->tag, "key") && kid && kid->val.str.len == 3 && kid->val.str.p[2] == (uint8_t)(k + 1) && kv && kv->val.str.len == 32
+                              && memcmp(kv->val.str.p, prekeys.k[k].pub, 32) == 0)) bad_upload++;
+                    }
+                    CHECK(skey && wab_get_child(skey, "id") && wab_get_child(skey, "value") && wab_get_child(skey, "signature") && wab_get_child(skey, "signature")->val.str.len == 64);
+                    enqueue_result(id, 0);
+                }
+                else if (xmlns && wab_str_eq(&xmlns->str, "passive")) {
+                    wab_node ntf, rcpt, cnt; wab_attr na[4], ra[4], ca[1];
+                    actives++; CHECK(type && wab_str_eq(&type->str, "set")); CHECK(wab_get_child(nd, "active") != 0);
+                    enqueue_result(id, 0);
+                    /* what the server then sends: a compressed notification and a receipt (both to be acknowledged) */
+                    wab_node_init(&ntf, "notification"); na[0].key = wab_s("from"); na[0].val = wab_jid_value("", "s.whatsapp.net", 0);
+                    na[1].key = wab_s("id"); na[1].val = wab_text("1234567890"); na[2].key = wab_s("type"); na[2].val = wab_text("encrypt"); na[3].key = wab_s("t"); na[3].val = wab_text("1764300001");
+                    ntf.attrs = na; ntf.n_attrs = 4; wab_node_init(&cnt, "count"); ca[0].key = wab_s("value"); ca[0].val = wab_text("3"); cnt.attrs = ca; cnt.n_attrs = 1;
+                    ntf.val.kind = WAB_LIST; ntf.children = &cnt; ntf.n_children = 1;
+                    enqueue_compressed_node(&ntf);
+                    wab_node_init(&rcpt, "receipt"); ra[0].key = wab_s("from"); ra[0].val = wab_jid_value("4917612345678", "s.whatsapp.net", 0);
+                    ra[1].key = wab_s("id"); ra[1].val = wab_text("ABCDEF1234"); ra[2].key = wab_s("type"); ra[2].val = wab_text("read"); ra[3].key = wab_s("t"); ra[3].val = wab_text("1764300002");
+                    rcpt.attrs = ra; rcpt.n_attrs = 4;
+                    enqueue_node(&rcpt);
+                }
                 else if (wab_get_child(nd, "pair-device-sign")) {
                     const wab_node *di = wab_get_child(wab_get_child(nd, "pair-device-sign"), "device-identity"); const wab_value *ki;
                     signs++;
@@ -151,6 +225,8 @@ static void reset(wa_probe_io *io, wa_creds *creds)
     err_code[0] = err_text[0] = 0;
     memset(creds, 0, sizeof *creds); test_identity(&creds->id);
     io->creds = creds; io->creds_loaded = 1; io->paired_now = 0;
+    counts = uploads = actives = stanza_acks = upload_keys = bad_upload = prekeys_saved = 0; memset(ack_class, 0, sizeof ack_class); memset(ack_id, 0, sizeof ack_id); memset(ack_to, 0, sizeof ack_to);
+    wa_prekeys_init(&prekeys); io->prekeys = &prekeys; io->prekeys_loaded = 1; io->prekeys_wanted = 3; io->save_prekeys = save_prekeys; io->linger_ms = 1500;
 }
 
 int main(int argc, char **argv)
@@ -205,8 +281,22 @@ int main(int argc, char **argv)
         wab_node_init(&n, "success"); a[0].key = wab_s("t"); a[0].val = wab_text("1764300000"); a[1].key = wab_s("lid"); a[1].val = wab_jid_value("123456789012345", "lid", 7);
         n.attrs = a; n.n_attrs = 2;
         CHECK(wab_encode_frame(&n, b, sizeof b, &l) == WAB_OK);
+        { hmac_drbg prng; drbg_instantiate(&prng, seed, sizeof seed); wa_prekeys_generate(&prekeys, 3, &prng); }   /* the sim skips wa_probe_prepare */
         r = wa_probe_sim_login(&io, b, l);
+        printf("%s\n", io.result);
         CHECK(r == 1 && io.logged_in);
+        CHECK(counts == 1 && uploads == 1 && actives == 1 && upload_keys == 3 && bad_upload == 0);
+        CHECK(io.server_prekeys == 0 && io.prekeys_uploaded == 3 && io.active_set && prekeys_saved == 1 && wa_prekeys_pending(&prekeys) == 0);
+        CHECK(stanza_acks == 2 && io.acks_sent == 2 && io.frames_after_login == 5);   /* 3 results + notification + receipt */
+        CHECK(strcmp(ack_class[0], "notification") == 0 && strcmp(ack_id[0], "1234567890") == 0 && strcmp(ack_to[0], "@s.whatsapp.net") == 0);
+        CHECK(strcmp(ack_class[1], "receipt") == 0 && strcmp(ack_id[1], "ABCDEF1234") == 0 && strcmp(ack_to[1], "4917612345678@s.whatsapp.net") == 0);
+        CHECK(closes == 1);
+        /* a second login: the server now has 3 prekeys, nothing pending -> no upload */
+        reset(&io, &creds); creds.paired = 1; strcpy(creds.jid_user, "4917612345678"); creds.jid_device = 7; counts = 1; /* so the fake answers "3" */
+        wab_node_init(&n, "success"); a[0].key = wab_s("t"); a[0].val = wab_text("1764300000"); a[1].key = wab_s("lid"); a[1].val = wab_jid_value("123456789012345", "lid", 7); n.attrs = a; n.n_attrs = 2;
+        CHECK(wab_encode_frame(&n, b, sizeof b, &l) == WAB_OK);
+        r = wa_probe_sim_login(&io, b, l);
+        CHECK(r == 1 && uploads == 0 && actives == 1 && io.server_prekeys == 3 && io.prekeys_uploaded == 0);
         wab_node_init(&n, "failure"); a[0].key = wab_s("reason"); a[0].val = wab_text("401"); n.attrs = a; n.n_attrs = 1;
         CHECK(wab_encode_frame(&n, b, sizeof b, &l) == WAB_OK);
         r = wa_probe_sim_login(&io, b, l);

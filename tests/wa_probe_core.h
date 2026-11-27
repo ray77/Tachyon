@@ -23,7 +23,7 @@
 #include "tls13.h"
 #include "qr.h"
 
-struct wa_creds;
+struct wa_creds; struct wa_prekeys;
 
 /* io->mode */
 #define WA_MODE_PROBE 0     /* the connection probe: handshake, first frame decrypted, close (unchanged behaviour) */
@@ -63,11 +63,25 @@ typedef struct wa_probe_io {
     void (*save_creds)(void *ctx);                       /* optional: creds changed, persist them now (before the 515 restart) */
     uint32_t qr_first_ms, qr_next_ms;                    /* validity per code: 0 = whatsmeow's 60 s / 20 s */
 
+    /* after <success> (WA_MODE_PAIR), what whatsmeow's handleConnectSuccess does: prekey count query, upload of the
+       pending batch when the server holds fewer than 5, <active/>, then linger_ms online acknowledging receipts and
+       notifications (compressed frames inflated) before the close */
+    struct wa_prekeys *prekeys;     /* in/out, or 0 = no prekey handling; wa_probe_prepare fills the batch up to
+                                       prekeys_wanted pending keys before the connection (3.3 s each on the 68000) */
+    int prekeys_loaded;             /* 1 = *prekeys holds a stored record (else it is initialised) */
+    uint32_t prekeys_wanted;        /* pending batch size (whatsmeow 50; the A500 takes 10) */
+    void (*save_prekeys)(void *ctx);                     /* optional: the batch changed (generated / uploaded) */
+    uint32_t linger_ms;             /* how long to stay online after <active/> (0 = close right away) */
+
     /* pairing results, milliseconds since wa_probe_run started unless noted (0 = not reached) */
     int paired_now;             /* pairing completed in this run (pair-device-sign sent) */
     int logged_in;              /* <success> received on the login connection */
     uint32_t t_qr_shown, t_pair_success, d_verify, d_sign, t_sign_sent, t_515, t_login_connect, t_login_accepted;
     uint32_t qr_shown;          /* codes shown */
+    /* post-login results */
+    uint32_t d_prekeys;                     /* key generation time in wa_probe_prepare */
+    uint32_t server_prekeys, prekeys_uploaded, t_active, frames_after_login, acks_sent, messages_seen;
+    int have_server_prekeys, active_set;
 
     /* results, milliseconds since wa_probe_run started (0 = not reached) */
     uint32_t t_tls, t_ws, t_hello, t_finish, t_accepted;

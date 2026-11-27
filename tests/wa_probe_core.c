@@ -13,6 +13,8 @@
 #include "pairing.h"
 #include "creds.h"
 #include "pb.h"
+#include "prekeys.h"
+#include "inflate.h"
 
 /* whatsmeow socket/constants.go */
 static const uint8_t wa_header[4] = { 'W', 'A', 6, 3 };
@@ -267,6 +269,19 @@ int wa_probe_prepare(wa_probe_io *pio)
             wa_fmt(line, sizeof line, "identity: stored companion identity loaded (registration id %u, %s)", io->creds->id.reg_id,
                    io->creds->paired ? "paired: login" : "not paired yet: QR pairing"); logl(line);
         }
+        if (io->prekeys) {
+            uint32_t pending, made;
+            if (!io->prekeys_loaded) { wa_prekeys_init(io->prekeys); io->prekeys_loaded = 1; }
+            pending = wa_prekeys_pending(io->prekeys);
+            if (pending < io->prekeys_wanted) {
+                t0 = ms();
+                made = wa_prekeys_generate(io->prekeys, io->prekeys_wanted - pending, &rng);
+                io->d_prekeys = ms() - t0;
+                wa_fmt(line, sizeof line, "prekeys: %u new one-time prekeys (X25519, ids up to %u) in %T s, before the connection; %u pending upload",
+                       made, io->prekeys->next_id - 1, io->d_prekeys, wa_prekeys_pending(io->prekeys)); logl(line);
+                if (made && io->save_prekeys) io->save_prekeys(io->ctx);
+            } else { wa_fmt(line, sizeof line, "prekeys: %u one-time prekeys pending upload (stored batch)", pending); logl(line); }
+        }
     }
     if (!connection_keys()) return 0;
     wa_fmt(line, sizeof line, "tls: X25519 key pair ready (%T s, before the connection)", io->t_tls_key); logl(line);
@@ -434,7 +449,7 @@ static int handshake(const uint8_t *payload, uint32_t payload_len, uint8_t *plai
 }
 
 /* ---- pairing session ----------------------------------------------------------------------------- */
-static uint8_t arena_mem[6144]; static wab_arena arena;
+static uint8_t arena_mem[12288]; static wab_arena arena;   /* post-login stanzas (inflated) are larger than the pairing IQs */
 static uint8_t refbuf[WA_QR_REFS_MAX][128]; static uint32_t reflen[WA_QR_REFS_MAX], nrefs;
 static char qr_text[WA_PAIR_QR_MAX]; static qr qr_code; static qr_work qr_scratch;
 static uint32_t iq_counter; static char iq_prefix[16];
@@ -501,9 +516,15 @@ static const wab_node *decode(const uint8_t *plain, uint32_t plen)
 {
     const wab_node *n; int e;
     wab_arena_init(&arena, arena_mem, sizeof arena_mem);
-    e = wab_decode_frame(plain, plen, &arena, &n);
-    if (e != WAB_OK) { wa_fmt(line, sizeof line, "wab: %s (flags %02x, %u bytes)%s", wab_errstr(e), (uint32_t)plain[0], plen,
-                              e == WAB_ERR_COMPRESSED ? " - zlib-compressed frames are not supported yet" : ""); logl(line); return 0; }
+    if (plen && (plain[0] & WAB_FLAG_COMPRESSED)) {
+        /* whatsmeow message.go: flags bit 1 = the node is a zlib stream (proto/inflate.c) */
+        static uint8_t inflated[WA_PROBE_MSG_MAX]; uint32_t ilen = 0, t0 = ms();
+        e = wa_inflate(plain + 1, plen - 1, inflated, sizeof inflated, &ilen);
+        if (e != WA_INFLATE_OK) { wa_fmt(line, sizeof line, "wab: compressed frame: %s (%u bytes in, %u out)", wa_inflate_errstr(e), plen - 1, ilen); logl(line); return 0; }
+        wa_fmt(line, sizeof line, "wab: inflated %u -> %u bytes in %T s", plen - 1, ilen, ms() - t0); logl(line);
+        e = wab_decode_node(inflated, ilen, &arena, &n);
+    } else e = wab_decode_frame(plain, plen, &arena, &n);
+    if (e != WAB_OK) { wa_fmt(line, sizeof line, "wab: %s (flags %02x, %u bytes)", wab_errstr(e), (uint32_t)plain[0], plen); logl(line); return 0; }
     log_node("recv: ", n);
     return n;
 }
@@ -527,19 +548,151 @@ static const char *attr_cstr(const wab_node *n, const char *key, char *buf, uint
     return buf;
 }
 
+/* request ids like whatsmeow's uniqueID + counter */
+static void next_iq_id(char *id, uint32_t cap)
+{
+    if (!iq_prefix[0]) { uint8_t r[2]; drbg_generate(&rng, r, 2); wa_fmt(iq_prefix, sizeof iq_prefix, "%u.%u-", (uint32_t)r[0], (uint32_t)r[1]); }
+    wa_fmt(id, cap, "%s%u", iq_prefix, ++iq_counter);
+}
+
+/* <iq id xmlns type to=s.whatsapp.net><child/></iq> */
+static int send_iq1(const char *id, const char *xmlns, const char *type, const char *child_tag, const char *what)
+{
+    static wab_node iq, child; static wab_attr a[4];
+    wab_node_init(&iq, "iq"); wab_node_init(&child, child_tag);
+    a[0].key = wab_s("id"); a[0].val = wab_text(id);
+    a[1].key = wab_s("xmlns"); a[1].val = wab_text(xmlns);
+    a[2].key = wab_s("type"); a[2].val = wab_text(type);
+    a[3].key = wab_s("to"); a[3].val = wab_jid_value("", WA_SERVER_JID, 0);
+    iq.attrs = a; iq.n_attrs = 4; iq.val.kind = WAB_LIST; iq.children = &child; iq.n_children = 1;
+    return send_node(&iq, what);
+}
+
 /* whatsmeow keepAliveLoop: <iq id=.. xmlns=w:p type=get to=s.whatsapp.net><ping/></iq> every 20-30 s */
 static int send_keepalive(void)
 {
-    static wab_node iq, ping; static wab_attr a[4]; static char id[32];
-    if (!iq_prefix[0]) { uint8_t r[2]; drbg_generate(&rng, r, 2); wa_fmt(iq_prefix, sizeof iq_prefix, "%u.%u-", (uint32_t)r[0], (uint32_t)r[1]); }
-    wa_fmt(id, sizeof id, "%s%u", iq_prefix, ++iq_counter);
-    wab_node_init(&iq, "iq"); wab_node_init(&ping, "ping");
-    a[0].key = wab_s("id"); a[0].val = wab_text(id);
-    a[1].key = wab_s("xmlns"); a[1].val = wab_text("w:p");
-    a[2].key = wab_s("type"); a[2].val = wab_text("get");
-    a[3].key = wab_s("to"); a[3].val = wab_jid_value("", WA_SERVER_JID, 0);
-    iq.attrs = a; iq.n_attrs = 4; iq.val.kind = WAB_LIST; iq.children = &ping; iq.n_children = 1;
-    return send_node(&iq, "keepalive ping");
+    static char id[32];
+    next_iq_id(id, sizeof id);
+    return send_iq1(id, "w:p", "get", "ping", "keepalive ping");
+}
+
+/* whatsmeow sendAck (receipt.go): <ack class=tag id to=from [participant] [type]/> for receipts and notifications.
+ * Messages are not acknowledged: there is no Signal session layer yet, so the server keeps them for a later client. */
+static int send_ack(const wab_node *n)
+{
+    static wab_node ack; static wab_attr a[5]; uint32_t k = 0;
+    const wab_value *id = wab_get_attr(n, "id"), *from = wab_get_attr(n, "from"), *part = wab_get_attr(n, "participant"), *type = wab_get_attr(n, "type");
+    if (!id || !from) return 1;
+    wab_node_init(&ack, "ack");
+    a[k].key = wab_s("class"); a[k].val.kind = WAB_STR; a[k].val.str = n->tag; a[k].val.str.form = WAB_F_AUTO; k++;
+    a[k].key = wab_s("id"); a[k].val = *id; k++;
+    a[k].key = wab_s("to"); a[k].val = *from; k++;
+    if (part) { a[k].key = wab_s("participant"); a[k].val = *part; k++; }
+    if (type && !wab_str_eq(&n->tag, "message")) { a[k].key = wab_s("type"); a[k].val = *type; k++; }
+    ack.attrs = a; ack.n_attrs = k;
+    io->acks_sent++;
+    return send_node(&ack, "ack");
+}
+
+/* one decoded node from the server; 0 = nothing within timeout_ms (or a malformed frame, logged) or *gone = 1 */
+static const wab_node *recv_node(uint32_t timeout_ms, int *gone)
+{
+    static uint8_t plain[WA_PROBE_MSG_MAX]; uint32_t plen; int r = recv_frame(timeout_ms, plain, &plen);
+    *gone = 0;
+    if (r < 0) { *gone = 1; return 0; }
+    if (r == 0) return 0;
+    io->frames_after_login++;
+    return decode(plain, plen);
+}
+
+/* a server stanza that arrives while we wait for something else; 1 = keep going, 0 = the stream ended */
+static int handle_async(const wab_node *n)
+{
+    if (wab_str_eq(&n->tag, "stream:error") || wab_str_eq(&n->tag, "xmlstreamend") || wab_str_eq(&n->tag, "failure")) { logl("login: the server ended the stream"); return 0; }
+    if (wab_str_eq(&n->tag, "receipt") || wab_str_eq(&n->tag, "notification")) return send_ack(n);
+    if (wab_str_eq(&n->tag, "message")) { io->messages_seen++; logl("login: an encrypted message waits for us (left unacknowledged: no Signal session layer yet)"); }
+    return 1;                                   /* ib (offline_preview, offline, dirty, edge_routing), iq from the server, ...: logged only */
+}
+
+/* the result of our IQ `id`; other stanzas in between are handled; 0 = none within timeout_ms or the stream ended */
+static const wab_node *wait_result(const char *id, uint32_t timeout_ms)
+{
+    uint32_t deadline = ms() + timeout_ms;
+    for (;;) {
+        int gone; const wab_node *n; uint32_t now = ms();
+        if (now >= deadline) return 0;
+        n = recv_node(deadline - now, &gone);
+        if (gone) return 0;
+        if (!n) continue;
+        if (wab_str_eq(&n->tag, "iq")) {
+            const wab_value *v = wab_get_attr(n, "id");
+            if (v && v->kind == WAB_STR && wab_str_eq(&v->str, id)) return n;
+            continue;
+        }
+        if (!handle_async(n)) return 0;
+    }
+}
+
+static uint32_t dec_value(const wab_value *v)
+{
+    uint32_t i, r = 0;
+    if (!v || v->kind != WAB_STR) return 0;
+    for (i = 0; i < v->str.len; i++) { if (v->str.p[i] < '0' || v->str.p[i] > '9') break; r = r * 10 + (uint32_t)(v->str.p[i] - '0'); }
+    return r;
+}
+
+static int iq_is_result(const wab_node *r) { const wab_value *ty = r ? wab_get_attr(r, "type") : 0; return ty && ty->kind == WAB_STR && wab_str_eq(&ty->str, "result"); }
+
+/* after <success>: whatsmeow handleConnectSuccess - prekey count, upload when the server runs low, <active/>, then
+ * linger_ms online (receipts and notifications acknowledged, keepalive every 25 s), then close. 1 = done. */
+static int post_login(void)
+{
+    char id[32]; const wab_node *r; uint32_t t_end, last_ka; int gone;
+    /* 1. how many one-time prekeys of ours does the server hold */
+    next_iq_id(id, sizeof id);
+    if (!send_iq1(id, "encrypt", "get", "count", "prekey count query")) return fail("RESULT: logged in, but sending the prekey count query failed", 0, 0);
+    r = wait_result(id, 30000);
+    if (!r) return fail("RESULT: logged in, but no answer to the prekey count query", 0, 0);
+    { const wab_node *c = wab_get_child(r, "count"); io->have_server_prekeys = c != 0; io->server_prekeys = c ? dec_value(wab_get_attr(c, "value")) : 0; }
+    wa_fmt(line, sizeof line, "login: the server holds %u one-time prekeys of ours (whatsmeow uploads below %u)", io->server_prekeys, (uint32_t)WA_PREKEYS_MIN_SERVER); logl(line);
+    /* 2. upload the pending batch when the server runs low */
+    if (io->prekeys && io->have_server_prekeys && io->server_prekeys < WA_PREKEYS_MIN_SERVER && wa_prekeys_pending(io->prekeys)) {
+        static wa_prekey_upload up; uint32_t n; const wab_node *iq;
+        next_iq_id(id, sizeof id);
+        iq = wa_prekeys_upload_node(&up, id, &io->creds->id, io->prekeys, &n);
+        if (!send_node(iq, "prekey upload")) return fail("RESULT: logged in, but sending the prekey upload failed", 0, 0);
+        r = wait_result(id, 30000);
+        if (!iq_is_result(r)) return fail("RESULT: logged in, but the prekey upload was not accepted (see recv: line)", 0, 0);
+        wa_prekeys_mark_uploaded(io->prekeys); io->prekeys_uploaded = n;
+        if (io->save_prekeys) io->save_prekeys(io->ctx);
+        wa_fmt(line, sizeof line, "login: %u one-time prekeys uploaded and accepted (registration id %u, signed prekey id %u)", n, io->creds->id.reg_id, io->creds->id.spk_id); logl(line);
+    }
+    /* 3. passive -> active */
+    next_iq_id(id, sizeof id);
+    if (!send_iq1(id, "passive", "set", "active", "passive/active")) return fail("RESULT: logged in, but sending <active/> failed", 0, 0);
+    r = wait_result(id, 30000);
+    if (!iq_is_result(r)) return fail("RESULT: logged in, but <active/> was not accepted (see recv: line)", 0, 0);
+    io->active_set = 1; io->t_active = ms();
+    wa_fmt(line, sizeof line, "login: <active/> accepted %T s after <success>; staying online for %T s", io->t_active - io->t_login_accepted, io->linger_ms); logl(line);
+    /* 4. linger */
+    t_end = ms() + io->linger_ms; last_ka = ms();
+    while (ms() < t_end) {
+        const wab_node *n; uint32_t now = ms(), left = t_end - now;
+        if (now - last_ka >= 25000) { if (!send_keepalive()) break; last_ka = now; }
+        n = recv_node(left < 1000 ? left : 1000, &gone);
+        if (gone) { logl("login: connection closed by the server"); break; }
+        if (n && !handle_async(n)) break;
+    }
+    close_ws();
+    return 1;
+}
+
+static const char *post_summary(void)
+{
+    static char s[120];
+    wa_fmt(s, sizeof s, "; server prekeys %u + %u uploaded, %s, %u stanzas, %u acks%s", io->server_prekeys, io->prekeys_uploaded,
+           io->active_set ? "active" : "not active", io->frames_after_login, io->acks_sent, io->messages_seen ? ", messages waiting" : "");
+    return s;
 }
 
 static int take_refs(const wab_node *iq)
@@ -708,9 +861,9 @@ next_code: ;
         if (!pl) return fail("RESULT: login payload failed", 0, 0);
         if (!handshake(payload, pl, plain, &plen)) return 0; }
     r = expect_success(plain, plen);
-    close_ws();
-    if (r) wa_fmt(io->result, sizeof io->result, "RESULT: PAIRED and LOGGED IN as %s:%u (scan -> sign %T s, login connection %T s)", io->creds->jid_user, io->creds->jid_device,
-                  io->t_sign_sent - io->t_pair_success, io->t_login_accepted - io->t_login_connect);
+    if (r) r = post_login(); else close_ws();
+    if (r) wa_fmt(io->result, sizeof io->result, "RESULT: PAIRED and LOGGED IN as %s:%u (scan -> sign %T s, login connection %T s)%s", io->creds->jid_user, io->creds->jid_device,
+                  io->t_sign_sent - io->t_pair_success, io->t_login_accepted - io->t_login_connect, post_summary());
     return r;
 }
 
@@ -724,6 +877,7 @@ int wa_probe_run(wa_probe_io *pio)
     io = pio; t_start = io->now_ms(); pend_len = 0;
     io->t_tls = io->t_ws = io->t_hello = io->t_finish = io->t_accepted = 0; io->pongs = io->ladders = 0; io->result[0] = 0;
     io->paired_now = io->logged_in = 0; io->t_qr_shown = io->t_pair_success = io->d_verify = io->d_sign = io->t_sign_sent = io->t_515 = io->t_login_connect = io->t_login_accepted = 0; io->qr_shown = 0;
+    io->server_prekeys = io->prekeys_uploaded = io->t_active = io->frames_after_login = io->acks_sent = io->messages_seen = 0; io->have_server_prekeys = io->active_set = 0;
     iq_counter = 0; iq_prefix[0] = 0;
 
     if (io->mode == WA_MODE_PAIR) {
@@ -742,8 +896,8 @@ int wa_probe_run(wa_probe_io *pio)
     }
     if (io->creds->paired && !io->paired_now) {
         int r = expect_success(plain, plen);
-        close_ws();
-        if (r) wa_fmt(io->result, sizeof io->result, "RESULT: LOGGED IN with the stored credentials as %s:%u (%T s since connect)", io->creds->jid_user, io->creds->jid_device, io->t_login_accepted);
+        if (r) r = post_login(); else close_ws();
+        if (r) wa_fmt(io->result, sizeof io->result, "RESULT: LOGGED IN with the stored credentials as %s:%u (%T s since connect)%s", io->creds->jid_user, io->creds->jid_device, io->t_login_accepted, post_summary());
         return r;
     }
     return pair_session(plain, plen);
@@ -759,6 +913,7 @@ static void sim_open(wa_probe_io *pio)
     io = pio; t_start = io->now_ms(); pend_len = 0; io->tunnel = 1; io->result[0] = 0; msg_have = 0; msg_off = 0;
     io->paired_now = io->logged_in = 0; io->pongs = 0; io->qr_shown = 0;
     io->t_qr_shown = io->t_pair_success = io->d_verify = io->d_sign = io->t_sign_sent = io->t_515 = io->t_login_connect = io->t_login_accepted = 0;
+    io->server_prekeys = io->prekeys_uploaded = io->t_active = io->frames_after_login = io->acks_sent = io->messages_seen = 0; io->have_server_prekeys = io->active_set = 0;
     iq_counter = 0; iq_prefix[0] = 0;
     if (!rng.instantiated) drbg_instantiate(&rng, io->seed, io->seed_len);
     ws_client_start(&w, io->host, "/ws/chat", "https://web.whatsapp.com", msgbuf, sizeof msgbuf, &rng, out, sizeof out);
@@ -775,8 +930,12 @@ int wa_probe_sim_pair(wa_probe_io *pio, const uint8_t *first_frame, uint32_t len
 int wa_probe_sim_login(wa_probe_io *pio, const uint8_t *first_frame, uint32_t len)
 {
     static uint8_t plain[WA_PROBE_MSG_MAX];
+    int r;
     sim_open(pio);
     cp(plain, first_frame, len);
-    return expect_success(plain, len);
+    r = expect_success(plain, len);
+    if (r) r = post_login(); else close_ws();
+    if (r) wa_fmt(io->result, sizeof io->result, "RESULT: LOGGED IN (sim)%s", post_summary());
+    return r;
 }
 #endif

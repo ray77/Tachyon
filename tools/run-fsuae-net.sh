@@ -90,7 +90,8 @@ NCACHE=${NOISE_CACHE:-$ROOT/build/wa_noise_cache.bin}
 # travels in both directions so a paired Amiga logs in on the next run (PAIR_CREDS, default build/tachyon-a500.creds)
 PAIR=${PAIR:-0}
 PAIR_CREDS=${PAIR_CREDS:-$ROOT/build/tachyon-a500.creds}
-if [ "$PAIR" = 1 ]; then printf 'pair\n' > "$DH0/pair.txt"; [ -f "$PAIR_CREDS" ] && cp "$PAIR_CREDS" "$DH0/tachyon.creds"; fi
+PAIR_PREKEYS=${PAIR_PREKEYS:-$ROOT/build/tachyon-a500.prekeys}      # the one-time prekey batch travels the same way
+if [ "$PAIR" = 1 ]; then printf 'pair\n' > "$DH0/pair.txt"; [ -f "$PAIR_CREDS" ] && cp "$PAIR_CREDS" "$DH0/tachyon.creds"; [ -f "$PAIR_PREKEYS" ] && cp "$PAIR_PREKEYS" "$DH0/tachyon.prekeys"; fi
 # the redirection after the command name belongs to the started program (its banner, DHCP and SANA messages),
 # the one after Run only to Run's own "[CLI 2]" line
 # Order: the program first (it waits up to 60 s for the stack), then TheWire13, which sizes its TCP PCB pool
@@ -123,3 +124,4 @@ echo "--- SYS:result.txt after ${i}s ---"
 cat "$DH0/result.txt" 2>/dev/null || echo "(no result.txt)"
 if [ -f "$DH0/noisecache.bin" ] && [ -f "$DH0/done" ]; then cp "$DH0/noisecache.bin" "$NCACHE" && echo "(noise certificate cache saved to $NCACHE)"; fi
 if [ "$PAIR" = 1 ] && [ -f "$DH0/tachyon.creds" ]; then cp "$DH0/tachyon.creds" "$PAIR_CREDS" && echo "(credentials saved to $PAIR_CREDS)"; fi
+if [ "$PAIR" = 1 ] && [ -f "$DH0/tachyon.prekeys" ]; then cp "$DH0/tachyon.prekeys" "$PAIR_PREKEYS" && echo "(prekeys saved to $PAIR_PREKEYS)"; fi

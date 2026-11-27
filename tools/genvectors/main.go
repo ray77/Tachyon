@@ -56,7 +56,7 @@ func corrupt(sig []byte, i int) {
 }
 
 func main() {
-	mode := flag.String("mode", "x25519", "x25519 | ed25519 | xeddsa | xeddsa-sign | sha512 | aesgcm | noise | rsa | rsapss")
+	mode := flag.String("mode", "x25519", "x25519 | ed25519 | xeddsa | xeddsa-sign | sha512 | aesgcm | noise | rsa | rsapss | inflate")
 	n := flag.Int("n", 64, "number of vectors")
 	flag.Parse()
 
@@ -145,6 +145,8 @@ func main() {
 		rsaVectors(*n)
 	case "rsapss":
 		rsaPssVectors(*n)
+	case "inflate":
+		genInflate()
 	case "sha512":
 		for i := 0; i < *n; i++ {
 			msg := randBytes(i * 13)

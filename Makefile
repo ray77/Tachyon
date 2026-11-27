@@ -104,10 +104,10 @@ FAST ?= 1024   # Fast RAM of the emulated machine in KiB for run-probe (2048 = t
 WAIP ?= $(shell dig +short web.whatsapp.com | grep -E '^[0-9.]+$$' | head -1)
 PROBE_CORE := tests/wa_probe_core.c tests/wa_probe_core.h tests/certs/wa_rsa_chain.h tests/vectors/wa_client_payload.h
 # pairing (docs/PROTOCOL.md 11): the protocol modules and the QR encoder are part of the probe since the pair mode
-PROBE_PROTO := proto/wabinary.c proto/identity.c proto/clientpayload.c proto/pairing.c proto/creds.c ui/qr.c
+PROBE_PROTO := proto/wabinary.c proto/identity.c proto/clientpayload.c proto/pairing.c proto/creds.c proto/prekeys.c proto/inflate.c ui/qr.c
 PROBE_INC := -Itests -Iproto -Iui
 # every header the probe builds include: a changed constant (WA_PLATFORM_TYPE, 2026-11-27) must rebuild the A500 binary
-PROBE_HDR := tests/wa_probe_core.h proto/wabinary.h proto/identity.h proto/clientpayload.h proto/pairing.h proto/creds.h proto/pb.h ui/qr.h
+PROBE_HDR := tests/wa_probe_core.h proto/wabinary.h proto/identity.h proto/clientpayload.h proto/pairing.h proto/creds.h proto/prekeys.h proto/inflate.h proto/pb.h ui/qr.h
 build/wa_probe: tests/wa_probe.c $(PROBE_CORE) $(PROBE_PROTO) $(PROBE_HDR) $(CRYPTO_SRC) crypto/ref/heartbeat.h crypto/ref/tls13.h
 	@mkdir -p build
 	$(HOSTCC) $(HOST_CFLAGS) $(PROBE_INC) tests/wa_probe.c tests/wa_probe_core.c $(PROBE_PROTO) $(CRYPTO_SRC) -o $@
@@ -203,6 +203,13 @@ build/pairing_test: $(PAIRING_TEST_SRC) proto/pairing.h proto/creds.h proto/pb.h
 	$(HOSTCC) -O1 -Wall -Wextra -std=c99 -Iproto -Icrypto/ref $(SANITIZE) -Dmain=clientpayload_test_main tests/clientpayload_test.c -c -o build/clientpayload_test_identity.o
 	$(HOSTCC) -O1 -Wall -Wextra -std=c99 -Iproto -Icrypto/ref $(SANITIZE) $(PAIRING_TEST_SRC) build/clientpayload_test_identity.o $(CRYPTO_SRC) -o $@
 
+.PHONY: inflate-test
+build/inflate_test: tests/inflate_test.c proto/inflate.c proto/inflate.h
+	@mkdir -p build
+	$(HOSTCC) $(HOST_CFLAGS) -fsanitize=address,undefined -Iproto tests/inflate_test.c proto/inflate.c -o $@
+inflate-test: build/inflate_test
+	./build/inflate_test tests/vectors/inflate.txt
+
 .PHONY: pairing-test pair-success-vector
 pair-success-vector:
 	go run ./tools/pairvectors -mode pairsuccess > tests/vectors/pair_success_iq.bin
@@ -222,6 +229,7 @@ host-test: build/x25519_test build/ed25519_test build/sha256_test build/aes_test
 	./build/x509_test
 	./build/blitaes_test
 	./build/blitgcm_test
+	$(MAKE) inflate-test
 	$(MAKE) clientpayload-test
 	$(MAKE) pairing-test
 	$(MAKE) pair-sim
@@ -233,6 +241,7 @@ vectors:
 	go run ./tools/genvectors -mode xeddsa -n 64 > tests/vectors/xeddsa_random.txt
 	go run ./tools/genvectors -mode xeddsa-sign -n 64 > tests/vectors/xeddsa_sign.txt
 	go run ./tools/genvectors -mode sha512 -n 32 > tests/vectors/sha512_random.txt
+	go run ./tools/genvectors -mode inflate > tests/vectors/inflate.txt
 	go run ./tools/genvectors -mode aesgcm -n 64 > tests/vectors/aesgcm_random.txt
 	go run ./tools/genvectors -mode rsapss -n 24 > tests/vectors/rsa_pss.txt
 

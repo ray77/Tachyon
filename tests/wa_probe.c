@@ -41,9 +41,11 @@
 #include <sys/select.h>
 #include "wa_probe_core.h"
 #include "creds.h"
+#include "prekeys.h"
 
 static int fd = -1, tunnel, tun_in = -1, tun_out = -1;
 static wa_creds creds; static const char *creds_path;
+static wa_prekeys prekeys; static const char *prekeys_path;
 static struct timespec t0;
 static struct addrinfo *ai;
 
@@ -80,6 +82,13 @@ static int32_t io_recv(void *ctx, uint8_t *p, uint32_t cap, uint32_t timeout_ms)
 static int io_reconnect(void *ctx) { (void)ctx; close(fd); return tcp_connect(); }
 
 /* ---- pairing glue ------------------------------------------------------------------------------ */
+static void write_prekeys(void *ctx)
+{
+    static uint8_t rec[WA_PREKEYS_MAX_SIZE]; uint32_t n; FILE *f; (void)ctx;
+    if (!prekeys_path || !(n = wa_prekeys_write(rec, sizeof rec, &prekeys))) return;
+    f = fopen(prekeys_path, "wb");
+    if (f) { fwrite(rec, 1, n, f); fclose(f); printf("prekeys: %s written (%u keys, %u pending upload)\n", prekeys_path, prekeys.n, wa_prekeys_pending(&prekeys)); }
+}
 static void write_creds(void *ctx)
 {
     static uint8_t rec[WA_CREDS_SIZE]; FILE *f; (void)ctx;
@@ -174,6 +183,19 @@ int main(int argc, char **argv)
             io.creds_loaded = 1;
             { char l[200]; snprintf(l, sizeof l, "creds: %s loaded: %s", creds_path, creds.paired ? "paired, will log in" : "identity only, will pair"); log_line(0, l); }
         } else { char l[200]; snprintf(l, sizeof l, "creds: no %s: a new identity will be generated, QR pairing follows", creds_path); log_line(0, l); }
+        /* one-time prekeys: PREKEYS file (default build/tachyon.prekeys), PREKEY_COUNT pending before the connection, LINGER seconds online after <active/> */
+        prekeys_path = getenv("PREKEYS") && *getenv("PREKEYS") ? getenv("PREKEYS") : "build/tachyon.prekeys";
+        io.prekeys = &prekeys; io.prekeys_loaded = 0; io.save_prekeys = write_prekeys;
+        io.prekeys_wanted = getenv("PREKEY_COUNT") ? (uint32_t)atoi(getenv("PREKEY_COUNT")) : 10;
+        io.linger_ms = getenv("LINGER") ? (uint32_t)(atof(getenv("LINGER")) * 1000) : 15000;
+        {   static uint8_t prec[WA_PREKEYS_MAX_SIZE + 1]; FILE *pf = fopen(prekeys_path, "rb");
+            if (pf) {
+                size_t n = fread(prec, 1, sizeof prec, pf); fclose(pf);
+                if (!wa_prekeys_read(&prekeys, prec, (uint32_t)n)) { printf("prekeys: %s is not a valid prekey record (%zu bytes) - refusing to continue; delete it to start a new batch\n", prekeys_path, n); return 1; }
+                io.prekeys_loaded = 1;
+                { char l[200]; snprintf(l, sizeof l, "prekeys: %s loaded: %u keys, %u pending upload", prekeys_path, prekeys.n, wa_prekeys_pending(&prekeys)); log_line(0, l); }
+            }
+        }
     }
     /* the offline part (key pairs) before the connection, as the A500 does it */
     if (!wa_probe_prepare(&io)) { printf("%s\n", io.result); return 1; }
@@ -196,7 +218,10 @@ int main(int argc, char **argv)
         if (io.mode == WA_MODE_PAIR) {
             printf("PAIRING: codes shown %u, first code at %u ms, pair-success at %u ms, verify %u ms, sign %u ms, pair-device-sign at %u ms, stream:error 515 at %u ms, login connect at %u ms, login success at %u ms, pongs %u\n",
                    io.qr_shown, io.t_qr_shown, io.t_pair_success, io.d_verify, io.d_sign, io.t_sign_sent, io.t_515, io.t_login_connect, io.t_login_accepted, io.pongs);
+            printf("LOGIN: server prekeys %u (answered %d), uploaded %u, active %d at %u ms, stanzas %u, acks %u, messages %u, prekey generation %u ms\n",
+                   io.server_prekeys, io.have_server_prekeys, io.prekeys_uploaded, io.active_set, io.t_active, io.frames_after_login, io.acks_sent, io.messages_seen, io.d_prekeys);
             if (io.creds_loaded) write_creds(0);     /* identity (so a second attempt reuses it), JID after pairing, Noise cache fingerprint */
+            if (io.prekeys_loaded) write_prekeys(0);
         }
         if (tunnel) { close(tun_out); close(tun_in); wait(0); } else close(fd);
         printf("%s\n", io.result);

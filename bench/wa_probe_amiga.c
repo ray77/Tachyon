@@ -31,6 +31,7 @@
 #include "../net/bsdsock_io.h"
 #include "../tests/wa_probe_core.h"
 #include "../proto/creds.h"
+#include "../proto/prekeys.h"
 #include "../ui/screen.h"
 
 struct ExecBase *SysBase;
@@ -112,8 +113,16 @@ static int clock_string(char *s)
 }
 
 /* ---- pairing: credentials file and the QR screen ------------------------------------------------- */
-static wa_creds creds; static int pair_mode;
+static wa_creds creds; static int pair_mode; static wa_prekeys prekeys;
 
+static void write_prekeys(void *ctx)
+{
+    static uint8_t rec[WA_PREKEYS_MAX_SIZE]; uint32_t n; BPTR f; (void)ctx;
+    if (!(n = wa_prekeys_write(rec, sizeof rec, &prekeys))) return;
+    f = Open((STRPTR)"SYS:tachyon.prekeys", MODE_NEWFILE);
+    if (f) { Write(f, rec, n); Close(f); logf1("prekeys: SYS:tachyon.prekeys written (%s%u keys)", "", prekeys.n); }
+    else log_line(0, "prekeys: cannot write SYS:tachyon.prekeys");
+}
 static void write_creds(void *ctx)
 {
     static uint8_t rec[WA_CREDS_SIZE]; BPTR f; (void)ctx;
@@ -203,7 +212,7 @@ int main(void)
     logfile = Open((STRPTR)"SYS:result.txt", MODE_NEWFILE);
     tick0 = ticks_now();
     out("Tachyon WhatsApp probe on the A500: bsdsocket.library -> TLS 1.3 -> WebSocket -> Noise XX\n");
-    { static const char hint[] = "Bitte warten. Der 68000 rechnet: Identitaet und Schluessel ca. 25 s, dann TLS ca. 32 s und Noise ca. 42 s\n"
+    { static const char hint[] = "Bitte warten. Der 68000 rechnet: Identitaet, Schluessel und Prekeys bis zu 60 s, dann TLS ca. 32 s und Noise ca. 42 s\n"
                                  "je Verbindung; ein Punkt alle 2 s heisst: es geht weiter. Beim Pairing erscheint der QR-Code auf einem eigenen Schirm.\n";
       if (con) Write(con, (APTR)hint, slen(hint)); }
 
@@ -235,6 +244,16 @@ int main(void)
             io.creds_loaded = 1;
             log_line(0, creds.paired ? "creds: SYS:tachyon.creds loaded: paired, will log in (identity check skipped on the 68000: 20 s)" : "creds: SYS:tachyon.creds loaded: identity only, will pair");
         } else log_line(0, "creds: no SYS:tachyon.creds: a new identity will be generated, QR pairing follows");
+        /* one-time prekeys: a batch of 10 (33 s before the connection), uploaded after <success> when the server runs low */
+        {   static uint8_t prec[WA_PREKEYS_MAX_SIZE + 1];
+            io.prekeys = &prekeys; io.prekeys_loaded = 0; io.prekeys_wanted = 10; io.save_prekeys = write_prekeys; io.linger_ms = 10000;
+            n = read_file("SYS:tachyon.prekeys", prec, sizeof prec);
+            if (n > 0) {
+                if (!wa_prekeys_read(&prekeys, prec, (uint32_t)n)) { out("RESULT: SYS:tachyon.prekeys is not a valid record - refusing to continue (delete it for a new batch)\n"); finish(); return 10; }
+                io.prekeys_loaded = 1;
+                logf1("prekeys: SYS:tachyon.prekeys loaded: %s%u keys", "", prekeys.n);
+            }
+        }
     }
 
     /* offline part first: the three X25519 key pairs (~10 s on the 68000) while the stack starts in parallel */
@@ -280,6 +299,10 @@ int main(void)
             wa_fmt(aline, sizeof aline, "PAIRING: codes shown %u, first code at %u ms, pair-success at %u ms, verify %u ms, sign %u ms, pair-device-sign at %u ms, stream:error 515 at %u ms, login connect at %u ms, login success at %u ms\n",
                    io.qr_shown, io.t_qr_shown, io.t_pair_success, io.d_verify, io.d_sign, io.t_sign_sent, io.t_515, io.t_login_connect, io.t_login_accepted);
             out(aline);
+            wa_fmt(aline, sizeof aline, "LOGIN: server prekeys %u, uploaded %u, active %d at %u ms, stanzas %u, acks %u, messages %u, prekey generation %u ms\n",
+                   io.server_prekeys, io.prekeys_uploaded, io.active_set, io.t_active, io.frames_after_login, io.acks_sent, io.messages_seen, io.d_prekeys);
+            out(aline);
+            if (io.prekeys_loaded) write_prekeys(0);
             if (io.creds_loaded) write_creds(0);
         }
         out(io.result); out("\n");
