@@ -25,7 +25,7 @@ BENCH_SRC  := bench/x25519_bench.c
 UNITY_SRC  := bench/amiga/unity.c
 AMIGA_ASM  := build/amiga/x25519bench.s
 
-.PHONY: all host-test amiga run vamos vectors clean tls-test tls13-test ws-test heartbeat-test wa-probe wa-probe-tunnel run-blitaes run-blitgcm amiga-probe run-probe vamos-probe utility13 utility13-test sana2-probe run-sana2
+.PHONY: all host-test amiga run vamos vectors clean tls-test tls13-test ws-test heartbeat-test wa-probe wa-probe-tunnel run-blitaes run-blitgcm amiga-probe run-probe vamos-probe utility13 utility13-test sana2-probe run-sana2 sanafix
 
 all: host-test amiga
 
@@ -226,7 +226,7 @@ build/amiga/wa_probe: bench/amiga/startup_probe.s build/amiga/wa_probe.s crypto/
 
 amiga-probe: build/amiga/wa_probe
 
-run-probe: build/amiga/wa_probe build/amiga/utility.library build/amiga/sana2_hold
+run-probe: build/amiga/wa_probe build/amiga/utility.library build/amiga/sana2_hold build/amiga/a2065fix.device
 	GAP=$(GAP) tools/run-fsuae-net.sh $< 600
 
 # utility.library V37 for Kickstart 1.3 (tools/amiga/utility13.*): 2.0-era SANA-II drivers (a2065.device) need it
@@ -251,6 +251,16 @@ build/amiga/utility13_test: bench/amiga/startup.s build/amiga/utility13_test.s
 utility13-test: build/amiga/utility13_test build/amiga/utility.library
 	rm -rf build/vamos-util && mkdir -p build/vamos-util/libs && cp build/amiga/utility.library build/vamos-util/libs/ && cp $< build/vamos-util/test
 	cd build/vamos-util && $(VAMOS) -q -V sys:. -a libs:sys:libs -s 64 -O 'utility.library=mode:amiga' test > vamos.log 2>&1; cat result.txt   # mode:amiga = load ours, not vamos' fake
+
+# a2065fix.device (tools/amiga/sanafix.*): SANA-II wrapper that fixes S2_CONFIGINTERFACE for TheWire13
+build/amiga/sanafix_c.s: tools/amiga/sanafix.c
+	@mkdir -p build/amiga
+	$(VC) $(VCFLAGS) $< -o=$@
+
+build/amiga/a2065fix.device: tools/amiga/sanafix.s build/amiga/sanafix_c.s
+	$(VASM) $(VASMFLAGS) -o $@ $<
+
+sanafix: build/amiga/a2065fix.device
 
 # SANA-II driver probe (tools/amiga/sana2_probe.c): the driver alone on the emulated A2065, no stack
 build/amiga/sana2_probe.s: tools/amiga/sana2_probe.c

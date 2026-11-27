@@ -46,9 +46,13 @@ cp "$WIRE/libs/bsdsocket.library" "$DH0/Libs/"
 NET_HOLD=${NET_HOLD:-0}        # 1: configure the interface with its ROM address first and keep it open (sana2hold)
 HOLD_LINE=""; [ "$NET_HOLD" = 1 ] && HOLD_LINE='run >NIL: C:sana2hold\nwait 3\n'
 cp "$A2065DEV" "$DH0/Devs/Networks/a2065.device"
+# a2065fix.device (make sanafix) wraps the driver for TheWire13's S2_CONFIGINTERFACE; NET_FIX=0 talks to a2065.device directly
+NET_FIX=${NET_FIX:-1}
+SANADEV=devs:networks/a2065.device
+if [ "$NET_FIX" = 1 ] && [ -f "$ROOT/build/amiga/a2065fix.device" ]; then cp "$ROOT/build/amiga/a2065fix.device" "$DH0/Devs/Networks/"; SANADEV=devs:networks/a2065fix.device; fi
 # slirp: guest 10.0.2.15/24, gateway 10.0.2.2, DNS 10.0.2.3 (static; the same addresses come via DHCP with NET_DHCP=1)
 cat > "$DH0/S/thewire13.conf" <<EOF
-device=devs:networks/a2065.device
+device=$SANADEV
 unit=0
 
 dhcp=$NET_DHCP
