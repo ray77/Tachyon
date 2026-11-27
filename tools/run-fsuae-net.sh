@@ -99,8 +99,8 @@ if [ "$PAIR" = 1 ]; then printf 'pair\n' > "$DH0/pair.txt"; [ -f "$PAIR_CREDS" ]
 NET_ORDER=${NET_ORDER:-probe-first}
 if [ "${NET_NOSTACK:-0}" = 1 ]; then printf 'stack %s\ntest\n' "$NET_STACK" > "$DH0/S/Startup-Sequence"   # driver tests without the stack
 elif [ "$NET_ORDER" = probe-first ]; then
-  printf "stack %s\n${HOLD_LINE}run >NIL: test\nwait 2\nrun >NIL: C:TheWire13 >SYS:stack.log\nwait %s\navail >SYS:avail.txt\n" "$NET_STACK" "$NET_WAIT" > "$DH0/S/Startup-Sequence"
-else printf "stack %s\n${HOLD_LINE}run >NIL: C:TheWire13 >SYS:stack.log\nwait %s\navail >SYS:avail.txt\ntest\navail >SYS:avail2.txt\n" "$NET_STACK" "$NET_WAIT" > "$DH0/S/Startup-Sequence"; fi
+  printf "stack %s\necho \"Tachyon: Probe startet (eigenes Fenster), danach der TCP/IP-Stack TheWire13 - bitte warten\"\n${HOLD_LINE}run >NIL: test\nwait 2\nrun >NIL: C:TheWire13 >SYS:stack.log\nwait %s\navail >SYS:avail.txt\n" "$NET_STACK" "$NET_WAIT" > "$DH0/S/Startup-Sequence"
+else printf "stack %s\necho \"Tachyon: TCP/IP-Stack TheWire13 startet, die Probe folgt in %s s - bitte warten\"\n${HOLD_LINE}run >NIL: C:TheWire13 >SYS:stack.log\nwait %s\navail >SYS:avail.txt\ntest\navail >SYS:avail2.txt\n" "$NET_STACK" "$NET_WAIT" "$NET_WAIT" > "$DH0/S/Startup-Sequence"; fi
 
 "$FSUAE" "$HERE/fsuae/a500-1mb-fast-net.fs-uae" \
     --floppy_drive_0= \

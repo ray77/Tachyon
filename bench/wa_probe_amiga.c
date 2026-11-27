@@ -36,7 +36,7 @@
 struct ExecBase *SysBase;
 struct DosLibrary *DOSBase;
 
-static BPTR con, logfile;
+static BPTR con, logfile, owncon;    /* owncon: our CON: window when stdout is not a console (run >NIL: in the Startup-Sequence) */
 static bsdsock_io net;
 static ULONG tick0;
 static ULONG wa_addr;
@@ -66,7 +66,9 @@ static int screen_open;
 static uint32_t prog_last; static int con_dots, scr_dots;
 static void progress_tick(void *ctx)
 {
-    uint32_t now = now_ms(); (void)ctx;
+    static uint32_t calls; uint32_t now; (void)ctx;
+    if (++calls & 15) return;                 /* DateStamp only every 16th yield (the heartbeat already asks once per yield) */
+    now = now_ms();
     if (now - prog_last < 2000) return;
     prog_last = now;
     if (con) { Write(con, (APTR)".", 1); con_dots++; }
@@ -180,6 +182,7 @@ static void finish(void)
     if (screen_open) { scr_close(); screen_open = 0; }
     bsdsock_close(&net);
     if (logfile) Close(logfile);
+    if (owncon) { Close(owncon); owncon = 0; con = 0; }
     done = Open((STRPTR)"SYS:done", MODE_NEWFILE);
     if (done) Close(done);
     CloseLibrary((struct Library *)DOSBase);
@@ -196,9 +199,13 @@ int main(void)
     DOSBase = (struct DosLibrary *)OpenLibrary((STRPTR)"dos.library", 0);
     if (!DOSBase) return 20;
     con = Output();
+    if (!con || !IsInteractive(con)) { owncon = Open((STRPTR)"CON:0/11/640/245/Tachyon WhatsApp-Probe", MODE_NEWFILE); if (owncon) con = owncon; }
     logfile = Open((STRPTR)"SYS:result.txt", MODE_NEWFILE);
     tick0 = ticks_now();
     out("Tachyon WhatsApp probe on the A500: bsdsocket.library -> TLS 1.3 -> WebSocket -> Noise XX\n");
+    { static const char hint[] = "Bitte warten. Der 68000 rechnet: Identitaet und Schluessel ca. 25 s, dann TLS ca. 32 s und Noise ca. 42 s\n"
+                                 "je Verbindung; ein Punkt alle 2 s heisst: es geht weiter. Beim Pairing erscheint der QR-Code auf einem eigenen Schirm.\n";
+      if (con) Write(con, (APTR)hint, slen(hint)); }
 
     /* inputs */
     if (read_file("SYS:seed.bin", seed, 64) != 64) { out("RESULT: SYS:seed.bin missing (64 bytes of entropy needed)\n"); finish(); return 10; }
