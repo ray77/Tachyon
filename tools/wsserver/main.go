@@ -1,5 +1,6 @@
 // Loopback WebSocket echo server (coder/websocket, the library whatsmeow uses) for crypto/ref/ws.c.
-// Echoes binary messages, answers one ping test by sending a ping itself, closes after -n messages.
+// Echoes binary messages; counts unsolicited pong frames (the WhatsA500 heartbeat) and answers the
+// binary message "pongs?" with "pongs:<count>" instead of an echo.
 package main
 
 import (
@@ -8,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync/atomic"
 
 	"github.com/coder/websocket"
 )
@@ -22,7 +24,9 @@ func main() {
 	fmt.Println("READY", ln.Addr().String())
 	done := make(chan struct{})
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: []string{"*"}})
+		var pongs int32
+		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: []string{"*"},
+			OnPongReceived: func(ctx context.Context, payload []byte) { atomic.AddInt32(&pongs, 1) }})
 		if err != nil {
 			fmt.Println("ACCEPT ERROR:", err)
 			return
@@ -39,7 +43,12 @@ func main() {
 				c.Close(websocket.StatusUnsupportedData, "binary only")
 				break
 			}
-			if err := c.Write(ctx, websocket.MessageBinary, append([]byte("echo:"), data...)); err != nil {
+			reply := append([]byte("echo:"), data...)
+			if string(data) == "pongs?" {
+				reply = []byte(fmt.Sprintf("pongs:%d", atomic.LoadInt32(&pongs)))
+				fmt.Println("PONGS", atomic.LoadInt32(&pongs))
+			}
+			if err := c.Write(ctx, websocket.MessageBinary, reply); err != nil {
 				break
 			}
 		}

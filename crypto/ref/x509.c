@@ -198,15 +198,21 @@ int x509_verify_chain(const x509_cert *certs, int count, const uint8_t *root_n, 
     if (count < 1 || count > 4) return 0;
     for (i = 0; i < count; i++) {
         const x509_cert *c = &certs[i];
-        if (!c->sig_sha256_rsa) return 0;
         if (i > 0 && !c->is_ca) return 0;
+        /* trust anchor reached by key: a certificate carrying the pinned key itself (e.g. the cross-signed
+         * DigiCert Global Root G2 that web.whatsapp.com sends as third certificate, signed by a root we do
+         * not know) ends the chain without its own signature being checked; the leaf is never the anchor */
+        if (i > 0 && c->n_len == root_n_len && c->e == root_e && mem_eq(c->n, root_n, root_n_len)) break;
+        if (!c->sig_sha256_rsa) return 0;
         if (now && !(str_le(c->not_before, now) && str_le(now, c->not_after))) return 0;
+        /* signed by the pinned key: chain complete, anything the server sent beyond this is ignored */
+        if (x509_verify_signature(c, root_n, root_n_len, root_e)) break;
         if (i + 1 < count) {
             const x509_cert *issuer = &certs[i + 1];
             if (c->issuer_len != issuer->subject_len || !mem_eq(c->issuer, issuer->subject, c->issuer_len)) return 0;
             if (!x509_verify_signature(c, issuer->n, issuer->n_len, issuer->e)) return 0;
         } else {
-            if (!x509_verify_signature(c, root_n, root_n_len, root_e)) return 0;
+            return 0;       /* last certificate is neither signed by the pinned key nor the pinned key itself */
         }
     }
     return x509_match_host(&certs[0], host);

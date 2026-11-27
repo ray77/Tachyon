@@ -1,19 +1,19 @@
 # Protokollrecherche: Was der Verbindungsaufbau wirklich kostet
 
-Stand 2026-11-26. Quellen: whatsmeow `c2ce5c3` (2026-11-26), Baileys `bb0a87e` (2026-11-13), libsignal-protocol-go v0.2.3, eigene TLS-Proben gegen `web.whatsapp.com:443` mit OpenSSL. Alle Angaben verifiziert am Code, nicht aus Erinnerung.
+Stand 2026-11-27 (TLS-Pfad korrigiert, Abschnitt 7 und 9). Quellen: whatsmeow `c2ce5c3` (2026-11-26), Baileys `bb0a87e` (2026-11-13), libsignal-protocol-go v0.2.3, eigene TLS-Proben gegen `web.whatsapp.com:443` mit OpenSSL. Alle Angaben verifiziert am Code, nicht aus Erinnerung.
 
 ## 1. Transport: TLS zu `wss://web.whatsapp.com/ws/chat`
 
 | Verhandelt | TLS 1.3 (Standardangebot) | TLS 1.2 (Standardangebot) | TLS 1.2 ohne ECDHE |
 |---|---|---|---|
-| Schlüsselaustausch | X25519 (P-256 nur, wenn X25519 nicht angeboten wird) | ECDHE P-256 | **RSA-2048-Schlüsseltransport** |
+| Schlüsselaustausch | X25519 (P-256 nur, wenn X25519 nicht angeboten wird) | ECDHE P-256 (X25519 wird in TLS 1.2 **nicht** angenommen) | ~~RSA-2048-Schlüsseltransport~~ **wird gewählt, aber nie vollendet** (Abschnitt 7) |
 | Cipher | AES-128-GCM wählbar (Server bevorzugt ChaCha20, nimmt aber GCM) | ECDHE-ECDSA-AES128-GCM-SHA256 | AES128-GCM-SHA256 |
 | Serverzertifikat | ECDSA P-256 (`*.whatsapp.net`), signiert RSA-2048 (DigiCert G2 TLS RSA CA1), Wurzel DigiCert Global Root G2 (RSA) | gleich | RSA-2048-Zertifikat |
 | Session-Resumption | **ja**, TLS-1.3-Tickets, Wiederaufnahme bestätigt (`Reused`) | – | – |
 
 Asymmetrische Arbeit pro vollem TLS-1.3-Handshake auf dem Client: 1 × X25519 (Schlüsselpaar + Shared Secret = 2 Skalarmultiplikationen, das Schlüsselpaar ist vorberechenbar) + 1 × ECDSA-P-256-Verifikation (CertificateVerify) + 1 × RSA-2048-Verifikation (Blattzertifikat; Zwischenzertifikat lässt sich pinnen). Mit Resumption (PSK, ohne `psk_dhe`) entfällt alles bis auf symmetrische Kryptografie – ob der Server PSK ohne DHE akzeptiert, ist noch zu prüfen.
 
-Option ohne Elliptische Kurven: TLS 1.2 mit RSA-Schlüsseltransport (nur RSA-Verschlüsselung mit e = 65537 und RSA-Signaturprüfungen, beides billig). Keine Forward Secrecy auf TLS-Ebene; die eigentliche Nutzlast ist ohnehin Noise-verschlüsselt. Als Rückfalloption dokumentiert, nicht als Standard.
+~~Option ohne Elliptische Kurven: TLS 1.2 mit RSA-Schlüsseltransport.~~ **Entfällt (2026-11-27, Abschnitt 7):** der Server wählt die Suite, kann den ClientKeyExchange aber nicht entschlüsseln – jeder Client (OpenSSL, LibreSSL, Go, unser `tls12.c`) bekommt `decrypt_error` auf sein Finished. Der A500-Pfad ist damit **TLS 1.3 mit X25519, TLS_AES_128_GCM_SHA256 und `rsa_pss_rsae_sha256`** (Server legt dann das RSA-2048-Zertifikat vor, bestätigt mit `openssl s_client -tls1_3 -groups X25519 -sigalgs rsa_pss_rsae_sha256`): 2 X25519 (Schlüsselpaar vorberechenbar, also 1 online), 1 RSA-PSS-Verifikation (CertificateVerify), RSA-Kettenprüfung wie bisher, HKDF-SHA256 statt PRF. Kein P-256 nötig.
 
 Zeitlimits: **gemessen am 2026-11-27 (Abschnitt 8): 60,0 s** zwischen dem Server-Flight und unserem ClientKeyExchange/Finished (TLS 1.2 RSA). Der A500-Handshake (21 s, mit Zertifikatscache ≈ 2 s) passt.
 
@@ -72,7 +72,7 @@ Rechnung mit heutigen 8,6 s/X25519: 3 × 8,6 + 2 Verifikationen à ≈ 17–25 s
 | SHA-512 / HMAC-SHA512 | App-State-Hashing (`appstate/hash.go`), LT-Hash | nötig |
 | PBKDF2 | Pairing per Code (optional) | niedrig |
 | MD5 | Medien-Upload-Metadaten | niedrig |
-| ECDSA P-256 + RSA-2048 Verify | nur TLS | nötig (oder TLS 1.2 RSA-Pfad) |
+| RSA-2048 Verify (PKCS#1 v1.5 für die Kette, PSS für CertificateVerify) | nur TLS 1.3 mit `rsa_pss_rsae_sha256` | nötig; ECDSA P-256 entfällt |
 | ChaCha20-Poly1305 | nicht nötig (Server akzeptiert AES-GCM) | – |
 
 ## 6. Konsequenzen
@@ -95,7 +95,29 @@ Implementiert in `crypto/ref/noise.c`, geprüft gegen 24 Handshakes, die whatsme
 * **Transport ist WebSocket** (`wss://web.whatsapp.com/ws/chat`, Binärnachrichten) – für den A500 heißt das TLS + HTTP-Upgrade + WebSocket-Framing (Masking der Client-Frames, 4-Byte-XOR) vor der Noise-Schicht. Der WebSocket-Teil ist billig; TLS bleibt der teure Teil (siehe Abschnitt 1).
 * Kosten auf dem A500 (gemessen, Harness): 3 × X25519 + 6 × GCM-Schlüsselaufbau (je ≈ 100 ms, davon Tabellen) + HKDF ≈ 25 s **ohne** die beiden XEdDSA-Prüfungen der Zertifikatskette (2 × 9,7 s). Gesamt ≈ 45 s zwischen ServerHello und ClientFinish; der Server erlaubt das, solange alle ≤ 8 s ein WebSocket-Pong rausgeht (Abschnitt 8).
 
-## 7. TLS-Pfad ohne elliptische Kurven – bestätigt (2026-11-26)
+## 7. TLS-Pfad ohne elliptische Kurven – ~~bestätigt (2026-11-26)~~ **widerlegt (2026-11-27)**
+
+**Korrektur 2026-11-27.** Die Bestätigung unten stützte sich auf `Cipher is AES128-GCM-SHA256` in der s_client-Ausgabe – diese Zeile erscheint auch, wenn der Handshake danach scheitert. Beim ersten Lauf unseres eigenen Stacks gegen den Server (`tests/wa_probe.c`) kam auf unser Finished `Alert fatal decrypt_error (51)`. Daraufhin systematisch geprüft (57.144.245.32, `*.whatsapp.net`-Edge, 2026-11-27 09:00 UTC+1):
+
+| Client | Suite | Ergebnis |
+|---|---|---|
+| OpenSSL 3.0.16 `s_client -tls1_2 -cipher AES128-GCM-SHA256` | TLS_RSA_WITH_AES_128_GCM_SHA256 | ServerHello, Kette, unser CKE/Finished → **decrypt_error** |
+| LibreSSL 3.3.6 (curl `--ciphers AES128-GCM-SHA256`) | dito | **decrypt_error** |
+| Go crypto/tls (Suite erzwungen) | dito | Verbindung zurückgesetzt |
+| unser `tls12.c` (mit und ohne Extended Master Secret) | dito | **decrypt_error**, 6 Versuche |
+| OpenSSL, `-cipher kRSA` (jede RSA-Transport-Suite) | AES128-GCM-SHA256 | **decrypt_error** |
+| OpenSSL gegen `www.facebook.com`, gleiche Suite | TLS_RSA_WITH_AES_128_GCM_SHA256 | **vollendet** |
+| OpenSSL `-tls1_2 -cipher ECDHE -curves X25519:P-256` | ECDHE-ECDSA, **P-256** | vollendet, X25519 wird in TLS 1.2 nicht gewählt |
+| OpenSSL `-tls1_2 -cipher ECDHE-RSA-AES128-GCM-SHA256 -curves P-256` | ECDHE-RSA P-256, RSA-2048-Zertifikat | vollendet |
+| OpenSSL `-tls1_3 -groups X25519 -ciphersuites TLS_AES_128_GCM_SHA256 -sigalgs rsa_pss_rsae_sha256` | TLS 1.3, X25519, **RSA-2048-Zertifikat** | **vollendet** |
+| OpenSSL `-tls1_3 -groups X25519`, Standard-Sigalgs | TLS 1.3, X25519, ECDSA-P-256-Zertifikat | vollendet |
+
+Lesart: Die Edge für `*.whatsapp.net` bietet RSA-Schlüsseltransport an, besitzt aber offenbar keinen Entschlüsselungszugriff auf den privaten RSA-Schlüssel (nur Signieren, wie für ECDHE-RSA und TLS 1.3 nötig); OpenSSL antwortet in diesem Fall mit zufälligem Premaster und das Finished scheitert als `decrypt_error`. Facebooks Edge kann es, WhatsApps nicht. Unser `tls12.c` verhält sich byteidentisch zu OpenSSL (gegen lokalen OpenSSL-`s_server` mit 3-Zertifikat-Kette und 1-Byte-Lesefragmenten bestanden, RSA-Chiffrat gegen Python `pow()` unter dem Live-Schlüssel geprüft) – der Fehler liegt nicht bei uns.
+
+**Neuer TLS-Plan für den A500: TLS 1.3, `TLS_AES_128_GCM_SHA256`, Gruppe X25519, `signature_algorithms` = `rsa_pss_rsae_sha256` (+ `rsa_pkcs1_sha256` für die Kette).** Kosten online: 1 X25519 (Shared Secret; das Schlüsselpaar wird vorberechnet), 1 RSA-PSS-Verifikation (neu: MGF1-SHA256, Saltlänge 32 – ~1 RSA-Public-Op), RSA-Kette wie bisher, HKDF-SHA256 statt PRF, Record-Layer ohne expliziten Nonce (IV ⊕ Sequenznummer, innerer Content-Type). Das sind ≈ 8,6 s X25519 + RSA-Prüfungen (≈ 2 s mit gepinntem Zwischenzertifikat), weniger als die 21 s des RSA-Transport-Handshakes auf dem 68000. Wiederverwendbar aus `tls12.c`: Record-Layer-Gerüst, X.509, RSA, DRBG, Transkript-Hashing; `tls12.c` bleibt für den Go-Loopback-Test, die FS-UAE-Messung und als Vorlage. Das 60-s-Zeitlimit (Abschnitt 8) wurde für den TLS-1.2-Flight gemessen; für TLS 1.3 ist es neu zu messen, bevor der A500-Handshake darauf baut.
+
+*Ursprünglicher Text (2026-11-26, nur noch historisch):*
+
 
 `openssl s_client -tls1_2 -cipher AES128-GCM-SHA256` gegen web.whatsapp.com: der Server wählt **TLS_RSA_WITH_AES_128_GCM_SHA256** und präsentiert eine **reine RSA-2048/SHA-256-Kette**: Leaf `CN=*.whatsapp.net` (SAN u. a. `*.whatsapp.com`, `whatsapp.com`, gültig 2026-09-05 bis 2026-12-04, also ≈ 90-Tage-Rotation) ← DigiCert Global G2 TLS RSA SHA256 2020 CA1 ← DigiCert Global Root G2 (hier kreuzsigniert von High Assurance EV Root, für uns der Vertrauensanker per gepinntem G2-Schlüssel). Session-Tickets werden ausgegeben.
 
@@ -125,3 +147,15 @@ Lesart: Es gibt kein Handshake-Zeitlimit, nur einen **Leerlauf-Timer von 10 s au
 Konsequenz für den A500: Die ≈ 45 s zwischen ServerHello und ClientFinish (3 × X25519, 2 × XEdDSA-Verify, mit gepinntem Zwischenzertifikat ≈ 35 s) sind **zulässig**, wenn die Feldarithmetik alle ≤ 8 s (sicherheitshalber alle 4 s) ein Pong-Frame absetzt – entweder aus einer CIA-Timer-Unterbrechung heraus (der TLS-Record-Schreibpfad muss dann unterbrechungsfest sein: eigener Sequenznummernzähler, kein gleichzeitiger Schreibzugriff des Hauptprogramms) oder kooperativ zwischen Feldoperationen (`fe16_mul` dauert 3,7 ms, eine X25519-Leiter prüft also z. B. alle 256 Multiplikationen die Zeit). Gleiches gilt für Pairing (`pair-device-sign`, ≈ 14 s) und die Signal-Sitzungen (X3DH ≈ 45–50 s): während jeder langen Rechnung läuft der Pong-Herzschlag, dazu nach dem Handshake die Protokoll-Keepalives (Abschnitt 3).
 
 Offen: Frist des Servers für `pair-device-sign` nach dem QR-Scan (braucht einen echten Scan, nicht automatisierbar), Verhalten der Mobil-Endpunkte (`g.whatsapp.net`, nicht unser Pfad), Verhalten über längere Zeit (die 120-s-Messung ist eine Stichprobe).
+
+## 9. Herzschlag im Krypto-Code – umgesetzt und gegen den Server bestätigt (2026-11-27)
+
+Entwurf: **kooperativ, keine Interrupts.** `crypto/ref/yield.h` definiert `CRYPTO_YIELD()`: ein Funktionszeiger `crypto_yield_hook(ctx)`, ohne Hook ein einzelner Branch. Aufrufstellen: X25519-Leiter (je Bit, ≈ 34 ms auf dem 68000), `fe16_sqr_n`/`ed_sqr_n` (alle 16 Quadrierungen in der Inversion), Ed25519 `ge_scalarmult`, `ge_double_scalarmult` (je Schleifendurchlauf) und `ge_scalarmult_base_ct` (je Fenster), RSA-Exponentenschleife (je Bit). Eine X25519-Operation ruft den Hook 268-mal, die Comb-Schlüsselerzeugung 77-mal, eine XEdDSA-Prüfung ≈ 290-mal (`tests/heartbeat_test.c`) – also alle 20–50 ms eine Gelegenheit.
+
+`crypto/ref/heartbeat.c`: `heartbeat_tick` ist der Hook. Wenn seit dem letzten Pong `interval_ms` vergangen sind (Uhr per Callback, auf dem A500 DateStamp-Ticks), baut `ws_frame_pong` (neu in `ws.c`: Opcode 10, leer, maskiert, 6 Byte) ein Frame, das über `tls12_send` als Record verschlüsselt und per Flush-Callback gesendet wird; vorher wird ausstehende Ausgabe im TLS-Puffer abgesetzt, damit keine Records gemischt werden. Der Hook läuft nur zwischen Feldoperationen, nie innerhalb von `tls12_send` oder AES-GCM, der TLS-Schreibpfad bleibt deshalb unverändert und nicht re-entrant. Ohne offenen WebSocket oder ohne verbundenes TLS sendet er nichts; ein Sendefehler wird gemerkt (`error`) und beendet den Herzschlag. Ein künftiger Netzwerkstack (bsdsocket) kann unverändert benutzt werden, weil nichts im Interrupt läuft. Wiederverwendbar für GUI-Bedienung: derselbe Hook kann Intuition-Nachrichten abholen.
+
+Hosttest (`make heartbeat-test`): gegen `tools/wsserver` (zählt Pongs per `OnPongReceived`), gefälschte Uhr, zehn X25519-Leitern zu je „5 s“ bei 8-s-Intervall → genau 5 Pongs gesendet und 5 empfangen, Ergebnisse unverändert, kein Pong bei geschlossenem Socket oder ohne Hook.
+
+**Ende-zu-Ende gegen `web.whatsapp.com` (`make wa-probe-tunnel GAP=30`, `tests/wa_probe.c`):** unser WebSocket-Client, unser Noise-XX (`noise.c`), Zertifikatskette aus dem ServerHello per XEdDSA gegen den einkompilierten WA-Root-Key geprüft (Zwischenzertifikat Serial 3, Blatt Serial 366, Blattschlüssel = Server-Static), 30 s Wartezeit mit echten X25519-Leitern (53 466 Stück auf dem Host) und Herzschlag alle 4 s → **7 Pongs, ClientFinish 30,0 s nach ServerHello angenommen**, erstes verschlüsseltes Server-Frame (694 Byte) mit den Transportschlüsseln entschlüsselt (678 Byte Binary-Node, das `pair-device`-IQ). Transport in diesem Lauf: `openssl s_client` mit genau den TLS-1.3-Parametern des neuen A500-Plans (Abschnitt 7), weil unser `tls12.c` am Server scheitert; `make wa-probe` (eigener TLS 1.2) dokumentiert diesen Fehlschlag reproduzierbar. Der Registrierungs-Payload (`tests/vectors/wa_client_payload.h`, aus `tools/watimeout -dump-payload`) ist eine Wegwerfidentität; kein Pairing wird abgeschlossen.
+
+Nebenbefund: `x509_verify_chain` akzeptiert jetzt Ketten, an deren Ende der Server sein kreuzsigniertes Wurzelzertifikat anhängt (der Vertrauensanker gilt per Schlüssel, das angehängte Zertifikat wird übersprungen, nicht geprüft) – die Live-Kette hat drei Zertifikate, der Hosttest bisher zwei. `tls12.c` bietet jetzt Extended Master Secret (RFC 7627) an und benutzt es, wenn der Server es bestätigt (Go- und OpenSSL-Loopback: ja).

@@ -19,13 +19,13 @@ VASMFLAGS := -quiet -Fhunkexe -kick1hunks -nowarn=62 -m68000
 
 HOST_CFLAGS := -O2 -Wall -Wextra -std=c99 -Icrypto/ref
 
-CRYPTO_SRC := crypto/ref/x25519_ref.c crypto/ref/sha512.c crypto/ref/ed25519.c crypto/ref/sha256.c crypto/ref/aes.c crypto/ref/drbg.c crypto/ref/noise.c crypto/ref/rsa.c crypto/ref/x509.c crypto/ref/tls12.c crypto/ref/sha1.c crypto/ref/ws.c
+CRYPTO_SRC := crypto/ref/x25519_ref.c crypto/ref/sha512.c crypto/ref/ed25519.c crypto/ref/sha256.c crypto/ref/aes.c crypto/ref/drbg.c crypto/ref/noise.c crypto/ref/rsa.c crypto/ref/x509.c crypto/ref/tls12.c crypto/ref/sha1.c crypto/ref/ws.c crypto/ref/heartbeat.c crypto/ref/yield.c
 BENCH_SRC  := bench/x25519_bench.c
 # no linker available on macOS: one unity translation unit -> one .s -> vasm -Fhunkexe
 UNITY_SRC  := bench/amiga/unity.c
 AMIGA_ASM  := build/amiga/x25519bench.s
 
-.PHONY: all host-test amiga run vamos vectors clean tls-test ws-test run-blitaes run-blitgcm
+.PHONY: all host-test amiga run vamos vectors clean tls-test ws-test heartbeat-test wa-probe wa-probe-tunnel run-blitaes run-blitgcm
 
 all: host-test amiga
 
@@ -46,13 +46,13 @@ build/noise_test: tests/noise_test.c $(CRYPTO_SRC) crypto/ref/noise.h
 	@mkdir -p build
 	$(HOSTCC) $(HOST_CFLAGS) tests/noise_test.c $(CRYPTO_SRC) -o $@
 
-build/rsa_test: tests/rsa_test.c crypto/ref/rsa.c crypto/ref/rsa.h crypto/ref/sha256.c
+build/rsa_test: tests/rsa_test.c crypto/ref/rsa.c crypto/ref/rsa.h crypto/ref/sha256.c crypto/ref/yield.c
 	@mkdir -p build
-	$(HOSTCC) $(HOST_CFLAGS) tests/rsa_test.c crypto/ref/rsa.c crypto/ref/sha256.c -o $@
+	$(HOSTCC) $(HOST_CFLAGS) tests/rsa_test.c crypto/ref/rsa.c crypto/ref/sha256.c crypto/ref/yield.c -o $@
 
 build/x509_test: tests/x509_test.c crypto/ref/x509.c crypto/ref/x509.h crypto/ref/rsa.c crypto/ref/sha256.c tests/certs/wa_rsa_chain.h
 	@mkdir -p build
-	$(HOSTCC) $(HOST_CFLAGS) tests/x509_test.c crypto/ref/x509.c crypto/ref/rsa.c crypto/ref/sha256.c -o $@
+	$(HOSTCC) $(HOST_CFLAGS) tests/x509_test.c crypto/ref/x509.c crypto/ref/rsa.c crypto/ref/sha256.c crypto/ref/yield.c -o $@
 
 build/tls_test: tests/tls_test.c $(CRYPTO_SRC) crypto/ref/tls12.h
 	@mkdir -p build
@@ -74,6 +74,31 @@ ws-test: build/ws_test
 	go run ./tools/wsserver -listen 127.0.0.1:4434 > build/wsserver.log 2>&1 & \
 	for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do grep -q READY build/wsserver.log 2>/dev/null && break; sleep 0.5; done; \
 	./build/ws_test 4434; r=$$?; sleep 0.5; cat build/wsserver.log; exit $$r
+
+# heartbeat (pong frames from the crypto progress hook) against the loopback echo server, which counts pongs
+build/heartbeat_test: tests/heartbeat_test.c $(CRYPTO_SRC) crypto/ref/heartbeat.h crypto/ref/ws.h
+	@mkdir -p build
+	$(HOSTCC) $(HOST_CFLAGS) tests/heartbeat_test.c $(CRYPTO_SRC) -o $@
+
+heartbeat-test: build/heartbeat_test
+	go run ./tools/wsserver -listen 127.0.0.1:4435 > build/wsserver_hb.log 2>&1 & \
+	for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do grep -q READY build/wsserver_hb.log 2>/dev/null && break; sleep 0.5; done; \
+	./build/heartbeat_test 4435; r=$$?; sleep 0.5; cat build/wsserver_hb.log; exit $$r
+
+# our own TLS 1.2 + WebSocket + Noise XX client against web.whatsapp.com with 30 s of simulated A500
+# computing time and the pong heartbeat (network, manual: make wa-probe GAP=30)
+GAP ?= 30
+WAIP ?= $(shell dig +short web.whatsapp.com | grep -E '^[0-9.]+$$' | head -1)
+build/wa_probe: tests/wa_probe.c $(CRYPTO_SRC) crypto/ref/heartbeat.h tests/certs/wa_rsa_chain.h tests/vectors/wa_client_payload.h
+	@mkdir -p build
+	$(HOSTCC) $(HOST_CFLAGS) tests/wa_probe.c $(CRYPTO_SRC) -o $@
+
+wa-probe: build/wa_probe
+	./build/wa_probe $(GAP) $(WAIP)
+
+# same, with openssl s_client as TLS 1.3/X25519 transport (the live edge does not complete RSA key transport)
+wa-probe-tunnel: build/wa_probe
+	./build/wa_probe $(GAP) $(WAIP) tunnel
 
 crypto/blit/blitaes_prog.h: tools/blitaes/gen_blitaes.py tools/blitaes/sbox113.txt
 	python3 $< 64 > $@
@@ -114,7 +139,7 @@ vectors:
 	go run ./tools/genvectors -mode aesgcm -n 64 > tests/vectors/aesgcm_random.txt
 
 crypto/ref/ed25519_btable.h: tools/gen_btable.c crypto/ref/ed25519.c
-	$(HOSTCC) -O2 -Icrypto/ref tools/gen_btable.c crypto/ref/x25519_ref.c crypto/ref/sha512.c crypto/ref/ed25519.c -o build/gen_btable
+	$(HOSTCC) -O2 -Icrypto/ref tools/gen_btable.c crypto/ref/x25519_ref.c crypto/ref/sha512.c crypto/ref/ed25519.c crypto/ref/yield.c -o build/gen_btable
 	./build/gen_btable > $@
 
 # ---- amiga -----------------------------------------------------------------

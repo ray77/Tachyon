@@ -33,7 +33,7 @@ static int fe16_isnegative(const fe16 f) { uint8_t b[32]; fe16_tobytes(b, f); re
 static void ed_sqr_n(fe16 h, const fe16 f, int n)
 {
     fe16_sqr(h, f);
-    while (--n > 0) fe16_sqr(h, h);
+    while (--n > 0) { fe16_sqr(h, h); if ((n & 15) == 0) CRYPTO_YIELD(); }
 }
 
 /* h = z^(2^252 - 3), used for the square root in point decoding */
@@ -181,6 +181,7 @@ void ge_scalarmult(ge_p3 *R, const uint8_t k[32], const ge_p3 *P)
     int bit;
     ge_identity(&acc);
     for (bit = 255; bit >= 0; bit--) {
+        CRYPTO_YIELD();
         ge_dbl(&acc, &acc);
         if ((k[bit >> 3] >> (bit & 7)) & 1) ge_add(&acc, &acc, P);
     }
@@ -346,6 +347,7 @@ void ge_double_scalarmult(ge_p3 *R, const uint8_t a[32], const ge_p3 *A, const u
     for (i = 255; i >= 0; i--)
         if (aslide[i] || bslide[i]) break;
     for (; i >= 0; i--) {
+        CRYPTO_YIELD();
         ge_dbl_p1p1(&t, &acc);
         if (aslide[i] > 0)      { ge_p1p1_to_p3(&u, &t); ge_add_cached(&t, &u, &Ai[aslide[i] >> 1]); }
         else if (aslide[i] < 0) { ge_p1p1_to_p3(&u, &t); ge_sub_cached(&t, &u, &Ai[(-aslide[i]) >> 1]); }
@@ -447,6 +449,7 @@ void ge_scalarmult_base_ct(ge_p3 *R, const uint8_t k[32])
 
     ge_identity(&acc);
     for (i = 0; i < 64; i++) {
+        CRYPTO_YIELD();
         comb_select(&sel, i, (int)digits[i]);
         ge_madd_niels(&t, &acc, &sel);
         ge_p1p1_to_p3(&acc, &t);

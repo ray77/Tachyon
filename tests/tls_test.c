@@ -28,7 +28,7 @@ static int pump(int fd, tls12 *t, int (*done)(tls12 *))
     for (;;) {
         if (t->out_len) { if (!send_all(fd, t->out, t->out_len)) return 0; t->out_len = 0; }
         if (done(t)) return 1;
-        { ssize_t r = read(fd, buf, sizeof buf); if (r <= 0) return 0;
+        { ssize_t r = read(fd, buf, getenv("TLS_TEST_CHUNK") ? (size_t)atoi(getenv("TLS_TEST_CHUNK")) : sizeof buf); if (r <= 0) return 0;
           if (t->state != TLS_ST_CONNECTED && rec_srv_len + (uint32_t)r <= sizeof rec_srv) { memcpy(rec_srv + rec_srv_len, buf, (size_t)r); rec_srv_len += (uint32_t)r; }
           if (!tls12_input(t, buf, (uint32_t)r)) return 0; }
     }
@@ -67,7 +67,7 @@ int main(int argc, char **argv)
     ok = tls12_client_start(&t, "tls-test.localhost", sc.n, sc.n_len, sc.e, 0, &rng);
     result(ok && t.out_len > 0, "ClientHello built");
     ok = pump(fd, &t, connected);
-    printf("  state=%d error=%s chain=%d\n", t.state, tls12_errstr(t.error), t.chain_len);
+    printf("  state=%d error=%s chain=%d ems=%d\n", t.state, tls12_errstr(t.error), t.chain_len, t.ems);
     result(ok, "handshake completes (RSA key transport, AES-128-GCM, server Finished verified)");
     if (ok) {
         static const uint8_t msg[] = "hello from the amiga side";

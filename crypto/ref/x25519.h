@@ -24,6 +24,12 @@ typedef uint16_t fe16[16];
 #define FE16_REG(r)
 #endif
 
+/* Cooperative progress hook (docs/PROTOCOL.md section 8). The long computations (X25519 ladder,
+ * Ed25519/XEdDSA double-scalar multiplication, comb, inversions, RSA exponentiation) call it every
+ * 20-50 ms on the A500. The caller installs it to keep the WebSocket alive with a pong frame while
+ * the server waits (idle timer 10 s) or to update a display; it must return quickly. */
+#include "yield.h"
+
 /* field arithmetic (exposed for tests and micro-benchmarks) */
 void fe16_frombytes(fe16 h, const uint8_t s[32]);
 void fe16_tobytes(uint8_t s[32], const fe16 h);

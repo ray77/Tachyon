@@ -101,6 +101,13 @@ uint32_t ws_frame_binary(ws_client *w, const uint8_t *payload, uint32_t len, uin
     return mask_and_emit(w, 2, payload, len, out, outcap, &f) ? f : 0;
 }
 
+uint32_t ws_frame_pong(ws_client *w, uint8_t *out, uint32_t outcap)
+{
+    uint32_t f = 0;
+    if (w->state != WS_OPEN) return 0;
+    return mask_and_emit(w, 10, 0, 0, out, outcap, &f) ? f : 0;
+}
+
 uint32_t ws_frame_close(ws_client *w, uint16_t code, uint8_t *out, uint32_t outcap)
 {
     uint8_t body[2] = { (uint8_t)(code >> 8), (uint8_t)code };

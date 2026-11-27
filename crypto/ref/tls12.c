@@ -116,6 +116,8 @@ int tls12_client_start(tls12 *t, const char *host, const uint8_t *root_n, uint32
     put16(ch + p, 13); p += 2; put16(ch + p, 4); p += 2; put16(ch + p, 2); p += 2; put16(ch + p, 0x0401); p += 2;
     /* renegotiation_info (empty) - some servers insist */
     put16(ch + p, 0xff01); p += 2; put16(ch + p, 1); p += 2; ch[p++] = 0;
+    /* extended_master_secret (RFC 7627): binds the master secret to the handshake transcript; used when echoed */
+    put16(ch + p, 0x0017); p += 2; put16(ch + p, 0); p += 2;
     put16(ch + ext_start, p - ext_start - 2);
     t->state = TLS_ST_WAIT_SH;
     return write_handshake(t, 1, ch, p);
@@ -132,7 +134,19 @@ static int on_server_hello(tls12 *t, const uint8_t *b, uint32_t len)
     if (sid > 32 || len < 35 + sid + 3) return fail(t, E_HANDSHAKE);
     if (get16(b + 35 + sid) != 0x009c) return fail(t, E_SUITE);
     if (b[37 + sid] != 0) return fail(t, E_SUITE);
-    /* extensions ignored (none affect this suite's key derivation without EMS, which we do not offer) */
+    /* extensions: only extended_master_secret changes anything for this suite */
+    t->ems = 0;
+    if (len > 38 + sid + 2) {
+        uint32_t p = 38 + sid, end = p + 2 + get16(b + p);
+        if (end > len) return fail(t, E_HANDSHAKE);
+        p += 2;
+        while (p + 4 <= end) {
+            uint32_t et = get16(b + p), el = get16(b + p + 2);
+            if (p + 4 + el > end) return fail(t, E_HANDSHAKE);
+            if (et == 0x0017 && el == 0) t->ems = 1;
+            p += 4 + el;
+        }
+    }
     t->state = TLS_ST_WAIT_CERT;
     return 1;
 }
@@ -178,9 +192,14 @@ static int on_server_hello_done(tls12 *t, const uint8_t *b, uint32_t len)
     put16(cke, klen);
     if (!rsa_encrypt_pkcs1(&t->server_key, pre, 48, pad, cke + 2)) return fail(t, E_RSA);
     if (!write_handshake(t, 16, cke, 2 + klen)) return 0;
-    /* master secret and keys */
-    for (i = 0; i < 32; i++) { seed[i] = t->client_random[i]; seed[32 + i] = t->server_random[i]; }
-    prf(pre, 48, "master secret", seed, 64, t->master, 48);
+    /* master secret and keys; with EMS the seed is the session hash (transcript through ClientKeyExchange) */
+    if (t->ems) {
+        h = t->transcript; sha256_final(&h, hash);
+        prf(pre, 48, "extended master secret", hash, 32, t->master, 48);
+    } else {
+        for (i = 0; i < 32; i++) { seed[i] = t->client_random[i]; seed[32 + i] = t->server_random[i]; }
+        prf(pre, 48, "master secret", seed, 64, t->master, 48);
+    }
     for (i = 0; i < 48; i++) pre[i] = 0;
     for (i = 0; i < 32; i++) { seed[i] = t->server_random[i]; seed[32 + i] = t->client_random[i]; }
     prf(t->master, 48, "key expansion", seed, 64, keyblock, 40);

@@ -1,4 +1,5 @@
 #include "rsa.h"
+#include "yield.h"
 #include "sha256.h"
 
 /* ---- limb helpers (little-endian uint16 arrays of k->limbs) ---------------- */
@@ -113,6 +114,7 @@ int rsa_public_op(const rsa_pub *k, const uint8_t *in_be, uint8_t *out_be)
     for (i = 0; i < limbs; i++) one[i] = 0; one[0] = 1;
     rsa_mont_mul(k, one, k->rr, acc);               /* acc = R (Montgomery one) */
     for (bit = 31; bit >= 0; bit--) {               /* left-to-right square and multiply, e is public */
+        CRYPTO_YIELD();
         if (started) rsa_mont_mul(k, acc, acc, acc);
         if ((k->e >> bit) & 1) { rsa_mont_mul(k, acc, xm, acc); started = 1; }
     }

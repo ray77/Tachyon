@@ -38,6 +38,7 @@ typedef struct {
     aes_gcm_key wr, rd;
     uint32_t wr_seq_hi, wr_seq_lo, rd_seq_hi, rd_seq_lo;
     int rd_encrypted, wr_encrypted;
+    int ems;                        /* server accepted extended_master_secret (RFC 7627) */
 
     /* incoming record reassembly */
     uint8_t in[TLS_IN_MAX]; uint32_t in_len;

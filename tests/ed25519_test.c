@@ -2,7 +2,7 @@
  * Host-side tests for SHA-512, the Edwards group operations, Ed25519 (RFC 8032)
  * and libsignal-style XEdDSA verification.
  *
- *   cc -O2 -Icrypto/ref tests/ed25519_test.c crypto/ref/x25519_ref.c crypto/ref/sha512.c crypto/ref/ed25519.c -o build/ed25519_test
+ *   cc -O2 -Icrypto/ref tests/ed25519_test.c crypto/ref/x25519_ref.c crypto/ref/sha512.c crypto/ref/ed25519.c crypto/ref/yield.c -o build/ed25519_test
  *   build/ed25519_test tests/vectors
  */
 #include <stdio.h>

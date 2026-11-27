@@ -31,8 +31,9 @@ int x509_verify_signature(const x509_cert *c, const uint8_t *n_be, uint32_t n_le
 /* 1 if host matches a dNSName in the SAN (exact or single leading wildcard label) */
 int x509_match_host(const x509_cert *c, const char *host);
 /* Chain: certs[0] = leaf ... certs[k-1]; root is pinned by key. Checks issuer/subject links,
- * cA flags, signatures, that the last certificate is signed by (root_n, root_e), and the
- * host name. now may be 0 (no clock: validity not checked, see docs/PROTOCOL.md). */
+ * cA flags, signatures and the host name; the chain is complete at the first certificate signed by
+ * (root_n, root_e) or carrying that key itself (servers often append their cross-signed root; it is
+ * not verified, only skipped). now may be 0 (no clock: validity not checked, see docs/PROTOCOL.md). */
 int x509_verify_chain(const x509_cert *certs, int count, const uint8_t *root_n, uint32_t root_n_len, uint32_t root_e,
                       const char *host, const char *now);
 

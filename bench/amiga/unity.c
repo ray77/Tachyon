@@ -15,4 +15,6 @@
 #include "../../crypto/ref/tls12.c"
 #include "../../crypto/ref/sha1.c"
 #include "../../crypto/ref/ws.c"
+#include "../../crypto/ref/heartbeat.c"
+#include "../../crypto/ref/yield.c"
 #include "../x25519_bench.c"

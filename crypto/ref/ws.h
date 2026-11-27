@@ -38,5 +38,8 @@ int ws_input(ws_client *w, const uint8_t *data, uint32_t len, uint8_t *out, uint
 /* Masked binary frame around payload into out; returns frame length or 0 if it does not fit. */
 uint32_t ws_frame_binary(ws_client *w, const uint8_t *payload, uint32_t len, uint8_t *out, uint32_t outcap);
 uint32_t ws_frame_close(ws_client *w, uint16_t code, uint8_t *out, uint32_t outcap);
+/* Unsolicited empty pong (RFC 6455 5.5.3): the heartbeat that resets WhatsApp's 10 s idle timer without
+ * touching the WA layer (docs/PROTOCOL.md section 8). 6 bytes; a ping must NOT be used for this. */
+uint32_t ws_frame_pong(ws_client *w, uint8_t *out, uint32_t outcap);
 
 #endif

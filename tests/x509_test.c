@@ -31,9 +31,14 @@ int main(void)
     for (i = 0; i < c[2].n_len; i++) rootn[i] = c[2].n[i];     /* the pinned trust anchor is the G2 key itself */
     result(x509_verify_chain(c, 2, rootn, c[2].n_len, c[2].e, "web.whatsapp.com", "20261126000000Z"), "chain leaf -> intermediate -> pinned G2 key, valid now");
     result(!x509_verify_chain(c, 2, rootn, c[2].n_len, c[2].e, "web.whatsapp.com", "20270101000000Z"), "chain rejected after notAfter");
+    result(x509_verify_chain(c, 3, rootn, c[2].n_len, c[2].e, "web.whatsapp.com", "20261126000000Z"), "chain of 3 with the cross-signed G2 appended (as the live server sends it) accepted");
+    result(x509_verify_chain(c, 3, c[1].n, c[1].n_len, c[1].e, "web.whatsapp.com", "20261126000000Z"), "chain of 3 accepted with the intermediate key pinned (leaf signed by it; rest ignored)");
+    result(x509_verify_chain(c, 1, c[1].n, c[1].n_len, c[1].e, "web.whatsapp.com", 0), "leaf alone accepted with the intermediate key pinned");
+    result(!x509_verify_chain(c, 1, rootn, c[2].n_len, c[2].e, "web.whatsapp.com", 0), "leaf alone rejected with the root key pinned");
     result(!x509_verify_chain(c, 2, rootn, c[2].n_len, c[2].e, "example.com", 0), "chain rejected for wrong host");
     rootn[100] ^= 1;
     result(!x509_verify_chain(c, 2, rootn, c[2].n_len, c[2].e, "web.whatsapp.com", 0), "chain rejected under a wrong root key");
+    result(!x509_verify_chain(c, 3, rootn, c[2].n_len, c[2].e, "web.whatsapp.com", 0), "chain of 3 rejected under a wrong root key (appended root is not the anchor)");
     {   /* truncated / corrupted DER must not parse or verify */
         x509_cert t;
         static uint8_t bad[2048];

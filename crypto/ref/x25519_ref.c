@@ -9,6 +9,7 @@
 #include "x25519.h"
 
 /* p = 2^255 - 19 as 16-bit limbs */
+
 static const uint16_t P[16] = {
     0xFFED, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF,
     0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0x7FFF
@@ -199,8 +200,10 @@ void fe16_cswap(fe16 f, fe16 g, uint16_t swap)
 static void fe16_sqr_n(fe16 h, const fe16 f, int n)
 {
     fe16_sqr(h, f);
-    while (--n > 0)
+    while (--n > 0) {
         fe16_sqr(h, h);
+        if ((n & 15) == 0) CRYPTO_YIELD();
+    }
 }
 
 /* h = f^(p-2) = f^-1, 254 squarings + 11 multiplications */
@@ -255,6 +258,7 @@ void x25519_ref(uint8_t out[32], const uint8_t scalar[32], const uint8_t point[3
 
     for (bit = 254; bit >= 0; bit--) {
         uint16_t kt = (uint16_t)((k[bit >> 3] >> (bit & 7)) & 1);
+        CRYPTO_YIELD();
         swap ^= kt;
         fe16_cswap(x2, x3, swap);
         fe16_cswap(z2, z3, swap);
