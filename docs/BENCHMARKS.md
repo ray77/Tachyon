@@ -376,3 +376,36 @@ Dieselbe Maschine und derselbe Ablauf wie Schritt 17 (`make run-probe GAP=0`, FS
 - **TLS bleibt 31,5 s**, davon ≈ 10 s RSA (eine Prüfung + `rsa_pub_set`), die der Zertifikatscache aus Schritt 15 spart, sobald der Amiga ihn aus einer Datei lädt wie jetzt den Noise-Fingerabdruck (`io.use_cache` ist in der Amiga-Probe noch 0). Damit läge das Fenster bei ≈ 68 s.
 - **Speicher:** `Avail` nach beiden Programmen Fast 696 Bytes frei, Chip 133 KiB frei – die Probe ist mit den vorgezogenen Schlüsselpaaren nicht gewachsen (gleiche statischen Puffer, nur umgehängt). Live-Verbindungen für diesen Schritt: Host 2 (Cache leer → gefüllt, Treffer), vamos 1, FS-UAE 1.
 
+## 2026-11-27 – Schritt 19: Pairing als verknüpftes Gerät aus dem emulierten A500
+
+Dieselbe Maschine wie Schritt 18 mit 2 MiB Fast-RAM (`make run-pair FAST=2048`), Programm `build/amiga/wa_probe` im Modus `WA_MODE_PAIR` (PROTOCOL.md Abschnitt 11), Noise-Cache vorgewärmt, keine gespeicherten Zugangsdaten → QR-Pairing, 515-Neustart, Login-Verbindung. Das Telefon las den Code vom FS-UAE-Fenster ab (61 × 61 Module, 6 × 3 Pixel je Modul) und bestätigte das Pairing; `RESULT: PAIRED and LOGGED IN as <JID>:8 (scan -> sign 19.60 s, login connection 76.00 s)`.
+
+| Phase | Dauer | Zeitpunkt |
+|---|---:|---:|
+| Companion-Identität (Noise-Static, Signal-Identität, signierter Prekey mit XEdDSA, Registrierungs-ID; vor dem Connect) | 18,28 s | 18,88 s |
+| TLS-Schlüsselpaar + Noise-Ephemeral (vor dem Connect) | 6,52 s | 25,40 s |
+| DNS + TCP-Connect | 1,3 s | 26,78 s |
+| TLS-1.3-Handshake | 32,1 s | 58,96 s |
+| WebSocket + Noise-ClientHello (300-Byte-Registrierungs-Payload) | 0,6 s | 59,60 s |
+| ServerHello → ClientFinish (3 DH, HKDF, AES-GCM, XEdDSA Blatt; Zwischenzertifikat aus dem Cache) | 40,64 s (10 Pongs) | 101,48 s |
+| erster Server-Frame (`pair-device` mit 6 Refs), Ack | 4,7 s | 106,22 s |
+| QR V11 L kodieren (Maske 2 fest) + zeichnen (414 × 207 Pixel) | 0,78 s + 0,92 s | 107,98 s |
+| Telefon scannt → `pair-success` | 18,26 s | 125,42 s |
+| HMAC-SHA256 + Account-Signatur prüfen (XEdDSA) | **11,30 s** | 136,76 s |
+| Geräte-Signatur (XEdDSA-Sign, `sc_muladd`) | **7,84 s** | 144,66 s |
+| `SYS:tachyon.creds` schreiben, `pair-device-sign` senden | 0,4 s | 145,10 s |
+| Server: `stream:error 515` + `xmlstreamend` (eine WebSocket-Nachricht) | 0,66 s | 145,58 s |
+| neue TLS- und Noise-Ephemeral-Schlüsselpaare | 6,60 s | 152,40 s |
+| Login-Verbindung: TCP, TLS (32,1 s), WebSocket, Noise (41,3 s, 87-Byte-Login-Payload) | 76,0 s | 228,70 s |
+| `<success>` → eingeloggt | | 228,74 s |
+| **Scan → `pair-device-sign`** | **19,60 s** | |
+| **Programmstart → `<success>`** | **228,7 s**, 26 Pongs | |
+
+### Einordnung
+
+- **Der Server wartet.** 19,6 s zwischen Scan und Geräte-Signatur störten nicht; die 20-s-Gültigkeit der Codes zählt nur bis zum Scan. Die Pongs alle 4 s hielten die Verbindung.
+- **XEdDSA dominiert:** Prüfung 11,3 s (wie beim Noise-Blattzertifikat) und Signatur 7,8 s – zusammen 19 s, davon 3 Festbasis-/Doppelbasis-Multiplikationen. Die Prüfung ist dieselbe `xeddsa_verify` wie in Noise; jeder Gewinn dort (X25519-PLAN.md) zählt hier doppelt.
+- **Zwei volle Verbindungen** kosten 2 × (32 s TLS + 41 s Noise) = 146 s der 229 s. Der 515-Neustart ist vom Protokoll vorgegeben; die Login-Verbindung kommt bei jedem Programmstart wieder (76 s), das Pairing nur einmal. Hebel wie in Schritt 18: Zertifikatscache für TLS (−10 s), Blattzertifikat cachen (−11 s), schnellere Leitern.
+- **Identität 18,3 s** vor dem Connect: drei Festbasis-Multiplikationen plus XEdDSA-Sign des Prekeys. Einmalig; bei gespeicherten Zugangsdaten entfällt sie, und der Lauf beginnt beim Login (76 s).
+- **Speicher:** mit 2 MiB Fast nach Stack und Probe 177 KiB Fast + 437 KiB Chip frei (`avail.txt`); der QR-Schirm (4 Planes 640 × 256, 80 KiB Chip) und die Decoder-Arenen (2 × 6 KiB) passen.
+- **Plattformtyp:** dieses Binary war 37 s vor der Umstellung auf `WA_PLATFORM_TYPE` FIREFOX gebaut (Header fehlte in den Make-Abhängigkeiten, behoben), das Pairing lief daher wie das Host-Pairing mit UNKNOWN; das Telefon zeigt „Anderes Gerät". Live-Verbindungen für diesen Schritt: Host 2 (Pairing, Login), FS-UAE 1.

@@ -2,7 +2,7 @@
 
 ## QR-Code zum Verknüpfen (`ui/qr.c`, `ui/qr.h`)
 
-Der A500 wird als verknüpftes Gerät angemeldet, indem das Telefon einen QR-Code vom Bildschirm liest. Der Text ist `ref,noisePub,identityPub,advSecret` (die drei Schlüssel Base64 mit Auffüllzeichen, je 44 Zeichen), insgesamt etwa 140–170 ASCII-Zeichen. `ui/qr.c` erzeugt daraus die Modul-Bitmap; gezeichnet wird sie vom Bildschirmcode.
+Der A500 wird als verknüpftes Gerät angemeldet, indem das Telefon einen QR-Code vom Bildschirm liest. Der Text ist `https://wa.me/settings/linked_devices#ref,noisePub,identityPub,advSecret,<Plattform-ID>` (die drei Schlüssel Base64 mit Auffüllzeichen, je 44 Zeichen; PROTOCOL.md Abschnitt 11), live 277 ASCII-Zeichen → Version 11 L, 61 × 61 Module. Auf dem Hires-Schirm 6 × 3 Pixel je Modul (414 × 207 mit Ruhezone, Zeichnen 0,92 s); das Telefon hat diesen Code am 2026-11-27 aus dem FS-UAE-Fenster gelesen und das Pairing bestätigt (BENCHMARKS.md Schritt 19). `ui/qr.c` erzeugt daraus die Modul-Bitmap; gezeichnet wird sie vom Bildschirmcode.
 
 Umfang: Byte-Modus, Fehlerkorrektur L oder M, Versionen 1–15 (die kleinste passende), alle acht Masken nach den vier Strafregeln bewertet, Format- und Versionsinformation, Reed-Solomon über GF(256) mit Primitivpolynom `0x11d`. Eingabe höchstens 300 Byte; die passen immer in Version ≤ 11 (L) bzw. ≤ 13 (M), die Versionen darüber erreicht man nur mit `min_version`.
 

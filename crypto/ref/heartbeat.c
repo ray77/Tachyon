@@ -21,6 +21,9 @@ int heartbeat_pong(heartbeat *h)
     return 1;
 }
 
+/* the hook that was installed before heartbeat_arm (a progress display, say) keeps running behind the heartbeat */
+static crypto_yield_fn chained; static void *chained_ctx;
+
 void heartbeat_tick(void *ctx)
 {
     heartbeat *h = (heartbeat *)ctx;
@@ -29,7 +32,12 @@ void heartbeat_tick(void *ctx)
         h->last_ms = now;
         heartbeat_pong(h);
     }
+    if (chained) chained(chained_ctx);
 }
 
-void heartbeat_arm(heartbeat *h) { crypto_yield_ctx = h; crypto_yield_hook = heartbeat_tick; }
-void heartbeat_disarm(void) { crypto_yield_hook = 0; crypto_yield_ctx = 0; }
+void heartbeat_arm(heartbeat *h)
+{
+    if (crypto_yield_hook != heartbeat_tick) { chained = crypto_yield_hook; chained_ctx = crypto_yield_ctx; }
+    crypto_yield_ctx = h; crypto_yield_hook = heartbeat_tick;
+}
+void heartbeat_disarm(void) { crypto_yield_hook = chained; crypto_yield_ctx = chained_ctx; chained = 0; chained_ctx = 0; }

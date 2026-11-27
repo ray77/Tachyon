@@ -37,7 +37,8 @@ void heartbeat_init(heartbeat *h, ws_client *w, uint32_t (*now_ms)(void), uint32
 int  heartbeat_pong(heartbeat *h);
 /* the hook: pong if interval_ms have passed since the last one */
 void heartbeat_tick(void *ctx);
-void heartbeat_arm(heartbeat *h);      /* installs heartbeat_tick as the CRYPTO_YIELD hook */
+void heartbeat_arm(heartbeat *h);      /* installs heartbeat_tick as the CRYPTO_YIELD hook; a hook that was installed
+                                          before keeps being called after each tick and is restored by disarm */
 void heartbeat_disarm(void);
 
 #endif

@@ -106,7 +106,9 @@ PROBE_CORE := tests/wa_probe_core.c tests/wa_probe_core.h tests/certs/wa_rsa_cha
 # pairing (docs/PROTOCOL.md 11): the protocol modules and the QR encoder are part of the probe since the pair mode
 PROBE_PROTO := proto/wabinary.c proto/identity.c proto/clientpayload.c proto/pairing.c proto/creds.c ui/qr.c
 PROBE_INC := -Itests -Iproto -Iui
-build/wa_probe: tests/wa_probe.c $(PROBE_CORE) $(PROBE_PROTO) $(CRYPTO_SRC) crypto/ref/heartbeat.h crypto/ref/tls13.h proto/pairing.h proto/creds.h proto/pb.h
+# every header the probe builds include: a changed constant (WA_PLATFORM_TYPE, 2026-11-27) must rebuild the A500 binary
+PROBE_HDR := tests/wa_probe_core.h proto/wabinary.h proto/identity.h proto/clientpayload.h proto/pairing.h proto/creds.h proto/pb.h ui/qr.h
+build/wa_probe: tests/wa_probe.c $(PROBE_CORE) $(PROBE_PROTO) $(PROBE_HDR) $(CRYPTO_SRC) crypto/ref/heartbeat.h crypto/ref/tls13.h
 	@mkdir -p build
 	$(HOSTCC) $(HOST_CFLAGS) $(PROBE_INC) tests/wa_probe.c tests/wa_probe_core.c $(PROBE_PROTO) $(CRYPTO_SRC) -o $@
 
@@ -312,7 +314,7 @@ run: build/amiga/x25519bench
 # WhatsApp probe on the Amiga: the host probe's core over bsdsocket.library (net/bsdsock_io.c), TheWire13 as the
 # stack, FS-UAE's emulated A2065 on slirp (tools/run-fsuae-net.sh, docs/NETWORK.md). Network, several minutes.
 PROBE_UNITY := bench/amiga/wa_probe_unity.c
-build/amiga/wa_probe.s: $(PROBE_UNITY) $(CRYPTO_SRC) $(PROBE_CORE) $(PROBE_PROTO) ui/screen.c ui/screen.h ui/amiga13.h proto/pairing.h proto/creds.h net/bsdsock_io.c net/bsdsock_io.h net/bsdsocket13.h bench/wa_probe_amiga.c
+build/amiga/wa_probe.s: $(PROBE_UNITY) $(CRYPTO_SRC) $(PROBE_CORE) $(PROBE_PROTO) $(PROBE_HDR) ui/screen.c ui/screen.h ui/amiga13.h net/bsdsock_io.c net/bsdsock_io.h net/bsdsocket13.h bench/wa_probe_amiga.c
 	@mkdir -p build/amiga
 	$(VC) $(VCFLAGS) $(PROBE_INC) $(PROBE_UNITY) -o=$@
 

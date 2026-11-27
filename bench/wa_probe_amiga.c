@@ -59,11 +59,29 @@ static ULONG ticks_now(void)
 }
 static uint32_t now_ms(void) { return (ticks_now() - tick0) * 20; }
 
+/* progress while the 68000 computes (identity 18 s, TLS 32 s, Noise 41 s, pair-success verify + sign 19 s): the
+ * CRYPTO_YIELD hook prints a dot every 2 s on the console (not into the log file) and, with the screen open, in its
+ * bottom line - otherwise the user takes the silent AmigaDOS window for a crash. The heartbeat chains to this hook. */
+static int screen_open;
+static uint32_t prog_last; static int con_dots, scr_dots;
+static void progress_tick(void *ctx)
+{
+    uint32_t now = now_ms(); (void)ctx;
+    if (now - prog_last < 2000) return;
+    prog_last = now;
+    if (con) { Write(con, (APTR)".", 1); con_dots++; }
+    if (screen_open) {
+        if (scr_dots >= 76) { scr_fill(0, SCR_H - 10, SCR_W, 8, SCR_PAL_BG); scr_dots = 0; }
+        scr_text(8 + 8 * scr_dots++, SCR_H - 10, SCR_PAL_LTGREY, ".");
+    }
+}
 static void log_line(void *ctx, const char *s)
 {
     (void)ctx;
+    if (con_dots) { if (con) Write(con, (APTR)"\n", 1); con_dots = 0; }
     wa_fmt(aline, sizeof aline, "+%7Ts  %s\n", now_ms(), s);
     out(aline);
+    prog_last = now_ms();
 }
 static void logf1(const char *fmt, const char *a, uint32_t b) { char l[200]; wa_fmt(l, sizeof l, fmt, a, b); log_line(0, l); }
 
@@ -92,7 +110,7 @@ static int clock_string(char *s)
 }
 
 /* ---- pairing: credentials file and the QR screen ------------------------------------------------- */
-static wa_creds creds; static int screen_open, pair_mode;
+static wa_creds creds; static int pair_mode;
 
 static void write_creds(void *ctx)
 {
@@ -131,7 +149,7 @@ static void show_qr(void *ctx, const char *text, const qr *code, uint32_t valid_
     wa_fmt(l, sizeof l, "Code %u von %u  -  Version %u, %u x %u Module, %ux%u Pixel je Modul", index, count, (uint32_t)code->version, (uint32_t)n, (uint32_t)n, (uint32_t)sx, (uint32_t)sy);
     screen_text_line(SCR_H - 20, SCR_PAL_LTGREY, l);
     wa_fmt(l, sizeof l, "gueltig noch %u s", valid_ms / 1000);
-    screen_text_line(SCR_H - 10, SCR_PAL_YELLOW, l);
+    screen_text_line(SCR_H - 10, SCR_PAL_YELLOW, l); scr_dots = 0;
     wa_fmt(l, sizeof l, "screen: code drawn in %u ms: %u x %u modules at %ux%u px, %u x %u px with quiet zone", now_ms() - t0, (uint32_t)n, (uint32_t)n, (uint32_t)sx, (uint32_t)sy, (uint32_t)w, (uint32_t)h);
     log_line(0, l);
 }
@@ -149,7 +167,7 @@ static void qr_hide(void *ctx, const char *status)
     if (!screen_open) return;
     scr_fill(0, QR_TOP, SCR_W, SCR_H - QR_TOP - 24, SCR_PAL_BG);
     screen_text_line(SCR_H - 20, SCR_PAL_LTGREEN, status);
-    screen_text_line(SCR_H - 10, SCR_PAL_BG, "");
+    screen_text_line(SCR_H - 10, SCR_PAL_BG, ""); scr_dots = 0;
 }
 
 static int io_send(void *ctx, const uint8_t *p, uint32_t n) { (void)ctx; return bsdsock_send(&net, p, n); }
@@ -214,6 +232,7 @@ int main(void)
 
     /* offline part first: the three X25519 key pairs (~10 s on the 68000) while the stack starts in parallel */
     t_prep = now_ms();
+    crypto_yield_hook = progress_tick; prog_last = now_ms();     /* dots while computing; the heartbeat chains to it */
     if (!wa_probe_prepare(&io)) { out(io.result); out("\n"); finish(); return 10; }
     t_prep = now_ms() - t_prep;
 

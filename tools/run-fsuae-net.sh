@@ -97,10 +97,10 @@ if [ "$PAIR" = 1 ]; then printf 'pair\n' > "$DH0/pair.txt"; [ -f "$PAIR_CREDS" ]
 # (12 x 40 KiB by default, no config key) from the memory that is left: with the stack first, Fast RAM is gone
 # (Avail: 464 bytes) and a 400 KiB program cannot load. NET_ORDER=stack-first restores the old order.
 NET_ORDER=${NET_ORDER:-probe-first}
-if [ "${NET_NOSTACK:-0}" = 1 ]; then printf 'stack %s\ntest\nendcli\n' "$NET_STACK" > "$DH0/S/Startup-Sequence"   # driver tests without the stack
+if [ "${NET_NOSTACK:-0}" = 1 ]; then printf 'stack %s\ntest\n' "$NET_STACK" > "$DH0/S/Startup-Sequence"   # driver tests without the stack
 elif [ "$NET_ORDER" = probe-first ]; then
-  printf "stack %s\n${HOLD_LINE}run >NIL: test\nwait 2\nrun >NIL: C:TheWire13 >SYS:stack.log\nwait %s\navail >SYS:avail.txt\nendcli\n" "$NET_STACK" "$NET_WAIT" > "$DH0/S/Startup-Sequence"
-else printf "stack %s\n${HOLD_LINE}run >NIL: C:TheWire13 >SYS:stack.log\nwait %s\navail >SYS:avail.txt\ntest\navail >SYS:avail2.txt\nendcli\n" "$NET_STACK" "$NET_WAIT" > "$DH0/S/Startup-Sequence"; fi
+  printf "stack %s\n${HOLD_LINE}run >NIL: test\nwait 2\nrun >NIL: C:TheWire13 >SYS:stack.log\nwait %s\navail >SYS:avail.txt\n" "$NET_STACK" "$NET_WAIT" > "$DH0/S/Startup-Sequence"
+else printf "stack %s\n${HOLD_LINE}run >NIL: C:TheWire13 >SYS:stack.log\nwait %s\navail >SYS:avail.txt\ntest\navail >SYS:avail2.txt\n" "$NET_STACK" "$NET_WAIT" > "$DH0/S/Startup-Sequence"; fi
 
 "$FSUAE" "$HERE/fsuae/a500-1mb-fast-net.fs-uae" \
     --floppy_drive_0= \
