@@ -25,7 +25,7 @@ BENCH_SRC  := bench/x25519_bench.c
 UNITY_SRC  := bench/amiga/unity.c
 AMIGA_ASM  := build/amiga/x25519bench.s
 
-.PHONY: all host-test amiga run vamos vectors clean tls-test tls13-test ws-test heartbeat-test wa-probe wa-probe-tunnel wa-capture wabinary-test wabinary-vectors run-blitaes run-blitgcm amiga-probe run-probe vamos-probe utility13 utility13-test sana2-probe run-sana2 sanafix
+.PHONY: all host-test amiga run vamos vectors clean tls-test tls13-test ws-test heartbeat-test wa-probe wa-probe-tunnel wa-capture wabinary-test wabinary-vectors run-blitaes run-blitgcm amiga-probe run-probe vamos-probe utility13 utility13-test sana2-probe run-sana2 sanafix amiga-screen run-screen
 
 all: host-test amiga
 
@@ -330,6 +330,20 @@ vamos-probe: build/amiga/wa_probe
 	mkdir -p build/vamos-sys && cp $< build/vamos-sys/test && rm -f build/vamos-sys/result.txt build/vamos-sys/done
 	head -c 64 /dev/urandom > build/vamos-sys/seed.bin
 	cd build/vamos-sys && $(VAMOS) -q -V sys:. -s 64 test > vamos.log 2>&1; cat result.txt
+
+# client screen skeleton (ui/screen.c, docs/UI.md "Bildschirm"): Intuition custom screen 640x256x4 on Kickstart 1.3,
+# draws title/palette/text/QR matrix, waits 10 s for a key, logs timings and Chip usage to SYS:result.txt
+build/amiga/screen_demo.s: bench/amiga/screen_demo_unity.c bench/amiga/screen_demo.c ui/screen.c ui/screen.h ui/amiga13.h
+	@mkdir -p build/amiga
+	$(VC) $(VCFLAGS) bench/amiga/screen_demo_unity.c -o=$@
+
+build/amiga/screen_demo: bench/amiga/startup_screen.s build/amiga/screen_demo.s
+	$(VASM) $(VASMFLAGS) -o $@ $<
+
+amiga-screen: build/amiga/screen_demo
+
+run-screen: build/amiga/screen_demo
+	tools/run-fsuae.sh $< 60
 
 clean:
 	rm -rf build
