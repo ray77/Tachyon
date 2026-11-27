@@ -1,0 +1,22 @@
+/*
+ * Unity build for the Amiga WhatsApp probe (TCP/IP over bsdsocket.library): without a linker
+ * (see docs/TOOLCHAIN.md) every C module is compiled as one translation unit so vbcc emits a single
+ * assembler file; bench/amiga/startup_probe.s includes it together with the assembler backends.
+ */
+#include "../../crypto/ref/x25519_ref.c"
+#include "../../crypto/ref/sha512.c"
+#include "../../crypto/ref/ed25519.c"
+#include "../../crypto/ref/sha256.c"
+#include "../../crypto/ref/aes.c"
+#include "../../crypto/ref/drbg.c"
+#include "../../crypto/ref/noise.c"
+#include "../../crypto/ref/rsa.c"
+#include "../../crypto/ref/x509.c"
+#include "../../crypto/ref/tls13.c"
+#include "../../crypto/ref/sha1.c"
+#include "../../crypto/ref/ws.c"
+#include "../../crypto/ref/heartbeat.c"
+#include "../../crypto/ref/yield.c"
+#include "../../net/bsdsock_io.c"
+#include "../../tests/wa_probe_core.c"
+#include "../wa_probe_amiga.c"

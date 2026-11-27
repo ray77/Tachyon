@@ -25,7 +25,7 @@ BENCH_SRC  := bench/x25519_bench.c
 UNITY_SRC  := bench/amiga/unity.c
 AMIGA_ASM  := build/amiga/x25519bench.s
 
-.PHONY: all host-test amiga run vamos vectors clean tls-test tls13-test ws-test heartbeat-test wa-probe wa-probe-tunnel run-blitaes run-blitgcm
+.PHONY: all host-test amiga run vamos vectors clean tls-test tls13-test ws-test heartbeat-test wa-probe wa-probe-tunnel run-blitaes run-blitgcm amiga-probe run-probe vamos-probe
 
 all: host-test amiga
 
@@ -101,9 +101,10 @@ heartbeat-test: build/heartbeat_test
 # computing time and the pong heartbeat (network, manual: make wa-probe GAP=30)
 GAP ?= 30
 WAIP ?= $(shell dig +short web.whatsapp.com | grep -E '^[0-9.]+$$' | head -1)
-build/wa_probe: tests/wa_probe.c $(CRYPTO_SRC) crypto/ref/heartbeat.h crypto/ref/tls13.h tests/certs/wa_rsa_chain.h tests/vectors/wa_client_payload.h
+PROBE_CORE := tests/wa_probe_core.c tests/wa_probe_core.h tests/certs/wa_rsa_chain.h tests/vectors/wa_client_payload.h
+build/wa_probe: tests/wa_probe.c $(PROBE_CORE) $(CRYPTO_SRC) crypto/ref/heartbeat.h crypto/ref/tls13.h
 	@mkdir -p build
-	$(HOSTCC) $(HOST_CFLAGS) tests/wa_probe.c $(CRYPTO_SRC) -o $@
+	$(HOSTCC) $(HOST_CFLAGS) -Itests tests/wa_probe.c tests/wa_probe_core.c $(CRYPTO_SRC) -o $@
 
 wa-probe: build/wa_probe
 	./build/wa_probe $(GAP) $(WAIP)
@@ -212,6 +213,27 @@ run-blitgcm: build/amiga/blitgcm
 
 run: build/amiga/x25519bench
 	tools/run-fsuae.sh $< 600
+
+# WhatsApp probe on the Amiga: the host probe's core over bsdsocket.library (net/bsdsock_io.c), TheWire13 as the
+# stack, FS-UAE's emulated A2065 on slirp (tools/run-fsuae-net.sh, docs/NETWORK.md). Network, several minutes.
+PROBE_UNITY := bench/amiga/wa_probe_unity.c
+build/amiga/wa_probe.s: $(PROBE_UNITY) $(CRYPTO_SRC) $(PROBE_CORE) net/bsdsock_io.c net/bsdsock_io.h net/bsdsocket13.h bench/wa_probe_amiga.c
+	@mkdir -p build/amiga
+	$(VC) $(VCFLAGS) -Itests $(PROBE_UNITY) -o=$@
+
+build/amiga/wa_probe: bench/amiga/startup_probe.s build/amiga/wa_probe.s crypto/m68k/fe16.s crypto/m68k/sha256.s crypto/m68k/aes.s crypto/m68k/mont.s
+	$(VASM) $(VASMFLAGS) -o $@ $<
+
+amiga-probe: build/amiga/wa_probe
+
+run-probe: build/amiga/wa_probe
+	GAP=$(GAP) tools/run-fsuae-net.sh $< 600
+
+# smoke test without a stack: vamos has no bsdsocket.library, the probe must report that and exit cleanly
+vamos-probe: build/amiga/wa_probe
+	mkdir -p build/vamos-sys && cp $< build/vamos-sys/test && rm -f build/vamos-sys/result.txt build/vamos-sys/done
+	head -c 64 /dev/urandom > build/vamos-sys/seed.bin
+	cd build/vamos-sys && $(VAMOS) -q -V sys:. -s 64 test > vamos.log 2>&1; cat result.txt
 
 clean:
 	rm -rf build
