@@ -52,19 +52,22 @@ cp "$A2065DEV" "$DH0/Devs/Networks/a2065.device"
 NET_FIX=${NET_FIX:-1}
 SANADEV=devs:networks/a2065.device
 if [ "$NET_FIX" = 1 ] && [ -f "$ROOT/build/amiga/a2065fix.device" ]; then cp "$ROOT/build/amiga/a2065fix.device" "$DH0/Devs/Networks/"; SANADEV=devs:networks/a2065fix.device; fi
-# slirp: guest 10.0.2.15/24, gateway 10.0.2.2, DNS 10.0.2.3 (static; the same addresses come via DHCP with NET_DHCP=1)
+# slirp: guest 10.0.2.15/24, gateway 10.0.2.2, DNS 10.0.2.3. With NET_DHCP=1 the same addresses must come from slirp's DHCP
+# server; TheWire13 falls back to the static entries when DHCP fails (readme 1.6), so the static fallback is then an
+# unroutable address and a failed DHCP shows up as "IP: 192.168.77.5 (static)" in SYS:stack.log and a connect timeout.
+if [ "$NET_DHCP" = 1 ]; then S_IP=192.168.77.5; S_GW=192.168.77.1; S_DNS=192.168.77.1; else S_IP=10.0.2.15; S_GW=10.0.2.2; S_DNS=10.0.2.3; fi
 cat > "$DH0/S/thewire13.conf" <<EOF
 device=$SANADEV
 unit=0
 
 dhcp=$NET_DHCP
 
-ip=10.0.2.15
+ip=$S_IP
 netmask=255.255.255.0
-gateway=10.0.2.2
+gateway=$S_GW
 
-dns=10.0.2.3
-dns2=10.0.2.3
+dns=$S_DNS
+dns2=$S_DNS
 
 hostname=tachyon
 domain=lan
@@ -110,6 +113,7 @@ kill $PID 2>/dev/null || true
 [ -f "$DH0/avail.txt" ] && { echo "--- SYS:avail.txt (after both started) ---"; cat "$DH0/avail.txt"; }
 echo "--- SYS:stack.log ---"
 cat "$DH0/stack.log" 2>/dev/null || echo "(no stack.log)"
+[ -f "$DH0/amitcp13.log" ] && { echo "--- SYS:amitcp13.log (NET_LOG=1) ---"; cat "$DH0/amitcp13.log"; }
 echo "--- SYS:result.txt after ${i}s ---"
 cat "$DH0/result.txt" 2>/dev/null || echo "(no result.txt)"
 if [ -f "$DH0/noisecache.bin" ] && [ -f "$DH0/done" ]; then cp "$DH0/noisecache.bin" "$NCACHE" && echo "(noise certificate cache saved to $NCACHE)"; fi

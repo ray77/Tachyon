@@ -153,11 +153,29 @@ Damit ist der Weg Kickstart 1.3 → a2065.device (mit unserer utility.library) �
 
 Das unveränderte Amiga-Binary erreicht gegen web.whatsapp.com: DNS 60 ms, TCP 40 ms, TLS 1.3 bei 0,18 s, WebSocket offen bei 0,38 s, ServerHello 0,62 s, ClientFinish 0,84 s, erster verschlüsselter Server-Frame (695 → 679 Bytes, pair-device IQ) bei 1,24 s – `RESULT: handshake ACCEPTED`. Damit sind Registerkonventionen und Strukturen in `bsdsocket13.h` bestätigt (vamos implementiert dieselbe AmiTCP-ABI); Zeiten sind dort bedeutungslos (keine Zyklen).
 
+### DHCP (FS-UAE, `NET_DHCP=1`, 2026-11-27)
+
+TheWire13 holt seine Adresse von slirps DHCP-Server, wenn `dhcp=1` in `S:thewire13.conf` steht. Damit ein stiller Rückfall auf die statischen Einträge nicht wie Erfolg aussieht (TheWire13 nimmt sie bei DHCP-Fehlschlag, Readme 1.6), schreibt `tools/run-fsuae-net.sh` bei `NET_DHCP=1` eine unerreichbare statische Adresse (192.168.77.5) in die Konfiguration. Ergebnis mit `NET_LOG=1` (Auszug `SYS:stack.log`, Pfad `-> UDP 68/67`):
+
+```text
+INFO: UDP BIND port=68
+INFO: UDP send dst=255.255.255.255 src_port=68 dst_port=67 payload_len=300    (DISCOVER)
+INFO: IP RX src=10.0.2.2 dst=255.255.255.255 proto=17 total_len=309          (OFFER)
+INFO: UDP send dst=255.255.255.255 src_port=68 dst_port=67 payload_len=300    (REQUEST)
+INFO: IP RX src=10.0.2.2 dst=255.255.255.255 proto=17 total_len=309          (ACK)
+INFO: UDP UNBIND port=68 queue=0
+IP: 10.0.2.15 (DHCP)
+Mask: 255.255.255.0
+Gateway: 10.0.2.2
+DNS: 10.0.2.3
+```
+
+Zwei Umläufe, dann ARP, DNS (1,58 s), TCP-Connect (0,84 s) und `handshake ACCEPTED` wie mit statischen Adressen; der Stack war fertig, bevor die Probe ihre Schlüsselpaare (12,7 s, parallel zum Stackstart) berechnet hatte. Mit DHCP fallen auf echter Hardware die vier Adresszeilen der Konfiguration weg. Derselbe Lauf bestätigt die Pool-Größe aus dem Log: `tcp_init: max_tcp=12 active_tcp=12 pool_bytes=720072`, also 60 KiB je PCB (nicht 40 KiB wie in Schritt 17 geschätzt).
+
 ## 5. Offen
 
 - Speicher: mit 1 MiB Fast müssen sich TheWire13 und Client 1 MiB Fast + 512 KiB Chip teilen, der Client bleibt unter ≈ 400 KiB und muss vor dem Stack starten. Deshalb setzt der Netz-Client 2 MiB Fast voraus (Abschnitt 6); ein Pool-Schlüssel beim Autor bliebe wünschenswert.
 - Rückmeldung an den TheWire13-Autor (aminet@jaehne.tk): `S2_CONFIGINTERFACE` sollte die Default-Adresse aus `S2_GETSTATIONADDRESS`/`ios2_DstAddr` verwenden (wie AmiTCP), dann entfällt `a2065fix.device`.
-- DHCP (`NET_DHCP=1`) noch nicht getestet; statische slirp-Adressen genügen für die Emulation.
 - `tx_mss=512` (TheWire13-Default `tx_buffer=512`): TLS-Records von 16 KiB gehen in 32 Segmenten – für den Handshake egal, für Medien später relevant.
 - Entropiesammler und Seed-Datei (docs/RNG.md) statt `SYS:seed.bin`.
 - Zeit per SNTP über den Adapter (ein UDP-Datagramm; braucht `sendto`/`recvfrom` im Adapter) oder `mini_ntp` in der Startup-Sequence.
@@ -177,7 +195,7 @@ Mit 1 MiB Fast bleiben nach Stack und Probe 872 Bytes Fast und 69 KiB Chip frei 
 
 Was sich gegenüber 1 MiB ändert:
 
-- **Der Stack wächst mit dem Angebot.** Mit 1 MiB belegen Stack und Probe zusammen ≈ 1,45 MiB (1 MiB Fast voll plus 447 KiB Chip), mit 2 MiB ≈ 1,89 MiB. Die Differenz von ≈ 440 KiB ist der TCP-Pool mit 12 statt 4 PCBs samt zugehörigen Puffern; der Stack allein liegt bei 2 MiB bei ≈ 1,3 MiB Fast (einschließlich System und CLI, ≈ 60 KiB). Die Probe selbst nahm 537 KiB (Binary von Commit b91672c mit vorgezogenen Schlüsselpaaren und Zertifikatscache).
+- **Der Stack wächst mit dem Angebot.** Mit 1 MiB belegen Stack und Probe zusammen ≈ 1,45 MiB (1 MiB Fast voll plus 447 KiB Chip), mit 2 MiB ≈ 1,89 MiB. Die Differenz von ≈ 440 KiB ist der TCP-Pool mit 12 statt 4 PCBs (`pool_bytes=720072` im Stack-Log, 60 KiB je PCB); der Stack allein liegt bei 2 MiB bei ≈ 1,3 MiB Fast (einschließlich System und CLI, ≈ 60 KiB). Die Probe selbst nahm 537 KiB (Binary von Commit b91672c mit vorgezogenen Schlüsselpaaren und Zertifikatscache).
 - **Chip-RAM bleibt frei.** Der Loader legt alles in Fast ab, 447 KiB Chip stehen für Bildschirm (Hires 640×256, 16 Farben: 80 KiB), Fonts und Blitter-Puffer zur Verfügung. Mit 1 MiB lagen ≈ 380 KiB des Stacks im Chip-RAM.
 - **Startreihenfolge ist egal.** Stack zuerst und Client zuerst funktionieren beide (`NET_ORDER=stack-first` getestet); mit 1 MiB lud die Probe nach dem Stack nicht mehr.
 - **Keine Zeitänderung.** TLS 1.3 31,5 s, Noise 40,5 s (mit Cache-Treffer und vorberechneten Schlüsseln, Commit b91672c), `handshake ACCEPTED` – die Rechenzeit hängt nicht am RAM-Ausbau.
