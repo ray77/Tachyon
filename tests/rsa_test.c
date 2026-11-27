@@ -30,6 +30,17 @@ int main(int argc, char **argv)
         valid = atoi(tok[4]); unhex(x, tok[5], 256); unhex(xe, tok[6], 256);
         if (!rsa_pub_set(&k, nn, 256, e)) { printf("  vector %d: rsa_pub_set failed\n", n); bad++; n++; continue; }
         if (!rsa_public_op(&k, x, got) || memcmp(got, xe, 256)) { printf("  vector %d: x^e mod n\n", n); bad++; }
+        {   /* rsa_pub_check (certificate cache): accepts the prepared key, rejects a corrupted R^2, n0inv, modulus or exponent */
+            rsa_pub bad_k;
+            if (!rsa_pub_check(&k, nn, 256, e)) { printf("  vector %d: rsa_pub_check rejects its own key\n", n); bad++; }
+            bad_k = k; bad_k.rr[n % 128] ^= 1;
+            if (rsa_pub_check(&bad_k, nn, 256, e)) { printf("  vector %d: rsa_pub_check accepts corrupted rr\n", n); bad++; }
+            bad_k = k; bad_k.n0inv ^= 1;
+            if (rsa_pub_check(&bad_k, nn, 256, e)) { printf("  vector %d: rsa_pub_check accepts corrupted n0inv\n", n); bad++; }
+            bad_k = k; bad_k.n[3] ^= 0x100;
+            if (rsa_pub_check(&bad_k, nn, 256, e)) { printf("  vector %d: rsa_pub_check accepts corrupted modulus\n", n); bad++; }
+            if (rsa_pub_check(&k, nn, 256, e ^ 2)) { printf("  vector %d: rsa_pub_check accepts another exponent\n", n); bad++; }
+        }
         if (rsa_verify_pkcs1_sha256(&k, msg, (uint32_t)msgl, sig, 256) != valid) { printf("  vector %d: verify (expected %d)\n", n, valid); bad++; }
         msg[0] ^= 1;
         if (valid && rsa_verify_pkcs1_sha256(&k, msg, (uint32_t)msgl, sig, 256)) { printf("  vector %d: accepts modified message\n", n); bad++; }

@@ -11,6 +11,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include "tls13.h"
+#include "rsa.h"
 
 static int failures;
 static void result(int ok, const char *what) { printf("%s %s\n", ok ? "PASS" : "FAIL", what); if (!ok) failures++; }
@@ -137,7 +138,7 @@ int main(int argc, char **argv)
         tls13_set_cert_cache(&t, &cache);
         ok = ok && pump(fd, &t, connected);
         result(ok, "handshake completes with 1-byte reads");
-        result(ok && t.cert_cached == 1, "certificate cache hit: chain verification skipped, CertificateVerify still checked");
+        result(ok && t.cert_cached == 1, "certificate cache hit: chain verification and rsa_pub_set skipped, CertificateVerify still checked");
         if (ok) {
             static const uint8_t msg[] = "bytewise";
             ok = tls13_send(&t, msg, 8) == 8 && pump(fd, &t, have_app);
@@ -147,7 +148,19 @@ int main(int argc, char **argv)
         chunk = 4096;
     }
 
-    /* ---- connection 4: same leaf, different host name (also in the SAN): the fingerprint binds the host -> miss ---- */
+    /* ---- connection 4: fingerprint matches but the stored prepared key is corrupted: full verification instead, cache rewritten ---- */
+    {
+        cache.key.rr[7] ^= 0x40;
+        fd = dial(port);
+        ok = tls13_client_start(&t, "tls-test.localhost", sc.n, sc.n_len, sc.e, 0, &rng);
+        tls13_set_cert_cache(&t, &cache);
+        ok = ok && pump(fd, &t, connected);
+        result(ok && t.cert_cached == 0, "corrupted cached key: treated as a miss, chain verified again");
+        result(rsa_pub_check(&cache.key, sc.n, sc.n_len, sc.e), "cache rewritten with the correct prepared key");
+        close(fd);
+    }
+
+    /* ---- connection 5: same leaf, different host name (also in the SAN): the fingerprint binds the host -> miss ---- */
     {
         x509_cache before = cache;
         fd = dial(port);
@@ -159,7 +172,7 @@ int main(int argc, char **argv)
         close(fd);
     }
 
-    /* ---- connection 5: cache hit, but the clock says the leaf has expired: rejected before any key is derived ---- */
+    /* ---- connection 6: cache hit, but the clock says the leaf has expired: rejected before any key is derived ---- */
     {
         fd = dial(port);
         ok = tls13_client_start(&t, "a.test.localhost", sc.n, sc.n_len, sc.e, "20991231235959Z", &rng);

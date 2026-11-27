@@ -44,8 +44,11 @@ int x509_valid_at(const x509_cert *c, const char *now);
  * verification (two RSA-2048 operations, 19.5 s on the 68000): exactly this leaf was verified against exactly this
  * root for exactly this host before. The cheap checks stay on every connection - validity period against the clock,
  * host name against the SAN - and so does the CertificateVerify signature, which is what proves the server holds
- * the leaf's private key now. 36 bytes, meant to be stored (ENVARC: on the Amiga) and refreshed on each full verify. */
-typedef struct { uint8_t fp[32]; int valid; } x509_cache;
+ * the leaf's private key now. `key` is the leaf's prepared RSA public key (Montgomery constants, rsa.h); on a hit the
+ * TLS client checks it against the presented leaf with rsa_pub_check instead of recomputing it (1.9 s saved on the
+ * 68000); a mismatch is treated as a cache miss. About 1.1 KiB, meant to be stored (ENVARC: on the Amiga) and
+ * refreshed on each full verification. */
+typedef struct { uint8_t fp[32]; int valid; rsa_pub key; } x509_cache;
 void x509_cache_fingerprint(uint8_t fp[32], const uint8_t *root_n, uint32_t root_n_len, uint32_t root_e,
                             const char *host, const uint8_t *leaf_der, uint32_t leaf_len);
 /* 1 if the cache holds exactly this (root key, host, leaf); constant-time compare */

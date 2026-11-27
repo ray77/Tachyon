@@ -69,11 +69,11 @@ build/tls13_test: tests/tls13_test.c $(CRYPTO_SRC) crypto/ref/tls13.h
 	@mkdir -p build
 	$(HOSTCC) $(HOST_CFLAGS) tests/tls13_test.c $(CRYPTO_SRC) -o $@
 
-# TLS 1.3 client (X25519, AES-128-GCM, RSA-PSS) against a loopback Go server (tools/tls13server), five connections;
+# TLS 1.3 client (X25519, AES-128-GCM, RSA-PSS) against a loopback Go server (tools/tls13server), six connections;
 # the first is recorded to tests/vectors/tls13_session.bin for the Amiga replay (bench/tls13_vector.h)
 tls13-test: build/tls13_test
 	@mkdir -p build
-	go run ./tools/tls13server -listen 127.0.0.1:4436 -cert build/tls13_test_cert.der -n 5 > build/tls13server.log 2>&1 & \
+	go run ./tools/tls13server -listen 127.0.0.1:4436 -cert build/tls13_test_cert.der -n 6 > build/tls13server.log 2>&1 & \
 	for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do grep -q READY build/tls13server.log 2>/dev/null && break; sleep 0.5; done; \
 	./build/tls13_test build/tls13_test_cert.der 4436 tests/vectors/tls13_session.bin; r=$$?; sleep 0.5; cat build/tls13server.log; exit $$r
 

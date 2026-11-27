@@ -292,14 +292,23 @@ static int t13_on_certificate(tls13 *t, const uint8_t *m, uint32_t mlen)
     if (p != end || t->chain_len == 0) return t13_fail(t, T13E_CERT_PARSE);
     if (x509_cache_match(t->cache, t->root_n, t->root_n_len, t->root_e, t->host, t->chain[0].der, t->chain[0].len)) {
         /* this exact leaf was verified against this root for this host before: skip the RSA chain verification,
-         * keep the cheap checks (clock, host name); CertificateVerify below still proves possession of the key */
+         * keep the cheap checks (clock, host name); CertificateVerify below still proves possession of the key.
+         * The stored prepared key is used only if it is the presented leaf's key (one Montgomery product checks
+         * R^2); a corrupted entry falls through to the full verification, which rewrites it. */
         if (!x509_valid_at(&t->chain[0], t->now) || !x509_match_host(&t->chain[0], t->host)) return t13_fail(t, T13E_CERT_CHAIN);
-        t->cert_cached = 1;
-    } else {
-        if (!x509_verify_chain(t->chain, t->chain_len, t->root_n, t->root_n_len, t->root_e, t->host, t->now)) return t13_fail(t, T13E_CERT_CHAIN);
-        if (t->cache) x509_cache_store(t->cache, t->root_n, t->root_n_len, t->root_e, t->host, t->chain[0].der, t->chain[0].len);
+        if (rsa_pub_check(&t->cache->key, t->chain[0].n, t->chain[0].n_len, t->chain[0].e)) {
+            t->server_key = t->cache->key;
+            t->cert_cached = 1;
+        }
     }
-    if (!rsa_pub_set(&t->server_key, t->chain[0].n, t->chain[0].n_len, t->chain[0].e)) return t13_fail(t, T13E_RSA);
+    if (!t->cert_cached) {
+        if (!x509_verify_chain(t->chain, t->chain_len, t->root_n, t->root_n_len, t->root_e, t->host, t->now)) return t13_fail(t, T13E_CERT_CHAIN);
+        if (!rsa_pub_set(&t->server_key, t->chain[0].n, t->chain[0].n_len, t->chain[0].e)) return t13_fail(t, T13E_RSA);
+        if (t->cache) {
+            x509_cache_store(t->cache, t->root_n, t->root_n_len, t->root_e, t->host, t->chain[0].der, t->chain[0].len);
+            t->cache->key = t->server_key;
+        }
+    }
     sha256_update(&t->transcript, m, mlen);
     t->state = TLS13_ST_WAIT_CV;
     return 1;

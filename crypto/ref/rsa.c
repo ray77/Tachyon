@@ -92,6 +92,28 @@ int rsa_pub_set(rsa_pub *k, const uint8_t *n_be, uint32_t len, uint32_t e)
     return 1;
 }
 
+int rsa_pub_check(const rsa_pub *k, const uint8_t *n_be, uint32_t len, uint32_t e)
+{
+    uint16_t one[RSA_MAX_LIMBS], r[RSA_MAX_LIMBS], expect[RSA_MAX_LIMBS];
+    uint32_t inv, n0, diff = 0;
+    int i, limbs;
+    if (len < 128 || len > 2 * RSA_MAX_LIMBS || (len & 1) || !(n_be[len - 1] & 1) || !(n_be[0] & 0x80)) return 0;
+    limbs = (int)(len >> 1);
+    if (k->limbs != limbs || k->e != e) return 0;
+    for (i = 0; i < limbs; i++) diff |= k->n[i] ^ (uint16_t)(((uint16_t)n_be[len - 2 - 2 * i] << 8) | n_be[len - 1 - 2 * i]);
+    if (diff) return 0;
+    n0 = k->n[0]; inv = 1;
+    for (i = 0; i < 5; i++) inv = (inv * (2 - n0 * inv)) & 0xffff;
+    if (k->n0inv != (uint16_t)((0x10000 - inv) & 0xffff)) return 0;
+    /* rr * 1 * R^-1 = R mod n = 2^(16*limbs) - n (top bit of n set) */
+    for (i = 0; i < limbs; i++) { one[i] = 0; expect[i] = 0; }
+    one[0] = 1;
+    bn_sub(expect, expect, k->n, limbs);
+    rsa_mont_mul(k, k->rr, one, r);
+    for (i = 0; i < limbs; i++) diff |= r[i] ^ expect[i];
+    return diff == 0;
+}
+
 static void be_to_limbs(uint16_t *x, const uint8_t *be, int limbs)
 {
     int i;
