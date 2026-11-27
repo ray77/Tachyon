@@ -15,6 +15,7 @@
 #include "pb.h"
 #include "prekeys.h"
 #include "inflate.h"
+#include "nextkeys.h"
 
 /* whatsmeow socket/constants.go */
 static const uint8_t wa_header[4] = { 'W', 'A', 6, 3 };
@@ -237,16 +238,30 @@ static int tls_connect(x509_cert *root, x509_cert *inter, hmac_drbg *rng, tls13_
 static int connection_keys(void)
 {
     uint32_t t0 = ms();
+    if (io->mode == WA_MODE_PAIR) { cp(st_priv, io->creds->id.noise_priv, 32); cp(st_pub, io->creds->id.noise_pub, 32); }
+    else { drbg_generate(&rng, st_priv, 32); x25519_base_comb(st_pub, st_priv); }
+    espre.valid = 0; io->t_es_pre = 0;
+    if (io->nextkeys && io->nextkeys_loaded) {
+        /* the record computed in the previous session's idle time: consume it first (single use), then take the keys */
+        wa_nextkeys *nk = io->nextkeys;
+        io->nextkeys_loaded = 0;
+        if (io->consume_nextkeys) io->consume_nextkeys(io->ctx);
+        cp(kp.priv, nk->tls_priv, 32); cp(kp.pub, nk->tls_pub, 32);
+        cp(eph_priv, nk->eph_priv, 32); cp(eph_pub, nk->eph_pub, 32);
+        if (nk->have_es) { cp(espre.server_static, nk->server_static, 32); cp(espre.dh, nk->es, 32); espre.valid = 1; }
+        wa_nextkeys_wipe(nk);
+        io->t_tls_key = io->t_noise_keys = 0; io->nextkeys_used = 1;
+        wa_fmt(line, sizeof line, "keys: TLS and Noise ephemeral key pairs%s taken from the stored record (computed in the previous session's idle time), %T s",
+               espre.valid ? " and es" : "", ms() - t0); logl(line);
+        return 1;
+    }
     if (!tls13_keypair_generate(&kp, &rng)) return fail("RESULT: keypair failed", 0, 0);
     io->t_tls_key = ms() - t0;
     t0 = ms();
     drbg_generate(&rng, eph_priv, 32);
     x25519_base_comb(eph_pub, eph_priv);
-    if (io->mode == WA_MODE_PAIR) { cp(st_priv, io->creds->id.noise_priv, 32); cp(st_pub, io->creds->id.noise_pub, 32); }
-    else { drbg_generate(&rng, st_priv, 32); x25519_base_comb(st_pub, st_priv); }
     io->t_noise_keys = ms() - t0;
     /* es before the connection: one ladder off the server's clock when the server static is known (noise.h) */
-    espre.valid = 0; io->t_es_pre = 0;
     if (have_cached_static) {
         t0 = ms();
         noise_es_precompute(&espre, eph_priv, cached_static);
@@ -268,6 +283,7 @@ int wa_probe_prepare(wa_probe_io *pio)
     ncache.valid = 0; lcache.valid = 0; io->noise_leaf_cached = 0; io->noise_leaf_valid = 0; io->tls_cert_cached = 0; io->tls_cache_out_len = 0; io->tls_tickets = 0;
     if (io->noise_leaf_cache_in) { cp(lcache.fp, io->noise_leaf_cache_in, 32); lcache.valid = 1; }
     have_cached_static = 0; io->noise_static_valid = 0; io->noise_es_precomputed = 0; espre.valid = 0;
+    io->nextkeys_used = 0; io->nextkeys_ready = 0; io->t_nextkeys = 0;
     if (io->noise_static_in) { cp(cached_static, io->noise_static_in, 32); have_cached_static = 1; }
     if (io->noise_cache_in) { cp(ncache.fp, io->noise_cache_in, 32); ncache.valid = 1; }
     else if (io->mode == WA_MODE_PAIR && io->creds && io->creds_loaded && io->creds->noise_cache_valid) { cp(ncache.fp, io->creds->noise_cache_fp, 32); ncache.valid = 1; logl("noise: certificate cache fingerprint taken from the credentials"); }
@@ -299,8 +315,10 @@ int wa_probe_prepare(wa_probe_io *pio)
         }
     }
     if (!connection_keys()) return 0;
-    wa_fmt(line, sizeof line, "tls: X25519 key pair ready (%T s, before the connection)", io->t_tls_key); logl(line);
-    wa_fmt(line, sizeof line, "noise: static + ephemeral X25519 key pairs ready (%T s, before the connection)", io->t_noise_keys); logl(line);
+    if (!io->nextkeys_used) {
+        wa_fmt(line, sizeof line, "tls: X25519 key pair ready (%T s, before the connection)", io->t_tls_key); logl(line);
+        wa_fmt(line, sizeof line, "noise: static + ephemeral X25519 key pairs ready (%T s, before the connection)", io->t_noise_keys); logl(line);
+    }
     prepared = 1;
     return 1;
 }
@@ -720,7 +738,21 @@ static int post_login(void)
     if (!iq_is_result(r)) return fail("RESULT: logged in, but <active/> was not accepted (see recv: line)", 0, 0);
     io->active_set = 1; io->t_active = ms();
     wa_fmt(line, sizeof line, "login: <active/> accepted %T s after <success>; staying online for %T s", io->t_active - io->t_login_accepted, io->linger_ms); logl(line);
-    /* 4. linger */
+    /* 4. idle time: the key material for the next start (two key pairs, es with the server static just verified),
+          pongs from the heartbeat keep the WebSocket alive meanwhile; the record goes to the caller right away */
+    if (io->precompute_next && io->nextkeys) {
+        static heartbeat hb; uint32_t t0 = ms();
+        heartbeat_init(&hb, &w, io->now_ms, 4000, hb_send, 0);
+        heartbeat_arm(&hb);
+        wa_nextkeys_compute(io->nextkeys, &rng, have_cached_static ? cached_static : 0);
+        heartbeat_disarm(); io->pongs += hb.sent;
+        io->t_nextkeys = ms() - t0; io->nextkeys_ready = 1;
+        wa_fmt(line, sizeof line, "keys: next connection's TLS + Noise ephemeral key pairs%s computed in %T s while online (%u pongs)",
+               have_cached_static ? " and es" : "", io->t_nextkeys, hb.sent); logl(line);
+        if (io->save_nextkeys) io->save_nextkeys(io->ctx);
+        if (hb.error) { logl("login: connection lost during the precomputation"); close_ws(); return 1; }
+    }
+    /* 5. linger */
     t_end = ms() + io->linger_ms; last_ka = ms();
     while (ms() < t_end) {
         const wab_node *n; uint32_t now = ms(), left = t_end - now;

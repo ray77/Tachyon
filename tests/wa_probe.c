@@ -43,10 +43,22 @@
 #include "wa_probe_core.h"
 #include "creds.h"
 #include "prekeys.h"
+#include "nextkeys.h"
 
 static int fd = -1, tunnel, tun_in = -1, tun_out = -1;
 static wa_creds creds; static const char *creds_path;
 static wa_prekeys prekeys; static const char *prekeys_path;
+static wa_nextkeys nextkeys; static const char *nextkeys_path;
+
+/* the stored record is about to be used: delete it first (single use) */
+static void consume_nextkeys(void *ctx) { (void)ctx; if (nextkeys_path) { remove(nextkeys_path); printf("keys: %s consumed (deleted)\n", nextkeys_path); } }
+static void write_nextkeys(void *ctx)
+{
+    static uint8_t rec[WA_NEXTKEYS_SIZE]; uint32_t n; FILE *f; (void)ctx;
+    if (!nextkeys_path || !(n = wa_nextkeys_write(rec, sizeof rec, &nextkeys))) return;
+    f = fopen(nextkeys_path, "wb");
+    if (f) { fwrite(rec, 1, n, f); fclose(f); printf("keys: %s written (%u bytes, key pairs%s for the next start)\n", nextkeys_path, n, nextkeys.have_es ? " + es" : ""); }
+}
 static struct timespec t0;
 static struct addrinfo *ai;
 
@@ -194,6 +206,16 @@ int main(int argc, char **argv)
         prekeys_path = getenv("PREKEYS") && *getenv("PREKEYS") ? getenv("PREKEYS") : "build/tachyon.prekeys";
         io.prekeys = &prekeys; io.prekeys_loaded = 0; io.save_prekeys = write_prekeys;
         io.prekeys_wanted = getenv("PREKEY_COUNT") ? (uint32_t)atoi(getenv("PREKEY_COUNT")) : 10;
+        /* key material for the next start: NEXTKEYS file (default build/tachyon.next), consumed before use, rewritten while online */
+        nextkeys_path = getenv("NEXTKEYS") && *getenv("NEXTKEYS") ? getenv("NEXTKEYS") : "build/tachyon.next";
+        io.nextkeys = &nextkeys; io.nextkeys_loaded = 0; io.precompute_next = 1; io.consume_nextkeys = consume_nextkeys; io.save_nextkeys = write_nextkeys;
+        {   static uint8_t nrec[WA_NEXTKEYS_SIZE + 1]; FILE *nf = fopen(nextkeys_path, "rb");
+            if (nf) {
+                size_t n = fread(nrec, 1, sizeof nrec, nf); fclose(nf);
+                if (wa_nextkeys_read(&nextkeys, nrec, (uint32_t)n)) { io.nextkeys_loaded = 1; char l[200]; snprintf(l, sizeof l, "keys: %s loaded (key pairs%s for this connection)", nextkeys_path, nextkeys.have_es ? " + es" : ""); log_line(0, l); }
+                else { char l[200]; snprintf(l, sizeof l, "keys: %s is not a valid record (%zu bytes), ignored and deleted", nextkeys_path, n); log_line(0, l); remove(nextkeys_path); }
+            }
+        }
         io.linger_ms = getenv("LINGER") ? (uint32_t)(atof(getenv("LINGER")) * 1000) : 15000;
         {   static uint8_t prec[WA_PREKEYS_MAX_SIZE + 1]; FILE *pf = fopen(prekeys_path, "rb");
             if (pf) {

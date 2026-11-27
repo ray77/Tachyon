@@ -28,5 +28,6 @@
 #include "../../proto/creds.c"
 #include "../../proto/prekeys.c"
 #include "../../proto/inflate.c"
+#include "../../proto/nextkeys.c"
 #include "../../ui/qr.c"
 #include "../../ui/screen.c"

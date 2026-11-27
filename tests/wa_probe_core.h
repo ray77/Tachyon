@@ -23,7 +23,7 @@
 #include "tls13.h"
 #include "qr.h"
 
-struct wa_creds; struct wa_prekeys;
+struct wa_creds; struct wa_prekeys; struct wa_nextkeys;
 
 /* io->mode */
 #define WA_MODE_PROBE 0     /* the connection probe: handshake, first frame decrypted, close (unchanged behaviour) */
@@ -77,6 +77,16 @@ typedef struct wa_probe_io {
     void (*save_prekeys)(void *ctx);                     /* optional: the batch changed (generated / uploaded) */
     uint32_t linger_ms;             /* how long to stay online after <active/> (0 = close right away) */
 
+    /* key material for the next connection (proto/nextkeys.h): a stored record is consumed at the start - the
+       caller's consume_nextkeys deletes it BEFORE the keys are used, single use - and after <active/>, while online,
+       the record for the next start is computed (3 comb multiplications + the es ladder, ~15 s on the 68000, off the
+       server's clock) and handed back through save_nextkeys */
+    struct wa_nextkeys *nextkeys;   /* in/out, or 0 = off */
+    int nextkeys_loaded;            /* 1 = *nextkeys holds a stored record for this connection */
+    int precompute_next;            /* 1 = compute the next record after <active/> */
+    void (*consume_nextkeys)(void *ctx);                 /* the stored record is about to be used: delete the file */
+    void (*save_nextkeys)(void *ctx);                    /* *nextkeys holds the record for the next start: persist it */
+
     /* pairing results, milliseconds since wa_probe_run started unless noted (0 = not reached) */
     int paired_now;             /* pairing completed in this run (pair-device-sign sent) */
     int logged_in;              /* <success> received on the login connection */
@@ -97,6 +107,8 @@ typedef struct wa_probe_io {
     uint8_t noise_static_out[32]; int noise_static_valid;   /* the server static after a verified handshake (store it with the fingerprints) */
     int noise_es_precomputed;           /* 1 = the login/probe connection used the es computed before the connection */
     uint32_t t_es_pre;                  /* duration of that precomputation (0 = none) */
+    int nextkeys_used;                  /* 1 = this run's first connection took its key pairs (and es) from the stored record */
+    int nextkeys_ready; uint32_t t_nextkeys;   /* the record for the next start was computed (in t_nextkeys ms) */
     uint8_t tls_cache_out[X509_CACHE_FILE_MAX]; uint32_t tls_cache_out_len; int tls_cert_cached;   /* TLS cache after the run */
     uint32_t tls_tickets;               /* NewSessionTicket messages the server sent (PSK resumption not implemented) */
     char result[200];           /* "RESULT: ..." */

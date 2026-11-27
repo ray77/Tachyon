@@ -32,6 +32,7 @@
 #include "../tests/wa_probe_core.h"
 #include "../proto/creds.h"
 #include "../proto/prekeys.h"
+#include "../proto/nextkeys.h"
 #include "../ui/screen.h"
 
 struct ExecBase *SysBase;
@@ -113,7 +114,17 @@ static int clock_string(char *s)
 }
 
 /* ---- pairing: credentials file and the QR screen ------------------------------------------------- */
-static wa_creds creds; static int pair_mode; static wa_prekeys prekeys;
+static wa_creds creds; static int pair_mode; static wa_prekeys prekeys; static wa_nextkeys nextkeys;
+
+static void consume_nextkeys(void *ctx) { (void)ctx; DeleteFile((STRPTR)"SYS:tachyon.next"); log_line(0, "keys: SYS:tachyon.next consumed (deleted)"); }
+static void write_nextkeys(void *ctx)
+{
+    static uint8_t rec[WA_NEXTKEYS_SIZE]; uint32_t n; BPTR f; (void)ctx;
+    if (!(n = wa_nextkeys_write(rec, sizeof rec, &nextkeys))) return;
+    f = Open((STRPTR)"SYS:tachyon.next", MODE_NEWFILE);
+    if (f) { Write(f, rec, n); Close(f); log_line(0, nextkeys.have_es ? "keys: SYS:tachyon.next written (key pairs + es for the next start)" : "keys: SYS:tachyon.next written (key pairs for the next start)"); }
+    else log_line(0, "keys: cannot write SYS:tachyon.next");
+}
 
 static void write_prekeys(void *ctx)
 {
@@ -251,6 +262,12 @@ int main(void)
         /* one-time prekeys: a batch of 10 (33 s before the connection), uploaded after <success> when the server runs low */
         {   static uint8_t prec[WA_PREKEYS_MAX_SIZE + 1];
             io.prekeys = &prekeys; io.prekeys_loaded = 0; io.prekeys_wanted = 10; io.save_prekeys = write_prekeys; io.linger_ms = 10000;
+            /* key material for the next start (SYS:tachyon.next): consumed before use, recomputed while online */
+            io.nextkeys = &nextkeys; io.nextkeys_loaded = 0; io.precompute_next = 1; io.consume_nextkeys = consume_nextkeys; io.save_nextkeys = write_nextkeys;
+            {   static uint8_t nrec[WA_NEXTKEYS_SIZE + 1]; LONG nn = read_file("SYS:tachyon.next", nrec, sizeof nrec);
+                if (nn > 0 && wa_nextkeys_read(&nextkeys, nrec, (uint32_t)nn)) { io.nextkeys_loaded = 1; log_line(0, nextkeys.have_es ? "keys: SYS:tachyon.next loaded (key pairs + es for this connection)" : "keys: SYS:tachyon.next loaded (key pairs for this connection)"); }
+                else if (nn > 0) { log_line(0, "keys: SYS:tachyon.next is not a valid record, ignored and deleted"); DeleteFile((STRPTR)"SYS:tachyon.next"); }
+            }
             n = read_file("SYS:tachyon.prekeys", prec, sizeof prec);
             if (n > 0) {
                 if (!wa_prekeys_read(&prekeys, prec, (uint32_t)n)) { out("RESULT: SYS:tachyon.prekeys is not a valid record - refusing to continue (delete it for a new batch)\n"); finish(); return 10; }

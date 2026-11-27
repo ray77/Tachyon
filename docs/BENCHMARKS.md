@@ -473,3 +473,21 @@ Von 76,0 s auf 52,0 s: −10,4 s TLS-Cache (eine RSA-2048-Prüfung + Schlüsselv
 ### Einordnung
 
 Tagesbilanz der Login-Verbindung des A500: **76,0 s → 43,1 s** (−10,4 s TLS-Zertifikatscache, −10,9 s Noise-Blatt-Cache, −1,6 s schnellere Leiter, −8,8 s `es` vorab). Online stehen noch drei Leitern (TLS, `ee`, `se`; 23 s), beide mit frischem Server-Ephemeral und darum nicht vorab rechenbar, RSA-PSS CertificateVerify ≈ 5 s, HKDF und AES-GCM-Schlüsselaufbauten ≈ 5 s, Entschlüsseln/Parsen und Netz. Der Server schickt keine Tickets (keine TLS-Resumption), die Leiter liegt 3 % über der Untergrenze: ohne Protokollwechsel (Noise IK spart keinen DH) bleibt die Login-Verbindung bei etwa 40–43 s. Was den Start bis zum Login noch verkürzt, läuft außerhalb der Server-Uhr: Schlüsselpaare und `es` im Leerlauf des Clients, nicht erst beim Start. Live-Verbindungen für diesen Schritt: 2.
+
+## 2026-11-27 – Schritt 23: Schlüsselpaare und `es` im Leerlauf, Start ohne Vorrechnen
+
+`proto/nextkeys.c` (PROTOCOL.md Abschnitt 6): nach `<active/>` rechnet der Client, solange er online ist, TLS-Schlüsselpaar, Noise-Ephemeral und `es` für den nächsten Start und speichert sie (226 Byte); der nächste Start verbraucht den Datensatz vor dem ersten Byte auf der Leitung. Zwei Logins mit Gerät :9 (`make run-pair FAST=2048`, FS-UAE, 2 MiB Fast), Lauf C schreibt, Lauf D verbraucht.
+
+| Phase | Schritt 22 (Lauf B) | Lauf C (19:50, schreibt) | **Lauf D (19:57, verbraucht)** |
+|---|---:|---:|---:|
+| Schlüssel vor dem Connect | 14,6 s (6,6 + `es` 8,0) | 14,6 s | **0,06 s** (aus dem Datensatz) |
+| Programmstart → TCP-Connect | 17,5 s | 17,6 s | **4,2 s** |
+| TLS 1.3 (Cache HIT) | 20,3 s | 20,3 s | 20,4 s |
+| Noise ServerHello → ClientFinish | 19,7 s | 19,7 s | 19,7 s |
+| Login-Verbindung bis `<success>` | 43,1 s | 43,3 s | 43,2 s |
+| **Programmstart → `<success>`** | **61 s** | **61 s** | **47,4 s** |
+| nächste Schlüssel, online gerechnet | – | 15,9 s (3 Pongs) | 18,0 s (4 Pongs) |
+
+### Einordnung
+
+Der Startweg des A500 bis zum Login: mittags 122 s (Prekeys 33 s + Schlüssel 7 s + Verbindung 76 s), jetzt **47 s**, davon 43 s die Verbindung selbst. Vor dem Connect rechnet der 68000 nichts mehr; alles Vorab-Rechenbare läuft in der vorigen Sitzung, während der Server ohnehin Ereignisse schickt (Herzschlag hält den WebSocket). Die 43 s der Verbindung bestehen aus drei Leitern mit frischem Server-Ephemeral (23 s), RSA-PSS CertificateVerify (≈ 5 s), HKDF/AES-GCM (≈ 5 s), Netz und Parsen; ohne Protokollwechsel bleibt das so. Die Prekey-Erzeugung (3,3 s je Schlüssel) gehört in dieselbe Leerlaufphase, sobald der Client länger online bleibt. Live-Verbindungen für diesen Schritt: 2.

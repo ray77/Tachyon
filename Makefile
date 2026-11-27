@@ -104,10 +104,10 @@ FAST ?= 1024   # Fast RAM of the emulated machine in KiB for run-probe (2048 = t
 WAIP ?= $(shell dig +short web.whatsapp.com | grep -E '^[0-9.]+$$' | head -1)
 PROBE_CORE := tests/wa_probe_core.c tests/wa_probe_core.h tests/certs/wa_rsa_chain.h tests/vectors/wa_client_payload.h
 # pairing (docs/PROTOCOL.md 11): the protocol modules and the QR encoder are part of the probe since the pair mode
-PROBE_PROTO := proto/wabinary.c proto/identity.c proto/clientpayload.c proto/pairing.c proto/creds.c proto/prekeys.c proto/inflate.c ui/qr.c
+PROBE_PROTO := proto/wabinary.c proto/identity.c proto/clientpayload.c proto/pairing.c proto/creds.c proto/prekeys.c proto/inflate.c proto/nextkeys.c ui/qr.c
 PROBE_INC := -Itests -Iproto -Iui
 # every header the probe builds include: a changed constant (WA_PLATFORM_TYPE, 2026-11-27) must rebuild the A500 binary
-PROBE_HDR := tests/wa_probe_core.h proto/wabinary.h proto/identity.h proto/clientpayload.h proto/pairing.h proto/creds.h proto/prekeys.h proto/inflate.h proto/pb.h ui/qr.h
+PROBE_HDR := tests/wa_probe_core.h proto/wabinary.h proto/identity.h proto/clientpayload.h proto/pairing.h proto/creds.h proto/prekeys.h proto/inflate.h proto/nextkeys.h proto/pb.h ui/qr.h
 build/wa_probe: tests/wa_probe.c $(PROBE_CORE) $(PROBE_PROTO) $(PROBE_HDR) $(CRYPTO_SRC) crypto/ref/heartbeat.h crypto/ref/tls13.h
 	@mkdir -p build
 	$(HOSTCC) $(HOST_CFLAGS) $(PROBE_INC) tests/wa_probe.c tests/wa_probe_core.c $(PROBE_PROTO) $(CRYPTO_SRC) -o $@
@@ -210,6 +210,13 @@ build/inflate_test: tests/inflate_test.c proto/inflate.c proto/inflate.h
 inflate-test: build/inflate_test
 	./build/inflate_test tests/vectors/inflate.txt
 
+.PHONY: nextkeys-test
+build/nextkeys_test: tests/nextkeys_test.c proto/nextkeys.c proto/nextkeys.h $(CRYPTO_SRC)
+	@mkdir -p build
+	$(HOSTCC) $(HOST_CFLAGS) -fsanitize=address,undefined -Iproto tests/nextkeys_test.c proto/nextkeys.c $(CRYPTO_SRC) -o $@
+nextkeys-test: build/nextkeys_test
+	./build/nextkeys_test
+
 .PHONY: pairing-test pair-success-vector
 pair-success-vector:
 	go run ./tools/pairvectors -mode pairsuccess > tests/vectors/pair_success_iq.bin
@@ -230,6 +237,7 @@ host-test: build/x25519_test build/ed25519_test build/sha256_test build/aes_test
 	./build/blitaes_test
 	./build/blitgcm_test
 	$(MAKE) inflate-test
+	$(MAKE) nextkeys-test
 	$(MAKE) clientpayload-test
 	$(MAKE) pairing-test
 	$(MAKE) pair-sim
