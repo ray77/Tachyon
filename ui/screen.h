@@ -13,7 +13,11 @@
 #define TACHYON_SCREEN_H
 
 #include <exec/types.h>
-#include "amiga13.h"
+#ifndef TACHYON_HOST
+#include "amiga13.h"          /* the host build (ui/screen_host.c, -DTACHYON_HOST) has no Amiga structures */
+#else
+struct Screen; struct Window; struct RastPort;
+#endif
 
 #define SCR_W     640
 #define SCR_H     256
@@ -87,6 +91,23 @@ LONG scr_wait_key(ULONG timeout_ticks);
  * RawKeyConvert with the system keymap, 'T' the built-in US table (console.device unavailable), 0 none */
 int  scr_last_key_source(void);
 LONG scr_translate_raw(UWORD code, UWORD qualifier);   /* same translation for a raw code (self-test, replay) */
+
+/* ScrollRaster through the layer: the rows y..y+h-1 of x..x+w-1 move up by dy pixels, the vacated rows get bg.
+ * x and w should be multiples of 16 (word-aligned blit). */
+void scr_scroll_up(int x, int y, int w, int h, int dy, int bg);
+/* The screen's bitplanes for a renderer that writes cells directly (ui/ftext.c, see there why that is safe here):
+ * fills planes[0..depth-1] (max entries) and the bytes per row, returns the depth, 0 without a screen. */
+int  scr_planes(UBYTE **planes, int max, UWORD *bytes_per_row);
+void scr_wait_blit(void);                              /* WaitBlit: before CPU writes into planes a blit may still touch */
+/* The IDCMP qualifier of the last key scr_wait_key returned (IEQUALIFIER_* bits: 0x0003 shift, 0x0008 ctrl,
+ * 0x0030 alt, 0x00C0 Amiga keys), so Shift+cursor and Amiga+letter can be told apart from the plain key. */
+UWORD scr_last_qualifier(void);
+#define SCR_QUAL_SHIFT 0x0003
+#define SCR_QUAL_CTRL  0x0008
+#define SCR_QUAL_ALT   0x0030
+#define SCR_QUAL_AMIGA 0x00C0
+/* The glyphs of the screen's Topaz 8 (TextFont fields) for ui/font8.c: 1 and the fields, 0 without a font. */
+int  scr_font_glyphs(UBYTE *lo, UBYTE *hi, const UBYTE **chardata, UWORD *modulo, const ULONG **charloc);
 
 struct Screen   *scr_screen(void);
 struct Window   *scr_window(void);

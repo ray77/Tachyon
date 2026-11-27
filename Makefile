@@ -25,7 +25,7 @@ BENCH_SRC  := bench/x25519_bench.c
 UNITY_SRC  := bench/amiga/unity.c
 AMIGA_ASM  := build/amiga/x25519bench.s
 
-.PHONY: all host-test amiga run vamos vectors clean tls-test tls13-test ws-test heartbeat-test wa-probe wa-pair wa-probe-tunnel wa-capture run-pair run-chat wabinary-test wabinary-vectors run-blitaes run-blitgcm amiga-probe run-probe vamos-probe utility13 utility13-test sana2-probe run-sana2 sanafix amiga-screen run-screen
+.PHONY: all host-test amiga run vamos vectors clean tls-test tls13-test ws-test heartbeat-test wa-probe wa-pair wa-probe-tunnel wa-capture run-pair run-chat wabinary-test wabinary-vectors run-blitaes run-blitgcm amiga-probe run-probe vamos-probe utility13 utility13-test sana2-probe run-sana2 sanafix amiga-screen run-screen amiga-gui run-gui gui-test gui-png
 
 all: host-test amiga
 
@@ -257,6 +257,7 @@ host-test: build/x25519_test build/ed25519_test build/sha256_test build/aes_test
 	$(MAKE) pairing-test
 	$(MAKE) signal-test
 	$(MAKE) pair-sim
+	$(MAKE) gui-test
 	$(MAKE) tls13-test
 
 vectors:
@@ -295,6 +296,27 @@ build/qr_test: tests/qr_test.c ui/qr.c ui/qr.h
 .PHONY: qr-test
 qr-test: build/qr_test build/qr-venv/.ok
 	./build/qr_test $(QR_PY) build/qr
+
+# client GUI (ui/gui.c, docs/UI.md "Client-Oberfläche") on the host screen (ui/screen_host.c): scripted session with
+# renderings build/gui-*.ppm; the Topaz 8 glyphs come from the Kickstart ROM (TOPAZ_ROM, placeholder font without one)
+GUI_SRC := ui/gui.c ui/font8.c ui/ftext.c ui/screen_host.c
+GUI_HDR := ui/gui.h ui/font8.h ui/ftext.h ui/screen.h ui/screen_host.h ui/host/exec/types.h
+GUI_HOST_CFLAGS := $(HOST_CFLAGS) -DTACHYON_HOST -Iui -Iui/host -Ibuild
+build/topaz8_font.h: tools/topaz_from_rom.py
+	@mkdir -p build
+	python3 $< > $@
+
+build/gui_test: tests/gui_test.c $(GUI_SRC) $(GUI_HDR) build/topaz8_font.h
+	@mkdir -p build
+	$(HOSTCC) $(GUI_HOST_CFLAGS) $(SANITIZE) tests/gui_test.c $(GUI_SRC) -o $@
+
+.PHONY: gui-test gui-png
+gui-test: build/gui_test
+	./build/gui_test build
+
+# the renderings as PNG (rows doubled: the PAL hires aspect), build/gui-*.png
+gui-png: gui-test
+	for f in build/gui-*.ppm; do python3 tools/ppm2png.py $$f $${f%.ppm}.png; done
 
 # ---- amiga -----------------------------------------------------------------
 $(AMIGA_ASM): $(UNITY_SRC) $(CRYPTO_SRC) $(BENCH_SRC) crypto/ref/x25519.h crypto/ref/ed25519.h crypto/ref/tls13.h bench/xeddsa_vector.h bench/tls_vector.h bench/tls13_vector.h bench/signal_vector.h proto/signal.c proto/signal.h proto/prekeys.c
@@ -449,6 +471,21 @@ amiga-screen: build/amiga/screen_demo
 
 run-screen: build/amiga/screen_demo
 	tools/run-fsuae.sh $< 60
+
+# client GUI demo (ui/gui.c, docs/UI.md "Client-Oberfläche"): scripted conversation, timings of paint/scroll/key echo,
+# then 60 s interactive with a fake incoming message every 7 s; SYS:result.txt holds the numbers
+build/amiga/gui_demo.s: bench/amiga/gui_demo_unity.c bench/amiga/gui_demo.c ui/screen.c ui/screen.h ui/amiga13.h ui/gui.c ui/gui.h ui/font8.c ui/font8.h ui/ftext.c ui/ftext.h
+	@mkdir -p build/amiga
+	$(VC) $(VCFLAGS) bench/amiga/gui_demo_unity.c -o=$@
+
+build/amiga/gui_demo: bench/amiga/startup_gui.s build/amiga/gui_demo.s
+	$(VASM) $(VASMFLAGS) -o $@ $<
+
+.PHONY: amiga-gui run-gui
+amiga-gui: build/amiga/gui_demo
+
+run-gui: build/amiga/gui_demo
+	tools/run-fsuae.sh $< 150
 
 clean:
 	rm -rf build

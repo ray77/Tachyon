@@ -29,6 +29,7 @@ static struct MsgPort   scr_conport;      /* reply port for the console.device o
 static struct IOStdReq  scr_conreq;
 static void            *scr_console;      /* console.device base (io_Device), 0 when unavailable */
 static int              scr_key_source;
+static UWORD            scr_qual;         /* qualifier of the last key returned (scr_last_qualifier) */
 
 static struct TextAttr scr_topaz8 = { (STRPTR)"topaz.font", 8, FS_NORMAL, FPF_ROMFONT };
 
@@ -138,6 +139,29 @@ int scr_font_height(void) { return scr_rp ? scr_rp->TxHeight : 8; }
 int scr_font_width(void)  { return scr_rp ? scr_rp->TxWidth : 8; }
 int scr_console_ok(void)  { return scr_console != 0; }
 int scr_last_key_source(void) { return scr_key_source; }
+UWORD scr_last_qualifier(void) { return scr_qual; }
+
+int scr_planes(UBYTE **planes, int max, UWORD *bytes_per_row)
+{
+    int p, depth;
+    if (!scr_scr) return 0;
+    depth = scr_scr->BitMap.Depth;
+    if (depth > max) depth = max;
+    for (p = 0; p < depth; p++) planes[p] = scr_scr->BitMap.Planes[p];
+    *bytes_per_row = scr_scr->BitMap.BytesPerRow;
+    return depth;
+}
+
+void scr_wait_blit(void) { if (scr_gfx) __gfx_WaitBlit(Gfx); }
+
+int scr_font_glyphs(UBYTE *lo, UBYTE *hi, const UBYTE **chardata, UWORD *modulo, const ULONG **charloc)
+{
+    struct TextFont *f = scr_font ? scr_font : (scr_rp ? scr_rp->Font : 0);
+    if (!f || f->tf_YSize != 8 || !f->tf_CharData || !f->tf_CharLoc) return 0;
+    *lo = f->tf_LoChar; *hi = f->tf_HiChar; *chardata = (const UBYTE *)f->tf_CharData;
+    *modulo = f->tf_Modulo; *charloc = (const ULONG *)f->tf_CharLoc;
+    return 1;
+}
 
 /* ---- drawing ---------------------------------------------------------------------------------------- */
 
@@ -160,6 +184,20 @@ void scr_fill(int x, int y, int w, int h, int pen)
 }
 
 void scr_hline(int x, int y, int w, int pen) { scr_fill(x, y, w, 1, pen); }
+
+void scr_scroll_up(int x, int y, int w, int h, int dy, int bg)
+{
+    int x1 = x + w - 1, y1 = y + h - 1;
+    if (!scr_rp || w <= 0 || h <= 0 || dy <= 0) return;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x1 >= SCR_W) x1 = SCR_W - 1;
+    if (y1 >= SCR_H) y1 = SCR_H - 1;
+    if (x > x1 || y > y1) return;
+    if (dy > y1 - y + 1) dy = y1 - y + 1;
+    __gfx_SetBPen(Gfx, scr_rp, (ULONG)bg);             /* ScrollRaster fills the vacated rows with the BgPen */
+    __gfx_ScrollRaster(Gfx, scr_rp, 0, dy, x, y, x1, y1);
+}
 void scr_vline(int x, int y, int h, int pen) { scr_fill(x, y, 1, h, pen); }
 
 static int scr_text_mode(int x, int y, int pen, int bg, int mode, const char *s)
@@ -406,7 +444,7 @@ LONG scr_wait_key(ULONG timeout_ticks)
             ReplyMsg((struct Message *)msg);
             if (cls == IDCMP_VANILLAKEY) { scr_key_source = 'V'; key = code; }
             else if (cls == IDCMP_RAWKEY) key = scr_translate_event(code, qual, dead);
-            if (key != SCR_KEY_TIMEOUT) return key;
+            if (key != SCR_KEY_TIMEOUT) { scr_qual = qual; return key; }
         }
         if (timeout_ticks == SCR_FOREVER) { Wait(sig); continue; }
         if (waited >= timeout_ticks) return SCR_KEY_TIMEOUT;

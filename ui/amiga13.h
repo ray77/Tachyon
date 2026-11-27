@@ -148,6 +148,9 @@ LONG  __gfx_SetFont(__reg("a6") void *, __reg("a1") struct RastPort *rp, __reg("
 struct TextFont *__gfx_OpenFont(__reg("a6") void *, __reg("a0") struct TextAttr *ta) = "\tjsr\t-72(a6)";
 VOID  __gfx_CloseFont(__reg("a6") void *, __reg("a1") struct TextFont *font) = "\tjsr\t-78(a6)";
 VOID  __gfx_LoadRGB4(__reg("a6") void *, __reg("a0") struct ViewPort *vp, __reg("a1") const UWORD *colors, __reg("d0") LONG count) = "\tjsr\t-192(a6)";
+VOID  __gfx_WaitBlit(__reg("a6") void *) = "\tjsr\t-228(a6)";
+VOID  __gfx_ScrollRaster(__reg("a6") void *, __reg("a1") struct RastPort *rp, __reg("d0") LONG dx, __reg("d1") LONG dy,
+                         __reg("d2") LONG xMin, __reg("d3") LONG yMin, __reg("d4") LONG xMax, __reg("d5") LONG yMax) = "\tjsr\t-396(a6)";
 VOID  __gfx_SetRast(__reg("a6") void *, __reg("a1") struct RastPort *rp, __reg("d0") ULONG pen) = "\tjsr\t-234(a6)";
 VOID  __gfx_Move(__reg("a6") void *, __reg("a1") struct RastPort *rp, __reg("d0") LONG x, __reg("d1") LONG y) = "\tjsr\t-240(a6)";
 VOID  __gfx_Draw(__reg("a6") void *, __reg("a1") struct RastPort *rp, __reg("d0") LONG x, __reg("d1") LONG y) = "\tjsr\t-246(a6)";
