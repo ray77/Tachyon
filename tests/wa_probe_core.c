@@ -301,17 +301,9 @@ int wa_probe_prepare(wa_probe_io *pio)
                    io->creds->paired ? "paired: login" : "not paired yet: QR pairing"); logl(line);
         }
         if (io->prekeys) {
-            uint32_t pending, made;
+            /* the batch is generated in idle time after a login (post_login), never before the connection */
             if (!io->prekeys_loaded) { wa_prekeys_init(io->prekeys); io->prekeys_loaded = 1; }
-            pending = wa_prekeys_pending(io->prekeys);
-            if (pending < io->prekeys_wanted) {
-                t0 = ms();
-                made = wa_prekeys_generate(io->prekeys, io->prekeys_wanted - pending, &rng);
-                io->d_prekeys = ms() - t0;
-                wa_fmt(line, sizeof line, "prekeys: %u new one-time prekeys (X25519, ids up to %u) in %T s, before the connection; %u pending upload",
-                       made, io->prekeys->next_id - 1, io->d_prekeys, wa_prekeys_pending(io->prekeys)); logl(line);
-                if (made && io->save_prekeys) io->save_prekeys(io->ctx);
-            } else { wa_fmt(line, sizeof line, "prekeys: %u one-time prekeys pending upload (stored batch)", pending); logl(line); }
+            wa_fmt(line, sizeof line, "prekeys: %u one-time prekeys pending upload (stored batch of %u)", wa_prekeys_pending(io->prekeys), io->prekeys->n); logl(line);
         }
     }
     if (!connection_keys()) return 0;
@@ -709,6 +701,21 @@ static int iq_is_result(const wab_node *r) { const wab_value *ty = r ? wab_get_a
 
 /* after <success>: whatsmeow handleConnectSuccess - prekey count, upload when the server runs low, <active/>, then
  * linger_ms online (receipts and notifications acknowledged, keepalive every 25 s), then close. 1 = done. */
+/* one-time prekeys while online: 3.3 s per key on the 68000, the heartbeat keeps the WebSocket alive meanwhile */
+static uint32_t make_prekeys(uint32_t count, const char *when)
+{
+    static heartbeat hb; uint32_t t0 = ms(), made;
+    heartbeat_init(&hb, &w, io->now_ms, 4000, hb_send, 0);
+    heartbeat_arm(&hb);
+    made = wa_prekeys_generate(io->prekeys, count, &rng);
+    heartbeat_disarm(); io->pongs += hb.sent;
+    io->d_prekeys += ms() - t0;
+    wa_fmt(line, sizeof line, "prekeys: %u new one-time prekeys (X25519, ids up to %u) in %T s %s (%u pongs); %u pending upload, %u in the record",
+           made, io->prekeys->next_id - 1, ms() - t0, when, hb.sent, wa_prekeys_pending(io->prekeys), io->prekeys->n); logl(line);
+    if (made && io->save_prekeys) io->save_prekeys(io->ctx);
+    return hb.error ? 0 : 1;
+}
+
 static int post_login(void)
 {
     char id[32]; const wab_node *r; uint32_t t_end, last_ka; int gone;
@@ -719,7 +726,10 @@ static int post_login(void)
     if (!r) return fail("RESULT: logged in, but no answer to the prekey count query", 0, 0);
     { const wab_node *c = wab_get_child(r, "count"); io->have_server_prekeys = c != 0; io->server_prekeys = c ? dec_value(wab_get_attr(c, "value")) : 0; }
     wa_fmt(line, sizeof line, "login: the server holds %u one-time prekeys of ours (whatsmeow uploads below %u)", io->server_prekeys, (uint32_t)WA_PREKEYS_MIN_SERVER); logl(line);
-    /* 2. upload the pending batch when the server runs low */
+    /* 2. upload the pending batch when the server runs low (generating one first if nothing is pending) */
+    if (io->prekeys && io->have_server_prekeys && io->server_prekeys < WA_PREKEYS_MIN_SERVER && !wa_prekeys_pending(io->prekeys)) {
+        if (!make_prekeys(io->prekeys_wanted, "online, the server ran out")) return fail("RESULT: logged in, connection lost while generating prekeys", 0, 0);
+    }
     if (io->prekeys && io->have_server_prekeys && io->server_prekeys < WA_PREKEYS_MIN_SERVER && wa_prekeys_pending(io->prekeys)) {
         static wa_prekey_upload up; uint32_t n; const wab_node *iq;
         next_iq_id(id, sizeof id);
@@ -751,6 +761,9 @@ static int post_login(void)
                have_cached_static ? " and es" : "", io->t_nextkeys, hb.sent); logl(line);
         if (io->save_nextkeys) io->save_nextkeys(io->ctx);
         if (hb.error) { logl("login: connection lost during the precomputation"); close_ws(); return 1; }
+    }
+    if (io->prekeys && wa_prekeys_pending(io->prekeys) < io->prekeys_wanted && io->prekeys->n < WA_PREKEYS_MAX) {
+        if (!make_prekeys(io->prekeys_wanted - wa_prekeys_pending(io->prekeys), "while online, for the next upload")) { close_ws(); return 1; }
     }
     /* 5. linger */
     t_end = ms() + io->linger_ms; last_ka = ms();
@@ -1011,6 +1024,7 @@ int wa_probe_sim_login(wa_probe_io *pio, const uint8_t *first_frame, uint32_t le
     static uint8_t plain[WA_PROBE_MSG_MAX];
     int r;
     sim_open(pio);
+    if (!rng.instantiated) drbg_instantiate(&rng, io->seed, io->seed_len);
     cp(plain, first_frame, len);
     r = expect_success(plain, len);
     if (r) r = post_login(); else close_ws();

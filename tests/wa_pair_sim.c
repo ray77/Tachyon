@@ -286,17 +286,21 @@ int main(int argc, char **argv)
         printf("%s\n", io.result);
         CHECK(r == 1 && io.logged_in);
         CHECK(counts == 1 && uploads == 1 && actives == 1 && upload_keys == 3 && bad_upload == 0);
-        CHECK(io.server_prekeys == 0 && io.prekeys_uploaded == 3 && io.active_set && prekeys_saved == 1 && wa_prekeys_pending(&prekeys) == 0);
+        CHECK(io.server_prekeys == 0 && io.prekeys_uploaded == 3 && io.active_set);
+        /* after the upload the idle phase regenerates the batch: 3 pending again, record saved twice (upload, refill) */
+        CHECK(prekeys_saved == 2 && wa_prekeys_pending(&prekeys) == 3 && prekeys.n == 6 && io.nextkeys_ready == 0);
         CHECK(stanza_acks == 2 && io.acks_sent == 2 && io.frames_after_login == 5);   /* 3 results + notification + receipt */
         CHECK(strcmp(ack_class[0], "notification") == 0 && strcmp(ack_id[0], "1234567890") == 0 && strcmp(ack_to[0], "@s.whatsapp.net") == 0);
         CHECK(strcmp(ack_class[1], "receipt") == 0 && strcmp(ack_id[1], "ABCDEF1234") == 0 && strcmp(ack_to[1], "4917612345678@s.whatsapp.net") == 0);
         CHECK(closes == 1);
-        /* a second login: the server now has 3 prekeys, nothing pending -> no upload */
+        /* a second login: the server holds 3 (< 5) and nothing is pending -> a batch is generated online, then uploaded,
+         * and the idle phase refills the pending batch */
         reset(&io, &creds); creds.paired = 1; strcpy(creds.jid_user, "4917612345678"); creds.jid_device = 7; counts = 1; /* so the fake answers "3" */
         wab_node_init(&n, "success"); a[0].key = wab_s("t"); a[0].val = wab_text("1764300000"); a[1].key = wab_s("lid"); a[1].val = wab_jid_value("123456789012345", "lid", 7); n.attrs = a; n.n_attrs = 2;
         CHECK(wab_encode_frame(&n, b, sizeof b, &l) == WAB_OK);
         r = wa_probe_sim_login(&io, b, l);
-        CHECK(r == 1 && uploads == 0 && actives == 1 && io.server_prekeys == 3 && io.prekeys_uploaded == 0);
+        CHECK(r == 1 && uploads == 1 && actives == 1 && io.server_prekeys == 3 && io.prekeys_uploaded == 3 && upload_keys == 3);
+        CHECK(wa_prekeys_pending(&prekeys) == 3 && prekeys.n == 6 && prekeys_saved == 3);   /* saved: generated, uploaded, refilled */
         wab_node_init(&n, "failure"); a[0].key = wab_s("reason"); a[0].val = wab_text("401"); n.attrs = a; n.n_attrs = 1;
         CHECK(wab_encode_frame(&n, b, sizeof b, &l) == WAB_OK);
         r = wa_probe_sim_login(&io, b, l);
