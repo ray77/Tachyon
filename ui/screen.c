@@ -141,6 +141,18 @@ int scr_console_ok(void)  { return scr_console != 0; }
 int scr_last_key_source(void) { return scr_key_source; }
 UWORD scr_last_qualifier(void) { return scr_qual; }
 
+void scr_scroll_direct(int x, int y, int w, int h, int dy)
+{
+    struct BitMap *bm;
+    if (!scr_scr || w <= 0 || h <= 0 || dy == 0) return;
+    if (x < 0 || y < 0 || x + w > SCR_W || y + h > SCR_H) return;
+    if (dy >= h || -dy >= h) return;
+    bm = &scr_scr->BitMap;
+    /* BltBitMap handles overlapping source and destination in one BitMap (it picks the blit direction) */
+    if (dy > 0) __gfx_BltBitMap(Gfx, bm, x, y + dy, bm, x, y, w, h - dy, 0xC0, 0xFF, 0);
+    else        __gfx_BltBitMap(Gfx, bm, x, y, bm, x, y - dy, w, h + dy, 0xC0, 0xFF, 0);
+}
+
 int scr_planes(UBYTE **planes, int max, UWORD *bytes_per_row)
 {
     int p, depth;
@@ -188,13 +200,14 @@ void scr_hline(int x, int y, int w, int pen) { scr_fill(x, y, w, 1, pen); }
 void scr_scroll_up(int x, int y, int w, int h, int dy, int bg)
 {
     int x1 = x + w - 1, y1 = y + h - 1;
-    if (!scr_rp || w <= 0 || h <= 0 || dy <= 0) return;
+    if (!scr_rp || w <= 0 || h <= 0 || dy == 0) return;
     if (x < 0) x = 0;
     if (y < 0) y = 0;
     if (x1 >= SCR_W) x1 = SCR_W - 1;
     if (y1 >= SCR_H) y1 = SCR_H - 1;
     if (x > x1 || y > y1) return;
     if (dy > y1 - y + 1) dy = y1 - y + 1;
+    if (dy < -(y1 - y + 1)) dy = -(y1 - y + 1);
     __gfx_SetBPen(Gfx, scr_rp, (ULONG)bg);             /* ScrollRaster fills the vacated rows with the BgPen */
     __gfx_ScrollRaster(Gfx, scr_rp, 0, dy, x, y, x1, y1);
 }

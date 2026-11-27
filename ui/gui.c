@@ -123,6 +123,7 @@ static int    text_mode = GUI_TEXT_FAST, scroll_mode = GUI_SCROLL_BLIT, last_scr
 static int    focus;                /* 0 list, 1 input */
 static int    help_open, help_dirty, esc_armed, insert_mode = 1;
 static int    hdr_dirty, list_dirty_all, conv_dirty, input_dirty, status_dirty;
+static int    conv_full;            /* the conversation needs a full layout (status/day/scroll changed, rows dropped) */
 static int    list_top, conv_scroll;
 static ULONG  rows_drawn, scroll_count;
 
@@ -156,7 +157,15 @@ static UBYTE  cell_ch[COLS], cell_fg[COLS], cell_bg[COLS], cell_st[COLS];
 /* ---- small helpers ----------------------------------------------------------------------------------------- */
 static int slen(const char *s) { int n = 0; while (s[n]) n++; return n; }
 static void bzero_(void *p, ULONG n) { UBYTE *b = (UBYTE *)p; while (n--) *b++ = 0; }
-static void bcopy_(void *d, const void *s, ULONG n) { UBYTE *dd = (UBYTE *)d; const UBYTE *ss = (const UBYTE *)s; while (n--) *dd++ = *ss++; }
+static void bcopy_(void *d, const void *s, ULONG n)
+{
+    UBYTE *dd = (UBYTE *)d; const UBYTE *ss = (const UBYTE *)s;
+    if (n >= 16 && (((ULONG)dd ^ (ULONG)ss) & 3) == 0) {          /* same alignment: longs (the shadow rows, 174 bytes) */
+        while ((ULONG)dd & 3) { *dd++ = *ss++; n--; }
+        while (n >= 4) { *(ULONG *)dd = *(const ULONG *)ss; dd += 4; ss += 4; n -= 4; }
+    }
+    while (n--) *dd++ = *ss++;
+}
 static int streq(const char *a, const char *b) { while (*a && *a == *b) { a++; b++; } return *a == *b; }
 
 static struct gui_msg *slot_at(UWORD i)          /* i-th oldest message */
@@ -241,7 +250,13 @@ int gui_utf8_to_latin1(const UBYTE *s, int len, UBYTE *out, int cap)
     while (i < len) {
         UBYTE c = s[i];
         ULONG cp; int need;
-        if (c < 0x80) { cp = c; need = 0; }
+        if (c < 0x80) {                                  /* ASCII run: the common case, a pointer loop (vbcc keeps indices in memory) */
+            const UBYTE *p = s + i, *e = s + len; UBYTE *o = out + n, *oe = out + cap;
+            while (p < e && o < oe && *p < 0x80) *o++ = *p++;
+            i = (int)(p - s); n = (int)(o - out);
+            if (n >= cap) break;
+            continue;
+        }
         else if ((c & 0xE0) == 0xC0) { cp = c & 0x1F; need = 1; }
         else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; need = 2; }
         else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; need = 3; }
@@ -269,7 +284,44 @@ int gui_latin1_to_utf8(const UBYTE *s, int n, char *out, int cap)
     return o;
 }
 
-/* ---- drawing primitives: a composed cell row ------------------------------------------------------------------- */
+/* ---- drawing primitives: a composed cell row, a shadow of every painted row ---------------------------------- */
+/* Every text row of the screen has a slot in the shadow (what was painted last: char, pens, style). flush_cells
+ * paints only the cells that differ, as runs; a run of background goes to the blitter (RectFill: ~1.7 ms however
+ * wide, the CPU gets a third of the chip bus in 640x256x16 and needs 90 us per cell of fill), text cells go to
+ * the CPU renderer (280 us per cell against Text()'s 400 us + 1.5 ms per call). */
+#define SLOT_HDR    0
+#define SLOT_LIST   1                               /* 14 entries x 2 rows */
+#define SLOT_FOOT   (SLOT_LIST + 2 * LIST_VISIBLE)
+#define SLOT_CONV   (SLOT_FOOT + 1)                 /* 25 rows */
+#define SLOT_INPUT  (SLOT_CONV + CONV_ROWS)         /* 2 rows */
+#define SLOT_STATUS (SLOT_INPUT + 2)
+#define SLOT_HELP   (SLOT_STATUS + 1)               /* 13 rows */
+#define NSLOTS      (SLOT_HELP + 13)
+#define HELP_COLS   55
+#define SHADOW_CELLS (80 + 2 * LIST_VISIBLE * LIST_COLS + LIST_COLS + CONV_ROWS * (CONV_COLS + 1) + 2 * CONV_COLS + 80 + 13 * HELP_COLS)
+static UBYTE  shadow[SHADOW_CELLS * 3];             /* ch, fg<<4|bg, style (0xFF = unknown) */
+static UWORD  slot_off[NSLOTS];
+static int    blit_pending;                         /* a blitter call since the last WaitBlit */
+
+static void shadow_init(void)
+{
+    int i; UWORD o = 0;
+    for (i = 0; i < NSLOTS; i++) {
+        int w;
+        slot_off[i] = o;
+        if (i == SLOT_HDR || i == SLOT_STATUS) w = 80;
+        else if (i < SLOT_FOOT) w = LIST_COLS;
+        else if (i == SLOT_FOOT) w = LIST_COLS;
+        else if (i < SLOT_INPUT) w = CONV_COLS + 1;
+        else if (i < SLOT_STATUS) w = CONV_COLS;
+        else w = HELP_COLS;
+        o = (UWORD)(o + w);
+    }
+    for (i = 0; i < SHADOW_CELLS; i++) shadow[3 * i + 2] = 0xFF;
+}
+static void shadow_invalidate(int slot) { UBYTE *sh = shadow + 3 * slot_off[slot]; int w = (slot + 1 < NSLOTS ? slot_off[slot + 1] : SHADOW_CELLS) - slot_off[slot], i; for (i = 0; i < w; i++) sh[3 * i + 2] = 0xFF; }
+static void shadow_copy(int dst, int src) { UBYTE *d = shadow + 3 * slot_off[dst]; const UBYTE *s_ = shadow + 3 * slot_off[src]; int w = slot_off[src + 1] - slot_off[src]; bcopy_(d, s_, (ULONG)w * 3); }
+
 static UBYTE sym_ascii(UBYTE c)
 {
     switch (c) {
@@ -281,31 +333,61 @@ static UBYTE sym_ascii(UBYTE c)
     }
 }
 
+static void cpu_sync(void) { if (blit_pending) { scr_wait_blit(); blit_pending = 0; } }
+
+/* a rectangle of one pen: blitter for anything but a few cells */
 static void d_fill(int col, int y, int ncols, int h, int pen)
 {
-    if (text_mode == GUI_TEXT_FAST) ftext_fill(col, y, ncols, h, pen);
-    else scr_fill(col * 8, y, ncols * 8, h, pen);
+    if (text_mode == GUI_TEXT_FAST && ncols * h < 24) { cpu_sync(); ftext_fill(col, y, ncols, h, pen); return; }
+    scr_fill(col * 8, y, ncols * 8, h, pen); blit_pending = 1;
 }
 
-/* paints cells[c0..c0+n) of the composed row at pixel row y as runs of equal fg/bg/style */
-static void flush_cells(int c0, int n, int y)
+/* paints cells[c0..c0+n) of the composed row at pixel row y as runs of equal pens */
+static void paint_run(int c0, int n, int y)
 {
     int i = 0;
-    rows_drawn++;
     while (i < n) {
-        int j = i + 1, fg = cell_fg[c0 + i], bg = cell_bg[c0 + i], st = cell_st[c0 + i];
+        int j = i + 1, fg = cell_fg[c0 + i], bg = cell_bg[c0 + i], st = cell_st[c0 + i], blank;
         while (j < n && cell_fg[c0 + j] == fg && cell_bg[c0 + j] == bg && cell_st[c0 + j] == st) j++;
-        if (text_mode == GUI_TEXT_FAST) {
-            ftext_text(c0 + i, y, fg, bg, cell_ch + c0 + i, j - i, st);
-        } else {
-            char tmp[COLS + 1]; int k, blank = 1;
-            for (k = i; k < j; k++) { tmp[k - i] = (char)sym_ascii(cell_ch[c0 + k]); if (tmp[k - i] != ' ') blank = 0; }
+        blank = fg == bg;
+        if (!blank) { int k; blank = 1; for (k = i; k < j; k++) if (cell_ch[c0 + k] != ' ') { blank = 0; break; } }
+        if (blank) d_fill(c0 + i, y, j - i, 8, bg);
+        else if (text_mode == GUI_TEXT_FAST) { cpu_sync(); ftext_text(c0 + i, y, fg, bg, cell_ch + c0 + i, j - i, st); }
+        else {
+            char tmp[COLS + 1]; int k;
+            for (k = i; k < j; k++) tmp[k - i] = (char)sym_ascii(cell_ch[c0 + k]);
             tmp[j - i] = 0;
-            if (blank) scr_fill((c0 + i) * 8, y, (j - i) * 8, 8, bg);
-            else { scr_text_bg((c0 + i) * 8, y, fg, bg, tmp); if (st & FTEXT_BOLD) scr_text((c0 + i) * 8 + 1, y, fg, tmp); }
+            scr_text_bg((c0 + i) * 8, y, fg, bg, tmp); if (st & FTEXT_BOLD) scr_text((c0 + i) * 8 + 1, y, fg, tmp);
+            blit_pending = 1;
         }
         i = j;
     }
+}
+
+static void flush_cells(int slot, int c0, int n, int y)
+{
+    UBYTE *sh = shadow + 3 * slot_off[slot];
+    int i = 0, drawn = 0;
+    while (i < n) {
+        int j;
+        UBYTE pens = (UBYTE)((cell_fg[c0 + i] << 4) | cell_bg[c0 + i]);
+        if (sh[3 * i] == cell_ch[c0 + i] && sh[3 * i + 1] == pens && sh[3 * i + 2] == cell_st[c0 + i]) { i++; continue; }
+        /* a run of changed cells; gaps of up to 2 unchanged cells are taken along (one call instead of two) */
+        for (j = i + 1; j < n; j++) {
+            int same = 1, k;
+            for (k = j; k < n && k < j + 3; k++) {
+                UBYTE pk = (UBYTE)((cell_fg[c0 + k] << 4) | cell_bg[c0 + k]);
+                if (!(sh[3 * k] == cell_ch[c0 + k] && sh[3 * k + 1] == pk && sh[3 * k + 2] == cell_st[c0 + k])) { same = 0; break; }
+            }
+            if (same && k == j + 3) break;
+            if (same && k >= n) break;
+        }
+        paint_run(c0 + i, j - i, y);
+        drawn = 1;
+        i = j;
+    }
+    if (drawn) rows_drawn++;
+    for (i = 0; i < n; i++) { sh[3 * i] = cell_ch[c0 + i]; sh[3 * i + 1] = (UBYTE)((cell_fg[c0 + i] << 4) | cell_bg[c0 + i]); sh[3 * i + 2] = cell_st[c0 + i]; }
 }
 
 static void cells_clear(int c0, int n, int bg)
@@ -342,7 +424,7 @@ static void drop_oldest(void)
     if (++mhead >= nslots) mhead = 0;
     mcount--; dropped++;
     if (mcount == 0) thead = ttail = 0; else thead = slot_at(0)->toff;
-    conv_dirty = 1;
+    conv_dirty = 1; conv_full = 1;
 }
 
 static struct gui_msg *find_msg(ULONG id, UWORD *index)
@@ -435,7 +517,7 @@ int gui_select_chat(int chat)
     if (cur_chat >= 0) chats[cur_chat].dirty = 1;
     cur_chat = chat;
     chats[chat].unread = 0; chats[chat].dirty = 1;
-    conv_scroll = 0; conv_dirty = 1; hdr_dirty = 1;
+    conv_scroll = 0; conv_dirty = 1; conv_full = 1; hdr_dirty = 1;
     list_follow_selection();
     return 0;
 }
@@ -483,7 +565,7 @@ int gui_set_status(int chat, ULONG msg_id, int status)
     struct gui_msg *m = find_msg(msg_id, 0);      /* chat is only a hint: the id is unique */
     if (!m || status < 0 || status > GUI_ST_FAILED) return -1;
     m->flags = MF_MAKE(m->flags & MF_FROM_ME, status);
-    if (m->chat == cur_chat) conv_dirty = 1;
+    if (m->chat == cur_chat) { conv_dirty = 1; conv_full = 1; }
     if (m->chat < nchats && chats[m->chat].prev_id == msg_id) { chats[m->chat].prev_status = (UBYTE)status; chats[m->chat].dirty = 1; }
     return 0;
 }
@@ -507,7 +589,7 @@ void gui_set_time(ULONG now)
     UBYTE hh, mm; ULONG day = local_day(now);
     local_hm(now, &hh, &mm);
     gui_set_clock(hh, mm);
-    if (day != today_day) { today_day = day; conv_dirty = 1; }
+    if (day != today_day) { today_day = day; conv_dirty = 1; conv_full = 1; }
 }
 void gui_set_tz(LONG east) { tz_east = east; }
 
@@ -535,10 +617,9 @@ static int wrap_text(const UBYTE *t, int n, int width, UWORD *start, UWORD *len,
     if (n == 0) { start[0] = 0; len[0] = 0; return 1; }
     while (pos < n && nl < maxl) {
         int end = pos, last_space = -1, i;
-        for (i = pos; i < n && i - pos < width; i++) {
-            if (t[i] == '\n') break;
-            if (t[i] == ' ') last_space = i;
-        }
+        const UBYTE *p = t + pos, *e = t + (n - pos < width ? n : pos + width);
+        while (p < e && *p != '\n') { if (*p == ' ') last_space = (int)(p - t); p++; }
+        i = (int)(p - t);
         end = i;
         if (i < n && t[i] == '\n') { start[nl] = (UWORD)pos; len[nl] = (UWORD)(end - pos); nl++; pos = i + 1; if (pos == n) { if (nl < maxl) { start[nl] = (UWORD)pos; len[nl] = 0; nl++; } } continue; }
         if (i >= n) { start[nl] = (UWORD)pos; len[nl] = (UWORD)(end - pos); nl++; break; }
@@ -656,12 +737,12 @@ static void draw_conv_row(int i)
     if (r->kind == 2) {
         UBYTE lab[12]; int n = day_label(r->day, lab), left = CONV_COL + ((CONV_COLS - n - 2) >> 1);
         cells_put1(left, ' ', P_GREY, P_PANEL); cells_put(left + 1, lab, n, P_GREY, P_PANEL, 0, COLS); cells_put1(left + 1 + n, ' ', P_GREY, P_PANEL);
-        flush_cells(CONV_COL, CONV_COLS + 1, y);
+        flush_cells(SLOT_CONV + i, CONV_COL, CONV_COLS + 1, y);
         return;
     }
-    if (r->kind == 0 || r->kind == 0xFF) { flush_cells(CONV_COL, CONV_COLS + 1, y); return; }
+    if (r->kind == 0 || r->kind == 0xFF) { flush_cells(SLOT_CONV + i, CONV_COL, CONV_COLS + 1, y); return; }
     m = find_msg(r->id, 0);
-    if (!m) { flush_cells(CONV_COL, CONV_COLS + 1, y); return; }
+    if (!m) { flush_cells(SLOT_CONV + i, CONV_COL, CONV_COLS + 1, y); return; }
     from_me = (r->flags & ROW_FROM_ME) != 0;
     bp = from_me ? P_OWN : P_PANEL;
     c = CONV_COL + r->b0;
@@ -672,35 +753,76 @@ static void draw_conv_row(int i)
     }
     if (r->kind == 1) { convert_msg(m); cells_put(c + 1, conv_buf + r->start, r->len, P_WHITE, bp, 0, inner_end); }
     if (r->flags & ROW_FOOTER) compose_footer(inner_end - footer_width(from_me), r, m, bp);
-    flush_cells(CONV_COL, CONV_COLS + 1, y);
+    flush_cells(SLOT_CONV + i, CONV_COL, CONV_COLS + 1, y);
 }
 
 static void conv_invalidate(int from, int to)    /* rows [from, to] must be repainted next time */
 {
     int i;
-    for (i = from; i <= to && i < CONV_ROWS; i++) if (i >= 0) rows_old[i].kind = 0xFF;
-    conv_dirty = 1;
+    for (i = from; i <= to && i < CONV_ROWS; i++) if (i >= 0) { rows_old[i].kind = 0xFF; shadow_invalidate(SLOT_CONV + i); }
+    conv_dirty = 1; conv_full = 1;
+}
+
+/* The common case without a full layout: the view is at the bottom, the old row table is valid and only new
+ * messages were appended to the chat. Their lines go under the old rows shifted up; 1 when rows_new is ready. */
+static int try_append(void)
+{
+    struct row tmp[MAX_MSG_LINES + 2], lines[CONV_ROWS];
+    UWORD idx; struct gui_msg *last; int i, ln = 0, cur, prev;
+    if (conv_full || conv_scroll != 0 || cur_chat < 0) return 0;
+    for (i = 0; i < CONV_ROWS; i++) if (rows_old[i].kind == 0xFF) return 0;
+    if (rows_old[CONV_ROWS - 1].id == 0) return 0;
+    last = find_msg(rows_old[CONV_ROWS - 1].id, &idx);
+    if (!last || last->chat != cur_chat) return 0;
+    if (rows_old[CONV_ROWS - 1].kind == 1 && !(rows_old[CONV_ROWS - 1].flags & ROW_FOOTER)) return 0;   /* a cut message */
+    prev = idx;
+    for (cur = idx + 1; cur < mcount; cur++) {
+        struct gui_msg *m = slot_at((UWORD)cur);
+        int with_sep, k;
+        if (m->chat != cur_chat) continue;
+        with_sep = local_day(slot_at((UWORD)prev)->ts) != local_day(m->ts);
+        k = msg_lines(m, with_sep, tmp, MAX_MSG_LINES + 2);
+        if (ln + k > CONV_ROWS) return 0;                /* more than a pane of new lines: full layout */
+        for (i = 0; i < k; i++) lines[ln++] = tmp[i];
+        prev = cur;
+    }
+    for (i = 0; i < CONV_ROWS - ln; i++) rows_new[i] = rows_old[i + ln];
+    for (i = 0; i < ln; i++) rows_new[CONV_ROWS - ln + i] = lines[i];
+    return 1;
 }
 
 static void redraw_conv(void)
 {
     int i, k, over, pass;
-    for (pass = 0; pass < 3; pass++) {
-        over = layout_conv();
-        if (over <= 0 || conv_scroll == 0) break;
-        conv_scroll -= over; if (conv_scroll < 0) conv_scroll = 0;
+    if (!try_append()) {
+        for (pass = 0; pass < 3; pass++) {
+            over = layout_conv();
+            if (over <= 0 || conv_scroll == 0) break;
+            conv_scroll -= over; if (conv_scroll < 0) conv_scroll = 0;
+        }
     }
+    conv_full = 0;
     last_scrolled = 0;
-    /* shifted by k rows? (the top CONV_ROWS-k new rows equal the old rows k..) */
+    /* shifted by k rows? up (new message: the top CONV_ROWS-k new rows equal the old rows k..) or down (history
+     * scrolled back: the old rows 0.. reappear k rows lower); the pane is scrolled and only the k rows painted */
     if (scroll_mode != GUI_SCROLL_REDRAW) {
-        for (k = 1; k <= CONV_ROWS / 2; k++) {
+        int dir;
+        for (dir = 0; dir < 2; dir++) for (k = 1; k <= CONV_ROWS / 2; k++) {
             int match = 1;
-            for (i = 0; i < CONV_ROWS - k; i++) if (rows_old[i + k].kind == 0xFF || !rows_equal(&rows_new[i], &rows_old[i + k])) { match = 0; break; }
+            for (i = 0; i < CONV_ROWS - k; i++) {
+                const struct row *o = dir ? &rows_old[i] : &rows_old[i + k], *n = dir ? &rows_new[i + k] : &rows_new[i];
+                if (o->kind == 0xFF || !rows_equal(n, o)) { match = 0; break; }
+            }
             if (!match) continue;
-            if (scroll_mode == GUI_SCROLL_CPU && text_mode == GUI_TEXT_FAST) ftext_scroll_up(CONV_COL, CONV_Y0, CONV_COLS + 1, CONV_H, 8 * k, P_BG);
-            else { scr_scroll_up(CONV_COL * 8, CONV_Y0, (CONV_COLS + 1) * 8, CONV_H, 8 * k, P_BG); if (text_mode == GUI_TEXT_FAST) scr_wait_blit(); }
+            if (scroll_mode == GUI_SCROLL_CPU && text_mode == GUI_TEXT_FAST) { cpu_sync(); ftext_scroll_up(CONV_COL, CONV_Y0, CONV_COLS + 1, CONV_H, dir ? -8 * k : 8 * k, P_BG); }
+            else if (text_mode == GUI_TEXT_FAST) scr_scroll_direct(CONV_COL * 8, CONV_Y0, (CONV_COLS + 1) * 8, CONV_H, dir ? -8 * k : 8 * k);   /* no clear: the new rows are repainted whole */
+            else scr_scroll_up(CONV_COL * 8, CONV_Y0, (CONV_COLS + 1) * 8, CONV_H, dir ? -8 * k : 8 * k, P_BG);
             scroll_count++; last_scrolled = 1;
-            for (i = CONV_ROWS - k; i < CONV_ROWS; i++) draw_conv_row(i);
+            if (dir) { for (i = CONV_ROWS - 1; i >= k; i--) shadow_copy(SLOT_CONV + i, SLOT_CONV + i - k); for (i = 0; i < k; i++) shadow_invalidate(SLOT_CONV + i); }
+            else { for (i = 0; i < CONV_ROWS - k; i++) shadow_copy(SLOT_CONV + i, SLOT_CONV + i + k); for (i = CONV_ROWS - k; i < CONV_ROWS; i++) shadow_invalidate(SLOT_CONV + i); }
+            blit_pending = 1;
+            if (dir) for (i = 0; i < k; i++) draw_conv_row(i);
+            else for (i = CONV_ROWS - k; i < CONV_ROWS; i++) draw_conv_row(i);
             for (i = 0; i < CONV_ROWS; i++) rows_old[i] = rows_new[i];
             conv_dirty = 0;
             return;
@@ -742,8 +864,7 @@ static void draw_header(void)
     c = COLS - 2 - wl;
     cells_put1(c - 2, F8_DOT, pen, P_PANEL);
     cells_puts(c, w, P_LTGREY, P_PANEL, 0, COLS);
-    d_fill(0, 0, COLS, HDR_H, P_PANEL);
-    flush_cells(0, COLS, HDR_TEXT_Y);
+    flush_cells(SLOT_HDR, 0, COLS, HDR_TEXT_Y);
     hdr_dirty = 0;
 }
 
@@ -751,7 +872,7 @@ static void draw_list_entry(int pos)
 {
     int y = LIST_Y0 + pos * LIST_ENTRY_H, idx = list_top + pos, bg, chat;
     struct gui_chat *ch;
-    if (idx >= nchats) { d_fill(0, y, LIST_COLS, LIST_ENTRY_H, P_LIST); return; }
+    if (idx >= nchats) { cells_clear(0, LIST_COLS, P_LIST); flush_cells(SLOT_LIST + 2 * pos, 0, LIST_COLS, y); flush_cells(SLOT_LIST + 2 * pos + 1, 0, LIST_COLS, y + 8); return; }
     chat = order[idx]; ch = &chats[chat];
     bg = chat == cur_chat ? P_SEL : P_LIST;
     /* row 1: name, time */
@@ -761,7 +882,7 @@ static void draw_list_entry(int pos)
         UBYTE t[5]; put_dec(t, ch->last_hh, 2); t[2] = ':'; put_dec(t + 3, ch->last_mm, 2);
         cells_put(14, t, 5, ch->unread ? P_GREEN : P_GREY, bg, 0, COLS);
     }
-    flush_cells(0, LIST_COLS, y);
+    flush_cells(SLOT_LIST + 2 * pos, 0, LIST_COLS, y);
     /* row 2: preview, badge */
     cells_clear(0, LIST_COLS, bg);
     if (ch->count) {
@@ -780,7 +901,7 @@ static void draw_list_entry(int pos)
         maxp = limit - c; if (maxp < 0) maxp = 0;
         cells_put(c, ch->prev, ch->prev_len > maxp ? maxp : ch->prev_len, ch->unread ? P_LTGREY : P_GREY, bg, 0, limit);
     } else cells_puts(1, ch->jid, P_GREY, bg, 0, 19);
-    flush_cells(0, LIST_COLS, y + 8);
+    flush_cells(SLOT_LIST + 2 * pos + 1, 0, LIST_COLS, y + 8);
     ch->dirty = 0;
 }
 
@@ -790,7 +911,7 @@ static void draw_list_footer(void)
     cells_clear(0, LIST_COLS, P_LIST);
     if (list_top > 0) { UBYTE t[4]; cells_put1(c, F8_ARROW_UP, P_GREY, P_LIST); put_dec(t, (ULONG)list_top, 0); c = cells_put(c + 2, t, dec_len((ULONG)list_top), P_GREY, P_LIST, 0, COLS) + 2; }
     if (below > 0) { UBYTE t[4]; cells_put1(c, F8_ARROW_DN, P_GREY, P_LIST); put_dec(t, (ULONG)below, 0); c = cells_put(c + 2, t, dec_len((ULONG)below), P_GREY, P_LIST, 0, COLS); cells_puts(c + 1, "weitere", P_GREY, P_LIST, 0, LIST_COLS); }
-    flush_cells(0, LIST_COLS, LIST_FOOT_Y);
+    flush_cells(SLOT_FOOT, 0, LIST_COLS, LIST_FOOT_Y);
 }
 
 static void draw_list(void)
@@ -830,7 +951,7 @@ static void draw_input(void)
         if (row == 0 && input_win > 0) cells_put1(CONV_COL, '<', P_GREY, P_INPUT);
         if (row == 1 && input_win + INPUT_WIN < input_len) cells_put1(CONV_COL + CONV_COLS - 1, '>', P_GREY, P_INPUT);
         if (row == 1 && !insert_mode) cells_put1(CONV_COL + CONV_COLS - 1, 'U', P_YELLOW, P_INPUT);
-        flush_cells(CONV_COL, CONV_COLS, y);
+        flush_cells(SLOT_INPUT + row, CONV_COL, CONV_COLS, y);
     }
     input_dirty = 0;
 }
@@ -843,13 +964,11 @@ static void draw_status(void)
     else if (focus == 1) cells_puts(40, "F1 Hilfe  Tab Chatliste  Return", P_GREY, P_PANEL, 0, 73);
     else cells_puts(40, "F1 Hilfe  Tab Eingabe  Auf/Ab", P_GREY, P_PANEL, 0, 73);
     if (clk_hh >= 0) { UBYTE t[5]; put_dec(t, (ULONG)clk_hh, 2); t[2] = ':'; put_dec(t + 3, (ULONG)clk_mm, 2); cells_put(74, t, 5, P_WHITE, P_PANEL, 0, COLS); }
-    d_fill(0, STATUS_Y, COLS, SCR_H - STATUS_Y, P_PANEL);
-    flush_cells(0, COLS, STATUS_TEXT_Y);
+    flush_cells(SLOT_STATUS, 0, COLS, STATUS_TEXT_Y);
     status_dirty = 0;
 }
 
 #define HELP_COL 23
-#define HELP_COLS 55
 #define HELP_Y 32
 #define HELP_KEYW 15                /* width of the key column (green) */
 static const char *help_lines[] = {
@@ -870,17 +989,18 @@ static void draw_help(void)
 {
     int i, n = 0, y;
     while (help_lines[n]) n++;
+    for (i = 0; i < 13; i++) shadow_invalidate(SLOT_HELP + i);
     d_fill(HELP_COL, HELP_Y, HELP_COLS, 8 * (n + 3) + 4, P_SEP);                 /* frame */
     d_fill(HELP_COL + 1, HELP_Y + 2, HELP_COLS - 2, 8 * (n + 3), P_SEL);
     cells_clear(HELP_COL + 1, HELP_COLS - 2, P_GREEN);
     cells_puts(HELP_COL + 2, "Tachyon - Tasten", P_BLACK, P_GREEN, FTEXT_BOLD, COLS);
-    flush_cells(HELP_COL + 1, HELP_COLS - 2, HELP_Y + 2);
+    flush_cells(SLOT_HELP, HELP_COL + 1, HELP_COLS - 2, HELP_Y + 2);
     for (i = 0; i < n; i++) {
         y = HELP_Y + 2 + 8 * (i + 2);
         cells_clear(HELP_COL + 1, HELP_COLS - 2, P_SEL);
         cells_puts(HELP_COL + 2, help_lines[i], P_WHITE, P_SEL, 0, HELP_COL + HELP_COLS - 1);
         { int k; for (k = HELP_COL + 2; k < HELP_COL + 2 + HELP_KEYW; k++) cell_fg[k] = P_GREEN; }   /* the key column */
-        flush_cells(HELP_COL + 1, HELP_COLS - 2, y);
+        flush_cells(SLOT_HELP + 1 + i, HELP_COL + 1, HELP_COLS - 2, y);
     }
     help_dirty = 0;
 }
@@ -895,18 +1015,20 @@ static void help_close(void)
 }
 
 /* ---- redraw ---------------------------------------------------------------------------------------------------- */
-static void draw_static(void)
+static void draw_static(void)                       /* backgrounds, blitter; the text rows go over them */
 {
-    d_fill(0, HDR_H, LIST_COLS, SCR_H - HDR_H - (SCR_H - STATUS_Y), P_LIST);          /* list pane */
-    d_fill(GAP_COL, HDR_H, 2, STATUS_Y - HDR_H, P_BG);                                 /* gap */
-    d_fill(CONV_COL, HDR_H, CONV_COLS + 1, STATUS_Y - HDR_H, P_BG);                    /* conversation + margin */
-    d_fill(CONV_COL, INPUT_Y0, CONV_COLS, INPUT_H, P_INPUT);                           /* input box */
+    scr_fill(0, 0, SCR_W, HDR_H, P_PANEL);                                             /* header */
+    scr_fill(0, HDR_H, LIST_COLS * 8, STATUS_Y - HDR_H, P_LIST);                       /* list pane */
+    scr_fill(GAP_COL * 8, HDR_H, 16, STATUS_Y - HDR_H, P_BG);                          /* gap */
+    scr_fill(CONV_COL * 8, HDR_H, (CONV_COLS + 1) * 8, STATUS_Y - HDR_H, P_BG);        /* conversation + margin */
+    scr_fill(CONV_COL * 8, INPUT_Y0, CONV_COLS * 8, INPUT_H, P_INPUT);                 /* input box */
+    scr_fill(0, STATUS_Y, SCR_W, SCR_H - STATUS_Y, P_PANEL);                           /* status line */
+    blit_pending = 1;
 }
 
 int gui_redraw_dirty(void)
 {
     ULONG before = rows_drawn;
-    if (text_mode == GUI_TEXT_FAST) scr_wait_blit();
     if (hdr_dirty) draw_header();
     if (list_dirty_all) draw_list();
     else { int i; for (i = 0; i < nchats; i++) if (chats[i].dirty) { draw_list(); break; } }
@@ -920,12 +1042,12 @@ int gui_redraw_dirty(void)
 void gui_redraw_all(void)
 {
     int i;
-    if (text_mode == GUI_TEXT_FAST) scr_wait_blit();
     scr_set_palette(gui_palette, 16);
     draw_static();
+    for (i = 0; i < SHADOW_CELLS; i++) shadow[3 * i + 2] = 0xFF;
     for (i = 0; i < CONV_ROWS; i++) rows_old[i].kind = 0xFF;
     for (i = 0; i < nchats; i++) chats[i].dirty = 1;
-    hdr_dirty = list_dirty_all = conv_dirty = input_dirty = status_dirty = 1;
+    hdr_dirty = list_dirty_all = conv_dirty = input_dirty = status_dirty = 1; conv_full = 1;
     if (help_open) help_dirty = 1;
     gui_redraw_dirty();
     if (help_open) draw_help();
@@ -933,8 +1055,14 @@ void gui_redraw_all(void)
 
 void gui_set_text_mode(int mode)
 {
+    int i;
     if (mode == GUI_TEXT_FAST && !ftext_ready()) mode = GUI_TEXT_OS;
+    if (mode == text_mode) return;
     text_mode = mode;
+    for (i = 0; i < SHADOW_CELLS; i++) shadow[3 * i + 2] = 0xFF;    /* the symbols differ between the paths */
+    for (i = 0; i < CONV_ROWS; i++) rows_old[i].kind = 0xFF;
+    for (i = 0; i < nchats; i++) chats[i].dirty = 1;
+    hdr_dirty = list_dirty_all = conv_dirty = input_dirty = status_dirty = 1; conv_full = 1;
 }
 int  gui_text_mode(void) { return text_mode; }
 void gui_set_scroll_mode(int mode) { scroll_mode = mode; }
@@ -974,7 +1102,7 @@ static void scroll_conv(int lines)
 {
     int s = conv_scroll + lines;
     if (s < 0) s = 0;
-    if (s != conv_scroll) { conv_scroll = s; conv_dirty = 1; }
+    if (s != conv_scroll) { conv_scroll = s; conv_dirty = 1; conv_full = 1; }
 }
 
 int gui_pump(LONG key)
@@ -992,12 +1120,12 @@ int gui_pump(LONG key)
         case 0x51: insert_mode = !insert_mode; input_dirty = 1; return GUI_ACT_NONE;                 /* F2 */
         case SCR_KEY_UP:
             if (shift) scroll_conv(CONV_ROWS - 1);
-            else if (focus == 0) { int p = order_pos(cur_chat); select_pos(p - 1); if (gui_current_chat() != -1) { action_chat = cur_chat; return GUI_ACT_SWITCH; } }
+            else if (focus == 0) { int p = order_pos(cur_chat), before = cur_chat; select_pos(p - 1); if (cur_chat != before) { action_chat = cur_chat; return GUI_ACT_SWITCH; } }
             else scroll_conv(1);
             return GUI_ACT_NONE;
         case SCR_KEY_DOWN:
             if (shift) scroll_conv(-(CONV_ROWS - 1));
-            else if (focus == 0) { int p = order_pos(cur_chat); select_pos(p + 1); action_chat = cur_chat; return GUI_ACT_SWITCH; }
+            else if (focus == 0) { int p = order_pos(cur_chat), before = cur_chat; select_pos(p + 1); if (cur_chat != before) { action_chat = cur_chat; return GUI_ACT_SWITCH; } }
             else scroll_conv(-1);
             return GUI_ACT_NONE;
         case SCR_KEY_LEFT:
@@ -1069,11 +1197,12 @@ int gui_init(void *arena, ULONG size)
     conn_state = GUI_CONN_OFFLINE; conn_detail_len = 0; clk_hh = -1; today_day = 0;
     for (i = 0; i < CONV_ROWS; i++) rows_old[i].kind = 0xFF;
     for (i = 0; i < GUI_MAX_CHATS; i++) chats[i].used = 0;
+    shadow_init(); blit_pending = 0;
     if (scr_font_glyphs(&lo, &hi, &cd, &mod, &cl)) font8_load(lo, hi, cd, mod, cl); else font8_load_symbols();
     depth = scr_planes(planes, 8, &bpr);
     if (depth > 0) ftext_init(planes, depth, bpr);
     text_mode = ftext_ready() ? GUI_TEXT_FAST : GUI_TEXT_OS;
     scroll_mode = GUI_SCROLL_BLIT;
-    hdr_dirty = list_dirty_all = conv_dirty = input_dirty = status_dirty = 1;
+    hdr_dirty = list_dirty_all = conv_dirty = input_dirty = status_dirty = 1; conv_full = 1;
     return 0;
 }

@@ -92,9 +92,13 @@ LONG scr_wait_key(ULONG timeout_ticks);
 int  scr_last_key_source(void);
 LONG scr_translate_raw(UWORD code, UWORD qualifier);   /* same translation for a raw code (self-test, replay) */
 
-/* ScrollRaster through the layer: the rows y..y+h-1 of x..x+w-1 move up by dy pixels, the vacated rows get bg.
- * x and w should be multiples of 16 (word-aligned blit). */
+/* ScrollRaster through the layer: the rows y..y+h-1 of x..x+w-1 move up by dy pixels (down for dy < 0), the vacated
+ * rows get bg. x and w should be multiples of 16 (word-aligned blit). */
 void scr_scroll_up(int x, int y, int w, int h, int dy, int bg);
+/* The same move as a plain BltBitMap on the screen's BitMap: no layer, no clearing of the vacated rows (the caller
+ * repaints them). Only for the backdrop-window situation ui/ftext.h describes; the blitter runs asynchronously, so
+ * scr_wait_blit() before CPU writes into the area. */
+void scr_scroll_direct(int x, int y, int w, int h, int dy);
 /* The screen's bitplanes for a renderer that writes cells directly (ui/ftext.c, see there why that is safe here):
  * fills planes[0..depth-1] (max entries) and the bytes per row, returns the depth, 0 without a screen. */
 int  scr_planes(UBYTE **planes, int max, UWORD *bytes_per_row);

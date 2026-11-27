@@ -167,6 +167,8 @@ Budgets sind ungemessene Ziele. Tatsächlichen OS- und Stackverbrauch, Fragmenti
 
 Native Intuition/graphics.library, bevorzugt 640×256 PAL in vier Farben. Kontaktliste, Chatfenster, Texteingabe, Senden, Status, ungelesene Nachrichten, scrollbarer Verlauf. Netzwerk und Kryptografie dürfen die GUI nicht dauerhaft blockieren.
 
+- **Client-Oberfläche vorhanden (`ui/gui.c`, docs/UI.md „Client-Oberfläche“):** 640×256 in 16 Farben, Chatliste mit Ungelesen-Pillen, Sprechblasen mit Zeitstempel und Lesehaken, zweizeilige Eingabe mit Umlauten, Hilfe; Nachrichtenspeicher 48 KiB, eigener Textrenderer direkt in die Bitplanes, nur geänderte Bereiche werden gezeichnet; Host-Renderer und Test (`make gui-test`), Amiga-Demo (`make run-gui`). Einbindung in den Client steht aus.
+
 Version 1.0: direkte Verbindung, QR-Pairing als verknüpftes Gerät, persistente Identität, Wiederverbindung, Text senden/empfangen, E2EE, Kontakte, Gruppen, lokale Historie und Lesebestätigungen.
 
 Später: Emoji-Bitmaps, Bilder in 32 Farben/HAM6 (ggf. eigener Bildschirm), IFF/ILBM, Benachrichtigungstöne und Sprachnachrichten über Paula. Keine Priorität für Telefonie, Video oder vollständige historische Mediensynchronisation.

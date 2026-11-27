@@ -30,7 +30,7 @@ void ftext_text(int col, int y, int fg, int bg, const UBYTE *s, int n, int style
 void ftext_fill(int col, int y, int ncols, int h, int pen);
 /* ncols cells of n chars of text, the remaining cells filled with bg (one call for a whole text field) */
 void ftext_field(int col, int y, int ncols, int fg, int bg, const UBYTE *s, int n, int style);
-/* moves the rows y..y+h-1 of columns col..col+ncols-1 up by dy pixel rows (CPU copy); the vacated rows get bg */
+/* moves the rows y..y+h-1 of columns col..col+ncols-1 up by dy pixel rows (down for dy < 0, CPU copy); the vacated rows get bg */
 void ftext_scroll_up(int col, int y, int ncols, int h, int dy, int bg);
 
 #endif

@@ -139,6 +139,9 @@ VOID  __int_ShowTitle(__reg("a6") void *, __reg("a0") struct Screen *screen, __r
 VOID  __int_ActivateWindow(__reg("a6") void *, __reg("a0") struct Window *window) = "\tjsr\t-450(a6)";
 
 /* ---- graphics.library vectors (graphics_lib.fd, V33) ----------------------------------------------- */
+LONG  __gfx_BltBitMap(__reg("a6") void *, __reg("a0") struct BitMap *src, __reg("d0") LONG xSrc, __reg("d1") LONG ySrc,
+                      __reg("a1") struct BitMap *dst, __reg("d2") LONG xDest, __reg("d3") LONG yDest, __reg("d4") LONG xSize,
+                      __reg("d5") LONG ySize, __reg("d6") ULONG minterm, __reg("d7") ULONG mask, __reg("a2") void *tempA) = "\tjsr\t-30(a6)";
 VOID  __gfx_BltTemplate(__reg("a6") void *, __reg("a0") const void *source, __reg("d0") LONG xSrc, __reg("d1") LONG srcMod,
                         __reg("a1") struct RastPort *rp, __reg("d2") LONG xDest, __reg("d3") LONG yDest,
                         __reg("d4") LONG xSize, __reg("d5") LONG ySize) = "\tjsr\t-36(a6)";

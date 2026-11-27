@@ -17,6 +17,7 @@
 #include <proto/dos.h>
 #include "../../ui/screen.h"
 #include "../../ui/gui.h"
+#include "../../ui/ftext.h"
 
 struct ExecBase *SysBase;
 struct DosLibrary *DOSBase;
@@ -143,6 +144,34 @@ int main(void)
     gui_stats(&st);
     out("info: arena: "); out_dec(st.msgs); out(" messages in "); out_dec(st.slots); out(" slots, text "); out_dec(st.text_used); out("/"); out_dec(st.text_cap); out(" bytes\n");
 
+    /* ---- primitives of the fast renderer (58-cell rows like the conversation pane) ---- */
+    {
+        static const UBYTE row58[] = "Eine Zeile mit 58 Zeichen, so breit wie das Gespraech ist.";
+        UBYTE lat[128];
+        t0 = ticks_now(); for (i = 0; i < 100; i++) ftext_text(22, 16, 2, 1, row58, 58, 0); t1 = ticks_now();
+        timing("ftext_text 58 cells white on pen 1 (1 copy, 1 inverted, 2 fill planes)", 100, t0, t1);
+        t0 = ticks_now(); for (i = 0; i < 100; i++) ftext_text(22, 24, 2, 15, row58, 58, 0); t1 = ticks_now();
+        timing("ftext_text 58 cells white on pen 15 (3 inverted, 1 fill planes)", 100, t0, t1);
+        t0 = ticks_now(); for (i = 0; i < 100; i++) ftext_text(22, 32, 2, 1, row58, 58, FTEXT_BOLD); t1 = ticks_now();
+        timing("ftext_text 58 cells bold (generic path)", 100, t0, t1);
+        t0 = ticks_now(); for (i = 0; i < 100; i++) ftext_fill(22, 40, 58, 8, 5); t1 = ticks_now();
+        timing("ftext_fill 58 cols x 8 rows", 100, t0, t1);
+        t0 = ticks_now(); for (i = 0; i < 5; i++) ftext_fill(22, 12, 58, 234, 1); t1 = ticks_now();
+        timing("ftext_fill 58 cols x 234 rows (the pane background)", 5, t0, t1);
+        t0 = ticks_now(); for (i = 0; i < 10; i++) scr_scroll_up(176, 16, 464, 200, 8, 1); t1 = ticks_now();
+        timing("scr_scroll_up 464x200 by 8 (ScrollRaster)", 10, t0, t1);
+        t0 = ticks_now(); for (i = 0; i < 5; i++) ftext_scroll_up(22, 16, 58, 200, 8, 1); t1 = ticks_now();
+        timing("ftext_scroll_up 58 cols x 200 rows by 8 (CPU longs)", 5, t0, t1);
+        t0 = ticks_now(); for (i = 0; i < 5; i++) scr_fill(176, 16, 464, 200, 1); t1 = ticks_now();
+        timing("scr_fill 464x200 (RectFill)", 5, t0, t1);
+        t0 = ticks_now(); for (i = 0; i < 100; i++) gui_utf8_to_latin1(row58, 58, lat, sizeof lat); t1 = ticks_now();
+        timing("gui_utf8_to_latin1 58 ASCII bytes", 100, t0, t1);
+        t0 = ticks_now(); for (i = 0; i < 100; i++) gui_utf8_to_latin1((const UBYTE *)"Gr\xC3\xBC\xC3\x9F" "e, \xC3\xA4\xC3\xB6\xC3\xBC und \xF0\x9F\x98\x80 dazu", 29, lat, sizeof lat); t1 = ticks_now();
+        timing("gui_utf8_to_latin1 29 bytes with umlauts + emoji", 100, t0, t1);
+        t0 = ticks_now(); for (i = 0; i < 100; i++) gui_redraw_dirty(); t1 = ticks_now();
+        timing("gui_redraw_dirty with nothing dirty", 100, t0, t1);
+    }
+
     /* ---- initial paint, fast renderer ---- */
     t0 = ticks_now();
     gui_redraw_all();
@@ -167,22 +196,26 @@ int main(void)
     cur = gui_current_chat();
     {
         static const int modes[3] = { GUI_SCROLL_BLIT, GUI_SCROLL_CPU, GUI_SCROLL_REDRAW };
-        static const char *names[3] = { "incoming message, ScrollRaster + new rows", "incoming message, CPU plane copy + new rows", "incoming message, repaint changed rows" };
+        static const char *names[3] = { "incoming message, blit scroll + new rows", "incoming message, CPU plane copy + new rows", "incoming message, repaint changed rows" };
         int m, k;
         for (m = 0; m < 3; m++) {
+            ULONG sum = 0;
             gui_set_scroll_mode(modes[m]);
-            t0 = ticks_now();
-            for (k = 0; k < 6; k++) { gui_add_message(cur, k & 1, now + k, k & 1 ? "Ja, und?" : "Noch eine Nachricht f\xC3\xBCr die Zeitmessung.", -1, GUI_ST_READ); gui_redraw_dirty(); }
-            t1 = ticks_now();
-            timing(names[m], 6, t0, t1);
-            if (m == 0) step((t1 - t0) * 20 / 6 < 150, "incoming message repaint under 150 ms (ScrollRaster path)");
+            for (k = 0; k < 6; k++) {                    /* the repaint alone (the model call is measured above) */
+                gui_add_message(cur, k & 1, now + k, k & 1 ? "Ja, und?" : "Noch eine Nachricht f\xC3\xBCr die Zeitmessung.", -1, GUI_ST_READ);
+                t0 = ticks_now(); gui_redraw_dirty(); t1 = ticks_now(); sum += t1 - t0;
+            }
+            timing(names[m], 6, 0, sum);
+            if (m == 0) step(sum * 20 / 6 < 150, "incoming message repaint under 150 ms (blit scroll path)");
         }
         gui_set_scroll_mode(GUI_SCROLL_BLIT);
         /* a two-line message (wrap) */
-        t0 = ticks_now();
-        for (k = 0; k < 4; k++) { gui_add_message(cur, 0, now + 10 + k, "Eine l\xC3\xA4ngere Nachricht, die sicher auf zwei Zeilen umbrochen wird, damit der Scroll zwei Zeilen weit geht.", -1, GUI_ST_READ); gui_redraw_dirty(); }
-        t1 = ticks_now();
-        timing("incoming two-line message, ScrollRaster", 4, t0, t1);
+        { ULONG sum = 0;
+        for (k = 0; k < 4; k++) { gui_add_message(cur, 0, now + 10 + k, "Eine l\xC3\xA4ngere Nachricht, die sicher auf zwei Zeilen umbrochen wird, damit der Scroll zwei Zeilen weit geht.", -1, GUI_ST_READ); t0 = ticks_now(); gui_redraw_dirty(); t1 = ticks_now(); sum += t1 - t0; }
+        timing("incoming two-line message, blit scroll", 4, 0, sum); }
+        t0 = ticks_now(); for (k = 0; k < 10; k++) scr_scroll_direct(176, 16, 464, 200, 8); t1 = ticks_now();
+        timing("scr_scroll_direct 464x200 by 8 (BltBitMap on the screen BitMap, no clear)", 10, t0, t1);
+        gui_redraw_all();
     }
 
     /* ---- key echo: typing into the input line ---- */

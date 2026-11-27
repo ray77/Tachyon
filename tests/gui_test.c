@@ -220,6 +220,7 @@ int main(int argc, char **argv)
         for (k = 0; k < 10; k++) key(SCR_KEY_RAW | SCR_KEY_UP);
         gui_redraw_dirty();
         CHECK(!row_has(22, CONV_Y(24), 58, "Ja.") || row_has(22, CONV_Y(23), 58, "Und dann?"), "scrolled 10 lines up: '%s'", row_text(22, CONV_Y(24), 58));
+        CHECK(gui_last_scrolled(), "scrolling the history line by line uses the scroll path (down shift)");
         skey(SCR_KEY_RAW | SCR_KEY_UP);             /* page up */
         gui_redraw_dirty();
         shot("history");
@@ -279,6 +280,7 @@ int main(int argc, char **argv)
     CHECK(row_has(22, 2, 40, "J\xF6rg"), "OS path header: '%s'", row_text(22, 2, 40));
     CHECK(row_has(22, CONV_Y(24), 58, "Ja."), "OS path bottom row: '%s'", row_text(22, CONV_Y(24), 58));
     gui_set_text_mode(GUI_TEXT_FAST);
+    gui_redraw_dirty();                              /* the mode switch repaints everything; scrolling needs a valid row table */
     gui_set_scroll_mode(GUI_SCROLL_CPU);
     gui_add_message(b, 0, base + 3000, "CPU-Scroll", -1, GUI_ST_READ);
     gui_redraw_dirty();

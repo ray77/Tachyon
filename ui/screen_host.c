@@ -120,18 +120,25 @@ int scr_bitmap_1bpp_rects(int x, int y, int wm, int hm, const UBYTE *bits, int s
 
 void scr_scroll_up(int x, int y, int w, int h, int dy, int bg)
 {
-    int p, r, i, x1 = x + w - 1, y1 = y + h - 1;
-    if (!host_open || w <= 0 || h <= 0 || dy <= 0) return;
+    int r, i, x1 = x + w - 1, y1 = y + h - 1;
+    if (!host_open || w <= 0 || h <= 0 || dy == 0) return;
     host_calls++;
     if (x < 0) x = 0;
     if (y < 0) y = 0;
     if (x1 >= SCR_W) x1 = SCR_W - 1;
     if (y1 >= SCR_H) y1 = SCR_H - 1;
     if (dy > y1 - y + 1) dy = y1 - y + 1;
-    for (r = y; r + dy <= y1; r++) for (i = x; i <= x1; i++) host_set(i, r, scr_host_pixel(i, r + dy));
-    for (r = y1 - dy + 1; r <= y1; r++) for (i = x; i <= x1; i++) host_set(i, r, bg);
-    (void)p;
+    if (dy < -(y1 - y + 1)) dy = -(y1 - y + 1);
+    if (dy > 0) {
+        for (r = y; r + dy <= y1; r++) for (i = x; i <= x1; i++) host_set(i, r, scr_host_pixel(i, r + dy));
+        for (r = y1 - dy + 1; r <= y1; r++) for (i = x; i <= x1; i++) host_set(i, r, bg);
+    } else {
+        for (r = y1; r + dy >= y; r--) for (i = x; i <= x1; i++) host_set(i, r, scr_host_pixel(i, r + dy));
+        for (r = y; r < y - dy; r++) for (i = x; i <= x1; i++) host_set(i, r, bg);
+    }
 }
+
+void scr_scroll_direct(int x, int y, int w, int h, int dy) { scr_scroll_up(x, y, w, h, dy, 0); }
 
 int scr_planes(UBYTE **planes, int max, UWORD *bpr)
 {
