@@ -9,6 +9,7 @@
  * answer with its first encrypted frame (the pair-device IQ), which we decrypt with the transport
  * keys. Host only, network required: make wa-probe GAP=30. No pairing is completed; the
  * ClientPayload is a throwaway registration payload from tools/watimeout -dump-payload.
+ * TLS_CACHE=1: prime the certificate cache on a first connection, the real one must hit it (chain skipped).
  * TLS_HOLD=<seconds>: hold our TLS Finished that long after the server flight and report whether the server closes
  * (measured 2026-11-27: close_notify after 60.0 s; 50 s accepted).
  *
@@ -194,7 +195,7 @@ int main(int argc, char **argv)
     static uint8_t cstatic_ct[48], payload_ct[1024], finish[2048], plain[65536];
     uint32_t server_static_ct_len = 0, cert_ct_len = 0, n, ladders = 0;
     const uint8_t *p, *end, *d; uint32_t f, wire, l; uint64_t v;
-    noise_hs hs; noise_transport tr; heartbeat hb; tls13_keypair kp;
+    noise_hs hs; noise_transport tr; heartbeat hb; tls13_keypair kp; static x509_cache cache;
     hmac_drbg rng;
     x509_cert root;
     char nowstr[16];
@@ -234,10 +235,27 @@ int main(int argc, char **argv)
         if (connect(fd, ai->ai_addr, ai->ai_addrlen) != 0) { printf("connect failed\n"); return 1; }
         logf_("tcp: connected to web.whatsapp.com:443 (%s)", argc > 2 ? argv[2] : "resolved");
 
+        /* TLS_CACHE=1: a first connection fills the certificate cache (full chain verification), then the real one
+         * must hit it and skip the chain - as a second A500 session would after storing the 36 bytes in ENVARC: */
+        if (getenv("TLS_CACHE")) {
+            if (!tls13_client_start(&t, "web.whatsapp.com", root.n, root.n_len, root.e, nowstr, &rng)) { printf("tls start failed\n"); return 1; }
+            tls13_set_cert_cache(&t, &cache);
+            if (!pump(TLS13_ST_CONNECTED, 0, 20) || !flush_tls()) { printf("RESULT: TLS handshake (cache priming) failed\n"); return 1; }
+            logf_("tls: priming connection: %d certificates verified, leaf fingerprint cached (cert_cached %d)", t.chain_len, t.cert_cached);
+            close(fd);
+            fd = socket(ai->ai_family, SOCK_STREAM, 0);
+            if (connect(fd, ai->ai_addr, ai->ai_addrlen) != 0) { printf("connect failed\n"); return 1; }
+            logf_("tcp: second connection");
+        }
         /* TLS 1.3 with our own client, X25519 key pair precomputed (as the A500 does it), root pinned to the G2 key */
         if (!tls13_keypair_generate(&kp, &rng)) { printf("keypair failed\n"); return 1; }
         if (!tls13_client_start_kp(&t, "web.whatsapp.com", root.n, root.n_len, root.e, nowstr, &rng, &kp)) { printf("tls start failed\n"); return 1; }
+        if (getenv("TLS_CACHE")) tls13_set_cert_cache(&t, &cache);
         if (!pump(TLS13_ST_CONNECTED, 0, 20)) { printf("RESULT: TLS handshake failed\n"); return 1; }
+        if (getenv("TLS_CACHE")) {
+            logf_("tls: certificate cache %s on the second connection", t.cert_cached ? "HIT - chain verification skipped, CertificateVerify checked" : "MISS (different leaf?)");
+            if (!t.cert_cached) { printf("RESULT: certificate cache missed\n"); return 1; }
+        }
         if (getenv("TLS_HOLD")) {
             /* timeout measurement: our Finished sits in t.out; hold it and watch whether the server closes the socket.
              * pump() flushed t.out before reading, so CONNECTED is reached with the Finished record still unsent only
@@ -257,7 +275,7 @@ int main(int argc, char **argv)
             logf_("tls: server still silent after %.1f s, sending our Finished now", (now_ms() - start) / 1000.0);
         }
         if (!flush_tls()) { printf("RESULT: send failed\n"); return 1; }
-        logf_("tls: TLS 1.3 TLS_AES_128_GCM_SHA256 / X25519 connected, %d certificates verified against the pinned G2 key, RSA-PSS CertificateVerify and Finished verified", t.chain_len);
+        logf_("tls: TLS 1.3 TLS_AES_128_GCM_SHA256 / X25519 connected, %d certificates %s the pinned G2 key, RSA-PSS CertificateVerify and Finished verified", t.chain_len, t.cert_cached ? "accepted from the cache under" : "verified against");
     }
 
     /* WebSocket upgrade */

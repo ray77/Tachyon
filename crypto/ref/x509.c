@@ -1,4 +1,5 @@
 #include "x509.h"
+#include "sha256.h"
 
 /* ---- DER reader ------------------------------------------------------------- */
 typedef struct { const uint8_t *p; uint32_t len; } der;
@@ -190,6 +191,7 @@ int x509_match_host(const x509_cert *c, const char *host)
 }
 
 static int str_le(const char *a, const char *b) { int i; for (i = 0; i < 15; i++) { if (a[i] < b[i]) return 1; if (a[i] > b[i]) return 0; } return 1; }
+int x509_valid_at(const x509_cert *c, const char *now) { return !now || (str_le(c->not_before, now) && str_le(now, c->not_after)); }
 
 int x509_verify_chain(const x509_cert *certs, int count, const uint8_t *root_n, uint32_t root_n_len, uint32_t root_e,
                       const char *host, const char *now)
@@ -204,7 +206,7 @@ int x509_verify_chain(const x509_cert *certs, int count, const uint8_t *root_n, 
          * not know) ends the chain without its own signature being checked; the leaf is never the anchor */
         if (i > 0 && c->n_len == root_n_len && c->e == root_e && mem_eq(c->n, root_n, root_n_len)) break;
         if (!c->sig_sha256_rsa) return 0;
-        if (now && !(str_le(c->not_before, now) && str_le(now, c->not_after))) return 0;
+        if (!x509_valid_at(c, now)) return 0;
         /* One RSA verification per certificate (each costs ~9.6 s on the 68000): a certificate whose issuer
          * is the next one in the chain is checked under that issuer's key; the last certificate, or one whose
          * issuer carries the pinned key, is checked under the pinned key, which completes the chain. Anything
@@ -223,4 +225,38 @@ int x509_verify_chain(const x509_cert *certs, int count, const uint8_t *root_n, 
         }
     }
     return x509_match_host(&certs[0], host);
+}
+
+/* ---- certificate cache ------------------------------------------------------------- */
+static void u32_be(uint8_t b[4], uint32_t v) { b[0] = (uint8_t)(v >> 24); b[1] = (uint8_t)(v >> 16); b[2] = (uint8_t)(v >> 8); b[3] = (uint8_t)v; }
+
+void x509_cache_fingerprint(uint8_t fp[32], const uint8_t *root_n, uint32_t root_n_len, uint32_t root_e,
+                            const char *host, const uint8_t *leaf_der, uint32_t leaf_len)
+{
+    sha256_ctx h; uint8_t b[4]; uint32_t hl = 0;
+    while (host[hl]) hl++;
+    sha256_init(&h);
+    sha256_update(&h, (const uint8_t *)"WhatsA500 x509 cache v1", 23);  /* every field is length-prefixed: no boundary ambiguity */
+    u32_be(b, root_n_len); sha256_update(&h, b, 4); sha256_update(&h, root_n, root_n_len);
+    u32_be(b, root_e); sha256_update(&h, b, 4);
+    u32_be(b, hl); sha256_update(&h, b, 4); sha256_update(&h, (const uint8_t *)host, hl);
+    u32_be(b, leaf_len); sha256_update(&h, b, 4); sha256_update(&h, leaf_der, leaf_len);
+    sha256_final(&h, fp);
+}
+
+int x509_cache_match(const x509_cache *c, const uint8_t *root_n, uint32_t root_n_len, uint32_t root_e,
+                     const char *host, const uint8_t *leaf_der, uint32_t leaf_len)
+{
+    uint8_t fp[32]; uint32_t i, diff = 0;
+    if (!c || !c->valid) return 0;
+    x509_cache_fingerprint(fp, root_n, root_n_len, root_e, host, leaf_der, leaf_len);
+    for (i = 0; i < 32; i++) diff |= fp[i] ^ c->fp[i];
+    return diff == 0;
+}
+
+void x509_cache_store(x509_cache *c, const uint8_t *root_n, uint32_t root_n_len, uint32_t root_e,
+                      const char *host, const uint8_t *leaf_der, uint32_t leaf_len)
+{
+    x509_cache_fingerprint(c->fp, root_n, root_n_len, root_e, host, leaf_der, leaf_len);
+    c->valid = 1;
 }

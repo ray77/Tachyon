@@ -174,6 +174,8 @@ int tls13_client_start_kp(tls13 *t, const char *host, const uint8_t *root_n, uin
     return t13_write_handshake(t, 1, ch, p);
 }
 
+void tls13_set_cert_cache(tls13 *t, x509_cache *cache) { t->cache = cache; t->cert_cached = 0; }
+
 int tls13_client_start(tls13 *t, const char *host, const uint8_t *root_n, uint32_t root_n_len, uint32_t root_e,
                        const char *now, hmac_drbg *rng)
 {
@@ -288,7 +290,15 @@ static int t13_on_certificate(tls13 *t, const uint8_t *m, uint32_t mlen)
         p += el;
     }
     if (p != end || t->chain_len == 0) return t13_fail(t, T13E_CERT_PARSE);
-    if (!x509_verify_chain(t->chain, t->chain_len, t->root_n, t->root_n_len, t->root_e, t->host, t->now)) return t13_fail(t, T13E_CERT_CHAIN);
+    if (x509_cache_match(t->cache, t->root_n, t->root_n_len, t->root_e, t->host, t->chain[0].der, t->chain[0].len)) {
+        /* this exact leaf was verified against this root for this host before: skip the RSA chain verification,
+         * keep the cheap checks (clock, host name); CertificateVerify below still proves possession of the key */
+        if (!x509_valid_at(&t->chain[0], t->now) || !x509_match_host(&t->chain[0], t->host)) return t13_fail(t, T13E_CERT_CHAIN);
+        t->cert_cached = 1;
+    } else {
+        if (!x509_verify_chain(t->chain, t->chain_len, t->root_n, t->root_n_len, t->root_e, t->host, t->now)) return t13_fail(t, T13E_CERT_CHAIN);
+        if (t->cache) x509_cache_store(t->cache, t->root_n, t->root_n_len, t->root_e, t->host, t->chain[0].der, t->chain[0].len);
+    }
     if (!rsa_pub_set(&t->server_key, t->chain[0].n, t->chain[0].n_len, t->chain[0].e)) return t13_fail(t, T13E_RSA);
     sha256_update(&t->transcript, m, mlen);
     t->state = TLS13_ST_WAIT_CV;

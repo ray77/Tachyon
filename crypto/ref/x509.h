@@ -36,5 +36,22 @@ int x509_match_host(const x509_cert *c, const char *host);
  * not verified, only skipped). now may be 0 (no clock: validity not checked, see docs/PROTOCOL.md). */
 int x509_verify_chain(const x509_cert *certs, int count, const uint8_t *root_n, uint32_t root_n_len, uint32_t root_e,
                       const char *host, const char *now);
+/* 1 if `now` ("YYYYMMDDHHMMSSZ") lies within the validity period; now == 0 (no clock) counts as valid */
+int x509_valid_at(const x509_cert *c, const char *now);
+
+/* Certificate cache (docs/PROTOCOL.md section 7): one entry is SHA-256 over the pinned root key, the host name
+ * and the leaf certificate's DER. A client presented with a leaf whose fingerprint matches may skip the chain
+ * verification (two RSA-2048 operations, 19.5 s on the 68000): exactly this leaf was verified against exactly this
+ * root for exactly this host before. The cheap checks stay on every connection - validity period against the clock,
+ * host name against the SAN - and so does the CertificateVerify signature, which is what proves the server holds
+ * the leaf's private key now. 36 bytes, meant to be stored (ENVARC: on the Amiga) and refreshed on each full verify. */
+typedef struct { uint8_t fp[32]; int valid; } x509_cache;
+void x509_cache_fingerprint(uint8_t fp[32], const uint8_t *root_n, uint32_t root_n_len, uint32_t root_e,
+                            const char *host, const uint8_t *leaf_der, uint32_t leaf_len);
+/* 1 if the cache holds exactly this (root key, host, leaf); constant-time compare */
+int  x509_cache_match(const x509_cache *c, const uint8_t *root_n, uint32_t root_n_len, uint32_t root_e,
+                      const char *host, const uint8_t *leaf_der, uint32_t leaf_len);
+void x509_cache_store(x509_cache *c, const uint8_t *root_n, uint32_t root_n_len, uint32_t root_e,
+                      const char *host, const uint8_t *leaf_der, uint32_t leaf_len);
 
 #endif

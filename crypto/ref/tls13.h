@@ -65,6 +65,8 @@ typedef struct {
     /* server certificate chain (points into hs while the Certificate message is processed; kept for diagnostics) */
     x509_cert chain[4]; int chain_len;
     rsa_pub server_key;
+    /* optional certificate cache (x509.h); cert_cached = 1 when the chain verification was skipped on a hit */
+    x509_cache *cache; int cert_cached;
 } tls13;
 
 /* Fresh X25519 key pair from the DRBG (fixed-base comb; can run long before the connection). */
@@ -75,6 +77,9 @@ int  tls13_client_start_kp(tls13 *t, const char *host, const uint8_t *root_n, ui
 /* Same, generating the key pair now (same shape as tls12_client_start). */
 int  tls13_client_start(tls13 *t, const char *host, const uint8_t *root_n, uint32_t root_n_len, uint32_t root_e,
                         const char *now, hmac_drbg *rng);
+/* Attach a certificate cache (after tls13_client_start*, which clears the struct). On a hit the chain verification
+ * is skipped (t->cert_cached = 1); after a full verification the leaf is stored in the cache. 0 detaches. */
+void tls13_set_cert_cache(tls13 *t, x509_cache *cache);
 /* Feed bytes from the network. Returns 0 on fatal error (t->error set). Output to send accumulates in
  * t->out (caller sends and resets out_len); decrypted application data lands in t->app. */
 int  tls13_input(tls13 *t, const uint8_t *data, uint32_t len);

@@ -624,6 +624,24 @@ int main(void)
         out(r ? "PASS " : "FAIL "); out("tls 1.3 client handshake replay reaches CONNECTED\n"); ok &= r;
         if (!r) { out("  state "); out_dec((ULONG)tl13.state); out(" error "); out(tls13_errstr(tl13.error)); out("\n"); }
         report("tls 1.3 client handshake (X25519 + 1 cert verify + RSA-PSS verify + HKDF + GCM)", t1 - t0, 1);
+
+        /* same session again with the certificate cache primed by the run above: the chain verification
+         * (rsa_pub_set + public op) is skipped, CertificateVerify is still checked */
+        {
+            static x509_cache cache;
+            x509_cache_store(&cache, sc13.n, sc13.n_len, sc13.e, "tls-test.localhost", tv13_cert, sizeof tv13_cert);
+            rng13.instantiated = 0; drbg_instantiate(&rng13, tv13_seed, 64);
+            r = tls13_keypair_generate(&kp13, &rng13);
+            t0 = ticks_now();
+            r &= tls13_client_start_kp(&tl13, "tls-test.localhost", sc13.n, sc13.n_len, sc13.e, 0, &rng13, &kp13);
+            tls13_set_cert_cache(&tl13, &cache);
+            tl13.out_len = 0;
+            r &= tls13_input(&tl13, tv13_server, sizeof tv13_server);
+            t1 = ticks_now();
+            r &= tl13.state == TLS13_ST_CONNECTED && tl13.cert_cached == 1;
+            out(r ? "PASS " : "FAIL "); out("tls 1.3 handshake replay with certificate cache hit reaches CONNECTED\n"); ok &= r;
+            report("tls 1.3 client handshake, certificate cached (X25519 + RSA-PSS verify + HKDF + GCM)", t1 - t0, 1);
+        }
     }
 
     blitter_bench();

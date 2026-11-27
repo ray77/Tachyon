@@ -56,6 +56,7 @@ int main(int argc, char **argv)
     static tls13 t;
     static x509_cert sc;
     static tls13_keypair kp;
+    static x509_cache cache;
     hmac_drbg rng;
     uint32_t derlen;
     int fd, ok;
@@ -73,10 +74,12 @@ int main(int argc, char **argv)
     fd = dial(port);
     result(tls13_keypair_generate(&kp, &rng), "X25519 key pair precomputed");
     ok = tls13_client_start_kp(&t, "tls-test.localhost", sc.n, sc.n_len, sc.e, 0, &rng, &kp);
+    tls13_set_cert_cache(&t, &cache);                       /* empty: full verification, then the leaf is stored */
     result(ok && t.out_len > 0, "ClientHello built");
     ok = pump(fd, &t, connected);
-    printf("  state=%d error=%s chain=%d\n", t.state, tls13_errstr(t.error), t.chain_len);
+    printf("  state=%d error=%s chain=%d cached=%d\n", t.state, tls13_errstr(t.error), t.chain_len, t.cert_cached);
     result(ok, "handshake completes (X25519, chain + RSA-PSS CertificateVerify verified, server Finished verified)");
+    result(ok && !t.cert_cached && cache.valid, "empty certificate cache: chain verified, leaf fingerprint stored");
     recording = 0;
     if (ok) {
         static const uint8_t msg[] = "hello from the amiga side";
@@ -126,12 +129,15 @@ int main(int argc, char **argv)
         close(fd);
     }
 
-    /* ---- connection 3: 1-byte reads exercise record and handshake reassembly ---- */
+    /* ---- connection 3: 1-byte reads exercise record and handshake reassembly; the certificate cache hits ---- */
     {
         chunk = 1;
         fd = dial(port);
-        ok = tls13_client_start(&t, "tls-test.localhost", sc.n, sc.n_len, sc.e, 0, &rng) && pump(fd, &t, connected);
+        ok = tls13_client_start(&t, "tls-test.localhost", sc.n, sc.n_len, sc.e, 0, &rng);
+        tls13_set_cert_cache(&t, &cache);
+        ok = ok && pump(fd, &t, connected);
         result(ok, "handshake completes with 1-byte reads");
+        result(ok && t.cert_cached == 1, "certificate cache hit: chain verification skipped, CertificateVerify still checked");
         if (ok) {
             static const uint8_t msg[] = "bytewise";
             ok = tls13_send(&t, msg, 8) == 8 && pump(fd, &t, have_app);
@@ -139,6 +145,30 @@ int main(int argc, char **argv)
         }
         close(fd);
         chunk = 4096;
+    }
+
+    /* ---- connection 4: same leaf, different host name (also in the SAN): the fingerprint binds the host -> miss ---- */
+    {
+        x509_cache before = cache;
+        fd = dial(port);
+        ok = tls13_client_start(&t, "a.test.localhost", sc.n, sc.n_len, sc.e, 0, &rng);
+        tls13_set_cert_cache(&t, &cache);
+        ok = ok && pump(fd, &t, connected);
+        result(ok && t.cert_cached == 0, "cache miss for another host: full chain verification instead");
+        result(cache.valid && memcmp(before.fp, cache.fp, 32) != 0, "cache now holds the new (root, host, leaf) entry");
+        close(fd);
+    }
+
+    /* ---- connection 5: cache hit, but the clock says the leaf has expired: rejected before any key is derived ---- */
+    {
+        fd = dial(port);
+        ok = tls13_client_start(&t, "a.test.localhost", sc.n, sc.n_len, sc.e, "20991231235959Z", &rng);
+        tls13_set_cert_cache(&t, &cache);
+        ok = ok && !pump(fd, &t, connected);
+        printf("  state=%d error=%s cached=%d\n", t.state, tls13_errstr(t.error), t.cert_cached);
+        result(ok && t.state == TLS13_ST_ERROR && strcmp(tls13_errstr(t.error), "certificate chain does not verify") == 0 && !t.wr_encrypted,
+               "cached leaf outside its validity period rejected, nothing sent");
+        close(fd);
     }
 
     if (argc > 3) {
