@@ -19,13 +19,13 @@ VASMFLAGS := -quiet -Fhunkexe -kick1hunks -nowarn=62 -m68000
 
 HOST_CFLAGS := -O2 -Wall -Wextra -std=c99 -Icrypto/ref
 
-CRYPTO_SRC := crypto/ref/x25519_ref.c crypto/ref/sha512.c crypto/ref/ed25519.c crypto/ref/sha256.c crypto/ref/aes.c crypto/ref/drbg.c crypto/ref/noise.c crypto/ref/rsa.c crypto/ref/x509.c crypto/ref/tls12.c crypto/ref/sha1.c crypto/ref/ws.c crypto/ref/heartbeat.c crypto/ref/yield.c
+CRYPTO_SRC := crypto/ref/x25519_ref.c crypto/ref/sha512.c crypto/ref/ed25519.c crypto/ref/sha256.c crypto/ref/aes.c crypto/ref/drbg.c crypto/ref/noise.c crypto/ref/rsa.c crypto/ref/x509.c crypto/ref/tls12.c crypto/ref/tls13.c crypto/ref/sha1.c crypto/ref/ws.c crypto/ref/heartbeat.c crypto/ref/yield.c
 BENCH_SRC  := bench/x25519_bench.c
 # no linker available on macOS: one unity translation unit -> one .s -> vasm -Fhunkexe
 UNITY_SRC  := bench/amiga/unity.c
 AMIGA_ASM  := build/amiga/x25519bench.s
 
-.PHONY: all host-test amiga run vamos vectors clean tls-test ws-test heartbeat-test wa-probe wa-probe-tunnel run-blitaes run-blitgcm
+.PHONY: all host-test amiga run vamos vectors clean tls-test tls13-test ws-test heartbeat-test wa-probe wa-probe-tunnel run-blitaes run-blitgcm
 
 all: host-test amiga
 
@@ -64,6 +64,18 @@ tls-test: build/tls_test
 	go run ./tools/tlsserver -listen 127.0.0.1:4433 -cert build/tls_test_cert.der -n 1 > build/tlsserver.log 2>&1 & \
 	for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do grep -q READY build/tlsserver.log 2>/dev/null && break; sleep 0.5; done; \
 	./build/tls_test build/tls_test_cert.der 4433 tests/vectors/tls_session.bin; r=$$?; sleep 0.5; cat build/tlsserver.log; exit $$r
+
+build/tls13_test: tests/tls13_test.c $(CRYPTO_SRC) crypto/ref/tls13.h
+	@mkdir -p build
+	$(HOSTCC) $(HOST_CFLAGS) tests/tls13_test.c $(CRYPTO_SRC) -o $@
+
+# TLS 1.3 client (X25519, AES-128-GCM, RSA-PSS) against a loopback Go server (tools/tls13server), three connections;
+# the first is recorded to tests/vectors/tls13_session.bin for the Amiga replay (bench/tls13_vector.h)
+tls13-test: build/tls13_test
+	@mkdir -p build
+	go run ./tools/tls13server -listen 127.0.0.1:4436 -cert build/tls13_test_cert.der -n 3 > build/tls13server.log 2>&1 & \
+	for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do grep -q READY build/tls13server.log 2>/dev/null && break; sleep 0.5; done; \
+	./build/tls13_test build/tls13_test_cert.der 4436 tests/vectors/tls13_session.bin; r=$$?; sleep 0.5; cat build/tls13server.log; exit $$r
 
 build/ws_test: tests/ws_test.c crypto/ref/ws.c crypto/ref/ws.h crypto/ref/sha1.c crypto/ref/drbg.c crypto/ref/sha256.c
 	@mkdir -p build
@@ -126,10 +138,11 @@ host-test: build/x25519_test build/ed25519_test build/sha256_test build/aes_test
 	./build/aes_test tests/vectors/aesgcm_random.txt
 	./build/drbg_test tests/vectors/hmac_drbg.txt
 	./build/noise_test tests/vectors/noise_random.txt
-	./build/rsa_test tests/vectors/rsa_random.txt
+	./build/rsa_test tests/vectors/rsa_random.txt tests/vectors/rsa_pss.txt
 	./build/x509_test
 	./build/blitaes_test
 	./build/blitgcm_test
+	$(MAKE) tls13-test
 
 vectors:
 	go run ./tools/genvectors -mode x25519 -n 256 > tests/vectors/x25519_random.txt
@@ -137,6 +150,7 @@ vectors:
 	go run ./tools/genvectors -mode xeddsa -n 64 > tests/vectors/xeddsa_random.txt
 	go run ./tools/genvectors -mode sha512 -n 32 > tests/vectors/sha512_random.txt
 	go run ./tools/genvectors -mode aesgcm -n 64 > tests/vectors/aesgcm_random.txt
+	go run ./tools/genvectors -mode rsapss -n 24 > tests/vectors/rsa_pss.txt
 
 crypto/ref/ed25519_btable.h: tools/gen_btable.c crypto/ref/ed25519.c
 	$(HOSTCC) -O2 -Icrypto/ref tools/gen_btable.c crypto/ref/x25519_ref.c crypto/ref/sha512.c crypto/ref/ed25519.c crypto/ref/yield.c -o build/gen_btable

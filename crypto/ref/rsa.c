@@ -143,6 +143,47 @@ int rsa_verify_pkcs1_sha256(const rsa_pub *k, const uint8_t *msg, uint32_t msgle
     return diff == 0;
 }
 
+/* MGF1-SHA256: mask[0..masklen) = SHA256(seed || C(0)) || SHA256(seed || C(1)) || ... (RFC 8017 B.2.1) */
+static void mgf1_sha256(const uint8_t *seed, uint32_t seedlen, uint8_t *mask, uint32_t masklen)
+{
+    uint8_t c[4], h[32];
+    uint32_t counter = 0, done = 0, i;
+    sha256_ctx s;
+    while (done < masklen) {
+        uint32_t take = masklen - done < 32 ? masklen - done : 32;
+        c[0] = (uint8_t)(counter >> 24); c[1] = (uint8_t)(counter >> 16); c[2] = (uint8_t)(counter >> 8); c[3] = (uint8_t)counter;
+        sha256_init(&s); sha256_update(&s, seed, seedlen); sha256_update(&s, c, 4); sha256_final(&s, h);
+        for (i = 0; i < take; i++) mask[done + i] = h[i];
+        done += take; counter++;
+    }
+}
+
+/* EMSA-PSS-VERIFY (RFC 8017 9.1.2) with hLen = sLen = 32. rsa_pub_set requires the modulus to have its top
+ * bit set, so modBits = 16*limbs, emBits = modBits - 1, emLen = 2*limbs and exactly one leading bit of the
+ * encoded message is zero. Every byte of EM is checked, no early exit on a mismatch. */
+int rsa_verify_pss_sha256(const rsa_pub *k, const uint8_t *msg, uint32_t msglen, const uint8_t *sig, uint32_t siglen)
+{
+    uint8_t em[2 * RSA_MAX_LIMBS], db[2 * RSA_MAX_LIMBS], mhash[32], hprime[32], zero8[8] = { 0 };
+    uint32_t emlen = (uint32_t)k->limbs * 2, dblen, i, diff = 0;
+    sha256_ctx s;
+    if (siglen != emlen || emlen < 32 + 32 + 2) return 0;
+    if (!rsa_public_op(k, sig, em)) return 0;
+    sha256(mhash, msg, msglen);
+    dblen = emlen - 32 - 1;                                   /* maskedDB || H || 0xbc */
+    diff |= em[emlen - 1] ^ 0xbc;
+    diff |= em[0] & 0x80;                                     /* the leading (8*emLen - emBits) = 1 bit must be zero */
+    mgf1_sha256(em + dblen, 32, db, dblen);                   /* dbMask from H */
+    for (i = 0; i < dblen; i++) db[i] ^= em[i];
+    db[0] &= 0x7f;
+    /* DB = PS (zeros) || 0x01 || salt */
+    for (i = 0; i < dblen - 32 - 1; i++) diff |= db[i];
+    diff |= db[dblen - 32 - 1] ^ 0x01;
+    /* H' = SHA256(00*8 || mHash || salt) */
+    sha256_init(&s); sha256_update(&s, zero8, 8); sha256_update(&s, mhash, 32); sha256_update(&s, db + dblen - 32, 32); sha256_final(&s, hprime);
+    for (i = 0; i < 32; i++) diff |= hprime[i] ^ em[dblen + i];
+    return diff == 0;
+}
+
 int rsa_encrypt_pkcs1(const rsa_pub *k, const uint8_t *msg, uint32_t msglen, const uint8_t *pad, uint8_t *out_be)
 {
     uint8_t em[2 * RSA_MAX_LIMBS];

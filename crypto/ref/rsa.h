@@ -26,6 +26,9 @@ int  rsa_pub_set(rsa_pub *k, const uint8_t *n_be, uint32_t len, uint32_t e);
 int  rsa_public_op(const rsa_pub *k, const uint8_t *in_be, uint8_t *out_be);
 /* PKCS#1 v1.5 signature over SHA-256(msg): 1 if valid */
 int  rsa_verify_pkcs1_sha256(const rsa_pub *k, const uint8_t *msg, uint32_t msglen, const uint8_t *sig, uint32_t siglen);
+/* RSASSA-PSS (RFC 8017 9.1.2) over SHA-256(msg), MGF1-SHA256, salt length 32 (TLS 1.3 rsa_pss_rsae_sha256
+ * CertificateVerify): 1 if valid */
+int  rsa_verify_pss_sha256(const rsa_pub *k, const uint8_t *msg, uint32_t msglen, const uint8_t *sig, uint32_t siglen);
 /* PKCS#1 v1.5 type-2 encryption; pad must hold limbs*2 - 3 - msglen random nonzero bytes supplied by the caller */
 int  rsa_encrypt_pkcs1(const rsa_pub *k, const uint8_t *msg, uint32_t msglen, const uint8_t *pad, uint8_t *out_be);
 

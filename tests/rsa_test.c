@@ -38,6 +38,33 @@ int main(int argc, char **argv)
     fclose(f);
     printf("%s rsa-2048 Go vectors: %d keys, %d mismatches\n", bad ? "FAIL" : "PASS", n, bad);
     if (bad || n == 0) failures++;
+
+    /* RSASSA-PSS (SHA-256, MGF1-SHA256, salt 32 = TLS 1.3 rsa_pss_rsae_sha256): tools/genvectors -mode rsapss */
+    f = fopen(argc > 2 ? argv[2] : "tests/vectors/rsa_pss.txt", "r");
+    if (!f) { printf("FAIL cannot open PSS vector file\n"); return 1; }
+    n = bad = 0;
+    while (fgets(line, sizeof line, f)) {
+        char *tok[5]; char *p = line; int i;
+        static uint8_t nn[256], msg[1024], sig[256];
+        static rsa_pub k;
+        int msgl, valid;
+        uint32_t e;
+        for (i = 0; i < 5; i++) { tok[i] = p; p = strpbrk(p, " \n"); if (!p) { i++; break; } *p++ = 0; }
+        if (i < 5) break;
+        unhex(nn, tok[0], 256); e = (uint32_t)strtoul(tok[1], 0, 16); msgl = unhex(msg, tok[2], 1024); unhex(sig, tok[3], 256);
+        valid = atoi(tok[4]);
+        if (!rsa_pub_set(&k, nn, 256, e)) { printf("  pss vector %d: rsa_pub_set failed\n", n); bad++; n++; continue; }
+        if (rsa_verify_pss_sha256(&k, msg, (uint32_t)msgl, sig, 256) != valid) { printf("  pss vector %d: verify (expected %d)\n", n, valid); bad++; }
+        msg[0] ^= 1;
+        if (valid && rsa_verify_pss_sha256(&k, msg, (uint32_t)msgl, sig, 256)) { printf("  pss vector %d: accepts modified message\n", n); bad++; }
+        msg[0] ^= 1; sig[255] ^= 1;
+        if (valid && rsa_verify_pss_sha256(&k, msg, (uint32_t)msgl, sig, 256)) { printf("  pss vector %d: accepts modified signature\n", n); bad++; }
+        if (rsa_verify_pss_sha256(&k, msg, (uint32_t)msgl, sig, 255)) { printf("  pss vector %d: accepts short signature\n", n); bad++; }
+        n++;
+    }
+    fclose(f);
+    printf("%s rsa-pss-sha256 Go vectors: %d keys, %d mismatches\n", bad ? "FAIL" : "PASS", n, bad);
+    if (bad || n == 0) failures++;
     printf(failures ? "\n%d FAILURE(S)\n" : "\nALL PASSED\n", failures);
     return failures ? 1 : 0;
 }

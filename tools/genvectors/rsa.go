@@ -35,3 +35,25 @@ func rsaVectors(n int) {
 		fmt.Printf("%0512x %x %x %x %d %0512x %0512x\n", key.N, key.E, msg, sig, valid, x, xe)
 	}
 }
+
+// RSASSA-PSS vectors (SHA-256, MGF1-SHA256, salt length 32 = TLS 1.3 rsa_pss_rsae_sha256).
+// Line: n e msg sig valid
+func rsaPssVectors(n int) {
+	for i := 0; i < n; i++ {
+		key, err := rsa.GenerateKey(rand.Reader, 2048)
+		must(err)
+		msg := randBytes(10 + i*23%400)
+		h := sha256.Sum256(msg)
+		sig, err := rsa.SignPSS(rand.Reader, key, crypto.SHA256, h[:], &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash})
+		must(err)
+		valid := 1
+		if i%4 == 3 {
+			corrupt(sig, i)
+			valid = 0
+			if rsa.VerifyPSS(&key.PublicKey, crypto.SHA256, h[:], sig, &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash}) == nil {
+				valid = 1
+			}
+		}
+		fmt.Printf("%0512x %x %x %x %d\n", key.N, key.E, msg, sig, valid)
+	}
+}
