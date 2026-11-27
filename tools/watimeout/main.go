@@ -1,0 +1,271 @@
+// watimeout probes WhatsApp's server-side timeouts for the two gaps a slow client
+// (the A500) needs: the TLS second flight (ClientKeyExchange/Finished after the
+// server's hello) and the Noise ClientFinish after the ServerHello. It performs a
+// real handshake with whatsmeow's socket/noise code and a fresh registration
+// payload (no pairing is completed; the connection ends after the first frame),
+// but holds the client's message for -tls-delay / -noise-delay seconds while
+// watching whether the server closes the connection. With a long delay the
+// close time is the server's timeout; a run just below it confirms the handshake
+// still succeeds.
+//
+//	go run ./tools/watimeout -noise-delay 300s                      # when does the server give up? (10.0 s)
+//	go run ./tools/watimeout -noise-delay 60s -ping 2s -pingop 10   # does a pong heartbeat keep it alive? (yes)
+//	go run ./tools/watimeout -tls-delay 300s -tls12rsa              # same for the TLS flight, A500 path (60.0 s)
+//
+// Findings 2026-11-27 (docs/PROTOCOL.md section 8): 10.0 s idle timeout on the WebSocket, reset by
+// any frame; unsolicited pong frames (opcode 10) are invisible to the WA layer and keep the handshake
+// valid for at least 120 s; ping frames (opcode 9) break the handshake. TLS second flight: 60.0 s.
+package main
+
+import (
+	"context"
+	"crypto/tls"
+	"errors"
+	"flag"
+	"fmt"
+	"math/rand"
+	"net"
+	"net/http"
+	"os"
+	"sync"
+	"time"
+
+	"github.com/coder/websocket"
+	"go.mau.fi/libsignal/ecc"
+	"google.golang.org/protobuf/proto"
+
+	"go.mau.fi/whatsmeow/proto/waWa6"
+	"go.mau.fi/whatsmeow/socket"
+	"go.mau.fi/whatsmeow/store"
+	"go.mau.fi/whatsmeow/util/keys"
+	waLog "go.mau.fi/whatsmeow/util/log"
+)
+
+var t0 = time.Now()
+var tlsConn *tls.Conn
+
+// wsPing writes a masked WebSocket ping frame (opcode 9, empty payload) straight onto the TLS
+// connection; safe while the client otherwise writes nothing, the library answers pongs itself.
+var pingOpcode = 9
+
+func wsPing() error {
+	_, err := tlsConn.Write([]byte{byte(0x80 | pingOpcode), 0x80, 0x12, 0x34, 0x56, 0x78})
+	return err
+}
+
+func stamp() string { return fmt.Sprintf("+%6.1fs", time.Since(t0).Seconds()) }
+func logf(format string, a ...any) {
+	fmt.Fprintf(os.Stdout, "%s  %s\n", stamp(), fmt.Sprintf(format, a...))
+}
+
+// delayConn holds the second Write (the client's second TLS flight) for `hold` and, while
+// holding, watches the socket for a server close or alert (the server sends nothing else
+// before our flight, so a read during the hold only ever sees a close).
+type delayConn struct {
+	net.Conn
+	hold   time.Duration
+	writes int
+	mu     sync.Mutex
+}
+
+func (d *delayConn) Write(p []byte) (int, error) {
+	d.mu.Lock()
+	d.writes++
+	n := d.writes
+	d.mu.Unlock()
+	if n == 2 && d.hold > 0 {
+		logf("tls: server flight received, holding our second flight for %s", d.hold)
+		start := time.Now()
+		_ = d.Conn.SetReadDeadline(time.Now().Add(d.hold))
+		buf := make([]byte, 64)
+		rn, err := d.Conn.Read(buf)
+		_ = d.Conn.SetReadDeadline(time.Time{})
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
+			logf("tls: server still silent after %.1f s, sending our flight now", time.Since(start).Seconds())
+		} else {
+			logf("tls: SERVER CLOSED after %.1f s of silence (read %d bytes, err %v)", time.Since(start).Seconds(), rn, err)
+			if rn > 0 {
+				logf("tls: bytes: % x", buf[:rn])
+			}
+		}
+	}
+	return d.Conn.Write(p)
+}
+
+func main() {
+	tlsDelay := flag.Duration("tls-delay", 0, "hold the client's second TLS flight this long")
+	noiseDelay := flag.Duration("noise-delay", 0, "hold the Noise ClientFinish this long after the ServerHello")
+	tls12rsa := flag.Bool("tls12rsa", false, "TLS 1.2 with RSA key transport (the A500 path) instead of the default TLS 1.3")
+	wait := flag.Duration("wait", 20*time.Second, "how long to wait for the first encrypted server frame after ClientFinish")
+	helloDelay := flag.Duration("hello-delay", 0, "wait this long after the WebSocket upgrade before sending the ClientHello")
+	flag.IntVar(&pingOpcode, "pingop", 9, "WebSocket opcode for the keepalive frame: 9 = ping, 10 = unsolicited pong")
+	ping := flag.Duration("ping", 0, "during the Noise hold, send a WebSocket ping frame this often (does traffic reset the timer?)")
+	flag.Parse()
+
+	tlsCfg := &tls.Config{ServerName: "web.whatsapp.com"}
+	if *tls12rsa {
+		tlsCfg.MinVersion = tls.VersionTLS12
+		tlsCfg.MaxVersion = tls.VersionTLS12
+		tlsCfg.CipherSuites = []uint16{tls.TLS_RSA_WITH_AES_128_GCM_SHA256}
+	}
+	dialTLS := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		raw, err := (&net.Dialer{Timeout: 20 * time.Second}).DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		logf("tcp: connected to %s", raw.RemoteAddr())
+		c := tls.Client(&delayConn{Conn: raw, hold: *tlsDelay}, tlsCfg)
+		if err := c.HandshakeContext(ctx); err != nil {
+			raw.Close()
+			return nil, fmt.Errorf("tls handshake: %w", err)
+		}
+		tlsConn = c
+		st := c.ConnectionState()
+		logf("tls: handshake OK, version 0x%04x suite %s", st.Version, tls.CipherSuiteName(st.CipherSuite))
+		return c, nil
+	}
+	httpClient := &http.Client{Transport: &http.Transport{DialTLSContext: dialTLS, ForceAttemptHTTP2: false}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), *tlsDelay+*noiseDelay+5*time.Minute)
+	defer cancel()
+	fs := socket.NewFrameSocket(waLog.Stdout("ws", "WARN", true), httpClient)
+	if err := fs.Connect(ctx); err != nil {
+		logf("websocket connect failed: %v", err)
+		os.Exit(2)
+	}
+	logf("ws: connected %s", socket.URL)
+	if *helloDelay > 0 {
+		logf("ws: holding ClientHello for %s", *helloDelay)
+		select {
+		case <-fs.Context().Done():
+			logf("ws: SERVER CLOSED before ClientHello")
+			fmt.Println("RESULT: server closed during hello-delay")
+			os.Exit(1)
+		case <-time.After(*helloDelay):
+			logf("ws: still connected, sending ClientHello")
+		}
+	}
+
+	// fresh device, as whatsmeow's sqlstore would create for a first pairing
+	dev := &store.Device{
+		Log:            waLog.Noop,
+		NoiseKey:       keys.NewKeyPair(),
+		IdentityKey:    keys.NewKeyPair(),
+		RegistrationID: rand.Uint32(),
+		AdvSecretKey:   make([]byte, 32),
+	}
+	dev.SignedPreKey = dev.IdentityKey.CreateSignedPreKey(1)
+	ephemeral := keys.NewKeyPair()
+
+	nh := socket.NewNoiseHandshake()
+	nh.Start(socket.NoiseStartPattern, fs.Header)
+	nh.Authenticate(ephemeral.Pub[:])
+	data, _ := proto.Marshal(&waWa6.HandshakeMessage{ClientHello: &waWa6.HandshakeMessage_ClientHello{Ephemeral: ephemeral.Pub[:]}})
+	if err := fs.SendFrame(data); err != nil {
+		logf("send ClientHello: %v", err)
+		os.Exit(2)
+	}
+	logf("noise: ClientHello sent")
+	var resp []byte
+	select {
+	case resp = <-fs.Frames:
+	case <-fs.Context().Done():
+		logf("noise: socket closed before ServerHello")
+		os.Exit(2)
+	case <-time.After(30 * time.Second):
+		logf("noise: no ServerHello within 30 s")
+		os.Exit(2)
+	}
+	tHello := time.Now()
+	logf("noise: ServerHello received (%d bytes)", len(resp))
+	var hs waWa6.HandshakeMessage
+	if err := proto.Unmarshal(resp, &hs); err != nil {
+		logf("unmarshal ServerHello: %v", err)
+		os.Exit(2)
+	}
+	serverEphemeral := hs.GetServerHello().GetEphemeral()
+	if len(serverEphemeral) != 32 {
+		logf("bad ServerHello")
+		os.Exit(2)
+	}
+
+	// --- the gap the A500 needs: 3 x X25519 + 2 x XEdDSA verify ---
+	if *noiseDelay > 0 {
+		logf("noise: holding ClientFinish for %s (ping every %s)", *noiseDelay, *ping)
+		deadline := time.After(*noiseDelay)
+		var tick <-chan time.Time
+		if *ping > 0 {
+			t := time.NewTicker(*ping)
+			defer t.Stop()
+			tick = t.C
+		}
+	hold:
+		for {
+			select {
+			case <-fs.Context().Done():
+				logf("noise: SERVER CLOSED %.1f s after ServerHello", time.Since(tHello).Seconds())
+				fmt.Println("RESULT: noise timeout <", fmt.Sprintf("%.1f s", time.Since(tHello).Seconds()))
+				os.Exit(1)
+			case <-tick:
+				if err := wsPing(); err != nil {
+					logf("noise: ping failed: %v", err)
+				} else {
+					logf("noise: ws frame opcode %d sent", pingOpcode)
+				}
+			case f := <-fs.Frames:
+				logf("noise: server sent a WA frame during the hold: %d bytes % x", len(f), f)
+			case <-deadline:
+				logf("noise: server still connected after %.1f s, finishing now", time.Since(tHello).Seconds())
+				break hold
+			}
+		}
+	}
+
+	nh.Authenticate(serverEphemeral)
+	must(nh.MixSharedSecretIntoKey(*ephemeral.Priv, [32]byte(serverEphemeral)))
+	staticDecrypted, err := nh.Decrypt(hs.GetServerHello().GetStatic())
+	must(err)
+	must(nh.MixSharedSecretIntoKey(*ephemeral.Priv, [32]byte(staticDecrypted)))
+	_, err = nh.Decrypt(hs.GetServerHello().GetPayload()) // certificate chain; whatsmeow verifies it here (2 x XEdDSA)
+	must(err)
+	encryptedPubkey := nh.Encrypt(dev.NoiseKey.Pub[:])
+	must(nh.MixSharedSecretIntoKey(*dev.NoiseKey.Priv, [32]byte(serverEphemeral)))
+	payloadBytes, _ := proto.Marshal(dev.GetClientPayload())
+	_ = ecc.DjbType
+	data, _ = proto.Marshal(&waWa6.HandshakeMessage{ClientFinish: &waWa6.HandshakeMessage_ClientFinish{
+		Static: encryptedPubkey, Payload: nh.Encrypt(payloadBytes)}})
+	if err := fs.SendFrame(data); err != nil {
+		logf("send ClientFinish: %v", err)
+		os.Exit(2)
+	}
+	tFinish := time.Now()
+	logf("noise: ClientFinish sent %.1f s after ServerHello", tFinish.Sub(tHello).Seconds())
+
+	frames := make(chan []byte, 8)
+	closed := make(chan struct{}, 1)
+	ns, err := nh.Finish(fs, func(ctx context.Context, b []byte) { frames <- b }, func(ctx context.Context, ns *socket.NoiseSocket, remote bool) { select { case closed <- struct{}{}: default: } })
+	must(err)
+	select {
+	case f := <-frames:
+		logf("noise: first encrypted server frame after %.2f s (%d bytes plaintext) -> handshake ACCEPTED", time.Since(tFinish).Seconds(), len(f))
+		fmt.Printf("RESULT: handshake accepted with tls-delay %s, noise-delay %s (total %.1f s after ServerHello)\n", *tlsDelay, *noiseDelay, tFinish.Sub(tHello).Seconds())
+	case <-closed:
+		logf("noise: server closed %.2f s after ClientFinish -> REJECTED", time.Since(tFinish).Seconds())
+		fmt.Printf("RESULT: handshake rejected (noise-delay %s)\n", *noiseDelay)
+		os.Exit(1)
+	case <-time.After(*wait):
+		logf("noise: no frame within %s -> treated as rejected", *wait)
+		fmt.Printf("RESULT: no server frame within %s (noise-delay %s)\n", *wait, *noiseDelay)
+		os.Exit(1)
+	}
+	ns.Stop(true, false)
+	_ = websocket.StatusNormalClosure
+}
+
+func must(err error) {
+	if err != nil {
+		logf("fatal: %v", err)
+		os.Exit(2)
+	}
+}

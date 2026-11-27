@@ -187,7 +187,7 @@ Zusätzlich Taktzyklen, Chip-/Fast-RAM-Spitzen, Stack, Blitter-Auslastung, Kopie
 ## Risiken und offene Fragen
 
 - Kein offiziell unterstütztes allgemeines WhatsApp-Client-Protokoll; Änderungen und Kontoeinschränkungen möglich.
-- 68000 könnte serverseitige Handshake-Zeitlimits überschreiten.
+- ~~68000 könnte serverseitige Handshake-Zeitlimits überschreiten.~~ Gemessen (docs/PROTOCOL.md Abschnitt 8): TLS 60 s, WebSocket-Leerlauf 10 s, per Pong-Herzschlag unbegrenzt verlängerbar (120 s geprüft). Der Herzschlag muss in die Feldarithmetik eingebaut werden.
 - Blitter-Setup und Speichertransfers könnten jeden Geschwindigkeitsvorteil aufheben.
 - 1,5 MiB RAM könnten für Synchronisation oder TLS nicht genügen.
 - Netzwerkstack und Kickstart 1.3 sind noch nicht auf Kompatibilität geprüft.

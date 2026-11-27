@@ -15,7 +15,7 @@ Asymmetrische Arbeit pro vollem TLS-1.3-Handshake auf dem Client: 1 × X25519 (S
 
 Option ohne Elliptische Kurven: TLS 1.2 mit RSA-Schlüsseltransport (nur RSA-Verschlüsselung mit e = 65537 und RSA-Signaturprüfungen, beides billig). Keine Forward Secrecy auf TLS-Ebene; die eigentliche Nutzlast ist ohnehin Noise-verschlüsselt. Als Rückfalloption dokumentiert, nicht als Standard.
 
-Zeitlimits: unbekannt. Typische Load-Balancer-Handshake-Timeouts liegen bei 10–60 s. Muss gemessen werden.
+Zeitlimits: **gemessen am 2026-11-27 (Abschnitt 8): 60,0 s** zwischen dem Server-Flight und unserem ClientKeyExchange/Finished (TLS 1.2 RSA). Der A500-Handshake (21 s, mit Zertifikatscache ≈ 2 s) passt.
 
 ## 2. Noise-Handshake `Noise_XX_25519_AESGCM_SHA256`
 
@@ -39,7 +39,7 @@ Client → Server   ClientFinish { enc(s), enc(payload) }
 - 3 DH-Operationen und 2 Signaturprüfungen liegen zwingend zwischen Empfang von ServerHello und Senden von ClientFinish. Die Reihenfolge (erst Zertifikat prüfen, dann eigenen Static-Key senden) ist Teil des Sicherheitsmodells und wird nicht verändert.
 - `ecc.VerifySignature` (libsignal `SignCurve25519.go`) wandelt den Montgomery-Schlüssel nach Edwards (eine Feldinversion) und führt eine Ed25519-Verifikation aus: eine Doppel-Skalarmultiplikation `[s]B − [h]A`. Mit vorberechneter Basispunkttabelle ≈ 1,5–2 X25519-Äquivalente, ohne ≈ 2,5–3.
 - Das Zwischenzertifikat ist durch den fest einkompilierten WA-Root-Key signiert und ändert sich selten → nach erster erfolgreicher Prüfung pinnen (Bytes + Gültigkeit), spart eine Verifikation pro Verbindung.
-- Clientseitiges Timeout in whatsmeow: 20 s auf die ServerHello (irrelevant für uns, da unsere Rechenzeit danach anfällt). **Serverseitiges Timeout ServerHello → ClientFinish: unbekannt, entscheidend, muss empirisch gemessen werden** (z. B. whatsmeow mit künstlicher Verzögerung vor ClientFinish).
+- Clientseitiges Timeout in whatsmeow: 20 s auf die ServerHello (irrelevant für uns, da unsere Rechenzeit danach anfällt). **Serverseitig (gemessen 2026-11-27, Abschnitt 8): 10,0 s Leerlauf schließen die Verbindung – aber unaufgeforderte WebSocket-Pong-Frames setzen den Timer zurück, der Handshake selbst hat keine Frist (120 s geprüft).**
 
 Rechnung mit heutigen 8,6 s/X25519: 3 × 8,6 + 2 Verifikationen à ≈ 17–25 s ≈ **60–75 s** online. Mit gepinntem Zwischenzertifikat ≈ 45–50 s. Das ist der kritische Pfad des Projekts.
 
@@ -93,7 +93,7 @@ Implementiert in `crypto/ref/noise.c`, geprüft gegen 24 Handshakes, die whatsme
 * Encrypt/Decrypt: IV = 8 Nullbyte ‖ BE32-Zähler, AD = h; danach MixHash(Chiffrat). Jeder MixKey setzt den Zähler zurück.
 * Finish: `write, read = HKDF(salt = ck, ikm = leer)`; der Client schreibt mit `write`, der Server dreht die Rollen. Transport: AES-256-GCM, IV-Zähler je Richtung, **kein AD**, Frame = 3-Byte-BE-Länge + Chiffrat.
 * **Transport ist WebSocket** (`wss://web.whatsapp.com/ws/chat`, Binärnachrichten) – für den A500 heißt das TLS + HTTP-Upgrade + WebSocket-Framing (Masking der Client-Frames, 4-Byte-XOR) vor der Noise-Schicht. Der WebSocket-Teil ist billig; TLS bleibt der teure Teil (siehe Abschnitt 1).
-* Kosten auf dem A500 (gemessen, Harness): 3 × X25519 + 6 × GCM-Schlüsselaufbau (je ≈ 100 ms, davon Tabellen) + HKDF ≈ 25 s **ohne** die beiden XEdDSA-Prüfungen der Zertifikatskette (2 × 9,7 s). Gesamt ≈ 45 s zwischen ServerHello und ClientFinish; whatsmeow selbst wartet 20 s auf das ServerHello, die serverseitige Frist für den ClientFinish ist unbekannt (Messung nur mit Zustimmung).
+* Kosten auf dem A500 (gemessen, Harness): 3 × X25519 + 6 × GCM-Schlüsselaufbau (je ≈ 100 ms, davon Tabellen) + HKDF ≈ 25 s **ohne** die beiden XEdDSA-Prüfungen der Zertifikatskette (2 × 9,7 s). Gesamt ≈ 45 s zwischen ServerHello und ClientFinish; der Server erlaubt das, solange alle ≤ 8 s ein WebSocket-Pong rausgeht (Abschnitt 8).
 
 ## 7. TLS-Pfad ohne elliptische Kurven – bestätigt (2026-11-26)
 
@@ -106,3 +106,22 @@ Offen: **Uhrzeit**. Ein A500 ohne RTC startet 1978; Gültigkeitsprüfung braucht
 ### TLS-1.2-Client implementiert (2026-11-26)
 
 `crypto/ref/tls12.c`: genau eine Suite, `TLS_RSA_WITH_AES_128_GCM_SHA256`; ClientHello mit SNI, signature_algorithms (rsa_pkcs1_sha256) und leerem renegotiation_info; Zertifikatskette → `x509_verify_chain` gegen gepinnten Wurzelschlüssel **vor** jeder Schlüsselableitung; Premaster per PKCS#1 v1.5 mit DRBG-Padding; PRF P_SHA256; Record-Layer AES-128-GCM mit explizitem Nonce = Sequenznummer. Keine Session-Tickets, kein Extended Master Secret (nicht angeboten), kein Renegotiation. Geprüft gegen Go `crypto/tls` als Server (`make tls-test`: Handshake, Echo über die 16-KiB-Record-Grenze, gefälschter Record wird abgewiesen). Die aufgezeichnete Session (`tests/vectors/tls_session.bin`, deterministischer DRBG-Seed) wird im Harness auf dem 68000 wiederabgespielt und erreicht CONNECTED; Zeit siehe docs/BENCHMARKS.md.
+
+## 8. Serverseitige Zeitlimits – gemessen (2026-11-27, `tools/watimeout`)
+
+Werkzeug: `go run ./tools/watimeout` führt den echten Handshake gegen `wss://web.whatsapp.com/ws/chat` (TLS mit Go, Noise mit whatsmeows `socket`-Paket, frischer Registrierungs-Payload wie beim ersten Pairing, kein Pairing abgeschlossen) und hält dabei eine Client-Nachricht künstlich zurück, während es mitliest, wann der Server schließt. `-tls-delay` hält die zweite TLS-Flight (ClientKeyExchange/Finished), `-noise-delay` den ClientFinish nach dem ServerHello, `-hello-delay` den ClientHello nach dem WebSocket-Upgrade, `-ping D -pingop 9|10` sendet währenddessen alle D Sekunden ein WebSocket-Ping- bzw. Pong-Frame. Ergebnis gilt als angenommen, wenn nach dem ClientFinish die erste verschlüsselte Server-Frame kommt (das `pair-device`-IQ, 0,2–0,3 s).
+
+| Lücke | Verhalten des Servers (14 Verbindungen, 57.144.245.32) |
+|---|---|
+| TLS: Server-Flight → unsere zweite Flight (TLS 1.2, `TLS_RSA_WITH_AES_128_GCM_SHA256`) | Verbindung geschlossen nach **60,0 s** Stille (EOF, kein Alert) |
+| WebSocket offen → ClientHello | geschlossen nach **10,0 s** |
+| ServerHello → ClientFinish, keine weiteren Frames | 8,0 s und 9,5 s **angenommen**, 12 s: geschlossen nach **10,0 s** (zweimal) |
+| dito, WebSocket-**Ping** (Opcode 9) alle 2 s | Verbindung bleibt offen, aber der Handshake wird **nicht** mehr angenommen – auch nicht bei 8 s. Der Server antwortet auf den Ping mit einem Datenframe, der WA-Rahmenzustand ist danach kaputt. Ping ist tabu. |
+| dito, unaufgefordertes WebSocket-**Pong** (Opcode 10, leer, maskiert) alle 2 s | 8 s, 12 s, **60 s, 120 s angenommen** |
+| dito, Pong alle 8 s | 30 s angenommen |
+
+Lesart: Es gibt kein Handshake-Zeitlimit, nur einen **Leerlauf-Timer von 10 s auf der WebSocket-Verbindung**, den jedes Frame zurücksetzt. Ein leeres Pong-Frame (RFC 6455 erlaubt unaufgeforderte Pongs als Herzschlag) ist für die WA-Schicht unsichtbar: 6 Byte auf der Leitung, als TLS-Record ≈ 35 Byte, kostet den A500 eine AES-GCM-Verschlüsselung von 6 Byte (≈ 3 ms). Der TLS-Timer (60 s) braucht keinen Herzschlag.
+
+Konsequenz für den A500: Die ≈ 45 s zwischen ServerHello und ClientFinish (3 × X25519, 2 × XEdDSA-Verify, mit gepinntem Zwischenzertifikat ≈ 35 s) sind **zulässig**, wenn die Feldarithmetik alle ≤ 8 s (sicherheitshalber alle 4 s) ein Pong-Frame absetzt – entweder aus einer CIA-Timer-Unterbrechung heraus (der TLS-Record-Schreibpfad muss dann unterbrechungsfest sein: eigener Sequenznummernzähler, kein gleichzeitiger Schreibzugriff des Hauptprogramms) oder kooperativ zwischen Feldoperationen (`fe16_mul` dauert 3,7 ms, eine X25519-Leiter prüft also z. B. alle 256 Multiplikationen die Zeit). Gleiches gilt für Pairing (`pair-device-sign`, ≈ 14 s) und die Signal-Sitzungen (X3DH ≈ 45–50 s): während jeder langen Rechnung läuft der Pong-Herzschlag, dazu nach dem Handshake die Protokoll-Keepalives (Abschnitt 3).
+
+Offen: Frist des Servers für `pair-device-sign` nach dem QR-Scan (braucht einen echten Scan, nicht automatisierbar), Verhalten der Mobil-Endpunkte (`g.whatsapp.net`, nicht unser Pfad), Verhalten über längere Zeit (die 120-s-Messung ist eine Stichprobe).
