@@ -53,4 +53,19 @@ int  noise_client_finish(noise_hs *n,
                          uint8_t client_static_ct_out[48], uint8_t *client_payload_ct_out,
                          noise_transport *t);
 
+/* Cache for a verified NoiseCertificate (docs/PROTOCOL.md section 6, "Zertifikatscache"): WhatsApp's intermediate
+ * certificate is stable (serial 3, signed by the root key), yet its XEdDSA verification costs ~11 s on the 68000.
+ * One entry is SHA-256 over the root public key, the certificate details and its signature (each length-prefixed),
+ * 32 bytes, meant to be stored (ENVARC: on the Amiga). A hit means exactly these details with exactly this
+ * signature were verified under exactly this root key before; the caller still verifies the leaf under the
+ * cached intermediate's key every time. Compare in constant time; a mismatch is a miss (full verification,
+ * then the entry is overwritten), so a rotated intermediate or a changed root key is re-verified. */
+typedef struct { uint8_t fp[32]; int valid; } noise_cert_cache;
+void noise_cert_cache_fingerprint(uint8_t fp[32], const uint8_t root_pub[32],
+                                  const uint8_t *details, uint32_t details_len, const uint8_t sig[64]);
+int  noise_cert_cache_match(const noise_cert_cache *c, const uint8_t root_pub[32],
+                            const uint8_t *details, uint32_t details_len, const uint8_t sig[64]);
+void noise_cert_cache_store(noise_cert_cache *c, const uint8_t root_pub[32],
+                            const uint8_t *details, uint32_t details_len, const uint8_t sig[64]);
+
 #endif

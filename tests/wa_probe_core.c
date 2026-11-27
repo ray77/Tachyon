@@ -22,6 +22,12 @@ static uint8_t rdbuf[8192];
 static uint32_t t_start;
 static char line[640];
 
+/* prepared offline (wa_probe_prepare), consumed by wa_probe_run */
+static hmac_drbg rng; static x509_cert root, inter; static tls13_keypair kp;
+static uint8_t eph_priv[32], eph_pub[32], st_priv[32], st_pub[32];
+static noise_cert_cache ncache;
+static int prepared;
+
 /* ---- freestanding helpers ------------------------------------------------------------------------ */
 static void cp(uint8_t *d, const uint8_t *s, uint32_t n) { while (n--) *d++ = *s++; }
 static int  eq(const uint8_t *a, const uint8_t *b, uint32_t n) { uint32_t i; int d = 0; for (i = 0; i < n; i++) d |= a[i] ^ b[i]; return d == 0; }
@@ -221,26 +227,50 @@ static int tls_connect(x509_cert *root, x509_cert *inter, hmac_drbg *rng, tls13_
     return 1;
 }
 
-int wa_probe_run(wa_probe_io *pio)
+/* Everything that needs no connection: the DRBG, the pinned TLS chain, the TLS 1.3 X25519 key pair and the two
+ * Noise X25519 key pairs (static + ephemeral). On the A500 this is ~10 s of fixed-base comb multiplications that
+ * used to sit inside the connected window; now the caller runs it before the TCP connect. */
+int wa_probe_prepare(wa_probe_io *pio)
 {
-    static uint8_t out[4096], eph_priv[32], eph_pub[32], st_priv[32], st_pub[32];
-    static uint8_t server_eph[32], server_static[32], server_static_ct[64], cert_ct[4096], cert_pt[4096];
-    static uint8_t cstatic_ct[48], payload_ct[1024], finish[2048], inner[2048], plain[WA_PROBE_MSG_MAX];
-    static noise_hs hs; static noise_transport tr; static heartbeat hb; static tls13_keypair kp; static x509_cache cache;
-    static hmac_drbg rng; static x509_cert root, inter;
-    uint32_t server_static_ct_len = 0, cert_ct_len = 0, n, ladders = 0;
-    const uint8_t *p, *end, *d; uint32_t f, wire, l, v;
-
-    io = pio; t_start = io->now_ms(); pend_len = 0;
-    io->t_tls = io->t_ws = io->t_hello = io->t_finish = io->t_accepted = 0; io->pongs = io->ladders = 0; io->result[0] = 0;
+    uint32_t t0;
+    io = pio; t_start = io->now_ms(); prepared = 0;
+    io->t_tls_key = io->t_noise_keys = 0; io->result[0] = 0;
+    io->noise_cert_cached = 0; io->noise_cache_valid = 0;
     if (!io->seed || io->seed_len < 32) return fail("RESULT: no seed", 0, 0);
     rng.instantiated = 0; drbg_instantiate(&rng, io->seed, io->seed_len);
     if (!x509_parse(&root, wa_cert2, sizeof wa_cert2) || !x509_parse(&inter, wa_cert1, sizeof wa_cert1)) return fail("RESULT: root/intermediate parse failed", 0, 0);
+    /* the stored fingerprint of WhatsApp's intermediate Noise certificate, if the caller kept one */
+    ncache.valid = 0;
+    if (io->noise_cache_in) { cp(ncache.fp, io->noise_cache_in, 32); ncache.valid = 1; }
+    t0 = ms();
+    if (!tls13_keypair_generate(&kp, &rng)) return fail("RESULT: keypair failed", 0, 0);
+    io->t_tls_key = ms() - t0;
+    wa_fmt(line, sizeof line, "tls: X25519 key pair ready (%T s, before the connection)", io->t_tls_key); logl(line);
+    t0 = ms();
+    drbg_generate(&rng, eph_priv, 32); drbg_generate(&rng, st_priv, 32);
+    x25519_base_comb(st_pub, st_priv);
+    x25519_base_comb(eph_pub, eph_priv);
+    io->t_noise_keys = ms() - t0;
+    wa_fmt(line, sizeof line, "noise: static + ephemeral X25519 key pairs ready (%T s, before the connection)", io->t_noise_keys); logl(line);
+    prepared = 1;
+    return 1;
+}
+
+int wa_probe_run(wa_probe_io *pio)
+{
+    static uint8_t out[4096];
+    static uint8_t server_eph[32], server_static[32], server_static_ct[64], cert_ct[4096], cert_pt[4096];
+    static uint8_t cstatic_ct[48], payload_ct[1024], finish[2048], inner[2048], plain[WA_PROBE_MSG_MAX];
+    static noise_hs hs; static noise_transport tr; static heartbeat hb; static x509_cache cache;
+    uint32_t server_static_ct_len = 0, cert_ct_len = 0, n, ladders = 0;
+    const uint8_t *p, *end, *d; uint32_t f, wire, l, v;
+
+    if (!prepared || io != pio) { if (!wa_probe_prepare(pio)) return 0; }
+    prepared = 0;                               /* key pairs are used once */
+    io = pio; t_start = io->now_ms(); pend_len = 0;
+    io->t_tls = io->t_ws = io->t_hello = io->t_finish = io->t_accepted = 0; io->pongs = io->ladders = 0; io->result[0] = 0;
 
     if (!io->tunnel) {
-        /* X25519 key pair precomputed (as the A500 does it long before the connection) */
-        if (!tls13_keypair_generate(&kp, &rng)) return fail("RESULT: keypair failed", 0, 0);
-        wa_fmt(line, sizeof line, "tls: X25519 key pair ready (%T s)", ms()); logl(line);
         /* use_cache: a first connection fills the certificate cache (full chain verification), then the real one
          * must hit it and skip the chain - as a second A500 session would after storing the entry in ENVARC: */
         if (io->use_cache) {
@@ -288,12 +318,10 @@ int wa_probe_run(wa_probe_io *pio)
     io->t_ws = ms();
     wa_fmt(line, sizeof line, "ws: wss://%s/ws/chat open", io->host); logl(line);
 
-    /* Noise ClientHello: WA header + 3-byte length + HandshakeMessage{clientHello{ephemeral}} */
-    drbg_generate(&rng, eph_priv, 32); drbg_generate(&rng, st_priv, 32);
-    x25519_base_comb(st_pub, st_priv);
+    /* Noise ClientHello: WA header + 3-byte length + HandshakeMessage{clientHello{ephemeral}}; the key pairs
+     * come from wa_probe_prepare */
     {
         uint8_t pb[64 + 7 + 4]; uint32_t k = 0;
-        x25519_base_comb(eph_pub, eph_priv);
         noise_client_hello(&hs, wa_header, 4, eph_pub);
         cp(pb, wa_header, 4); k = 4;
         pb[k++] = 0; pb[k++] = 0; pb[k++] = 36;         /* frame length 36 */
@@ -337,10 +365,20 @@ int wa_probe_run(wa_probe_io *pio)
             p = cert_pt; end = cert_pt + cert_ct_len - 16;
             while (pb_next(&p, end, &f, &wire, &v, &d, &l)) { if (f == 1 && wire == 2) { lp = d; ll = l; } else if (f == 2 && wire == 2) { ip = d; il = l; } }
             if (!lp || !ip || !parse_cert(&leaf, lp, ll) || !parse_cert(&interc, ip, il)) { heartbeat_disarm(); return fail("RESULT: cert chain parse failed", 0, 0); }
+            /* intermediate: issuer must be the root; the XEdDSA verification (~11 s on the 68000) is skipped when the
+             * cache holds the fingerprint of exactly these details + signature under exactly this root key */
             ok = interc.issuer_serial == WA_CERT_ISSUER_SERIAL;
-            ok = ok && xeddsa_verify(interc.sig, interc.details, interc.details_len, wa_cert_pub);
-            wa_fmt(line, sizeof line, "noise: intermediate certificate serial %u signed by WhatsApp's root key: %s", interc.serial, ok ? "VERIFIED" : "FAILED"); logl(line);
+            if (ok && noise_cert_cache_match(&ncache, wa_cert_pub, interc.details, interc.details_len, interc.sig)) {
+                io->noise_cert_cached = 1;
+                wa_fmt(line, sizeof line, "noise: intermediate certificate serial %u: cache HIT (details + signature verified under WhatsApp's root key before), XEdDSA skipped", interc.serial); logl(line);
+            } else {
+                ok = ok && xeddsa_verify(interc.sig, interc.details, interc.details_len, wa_cert_pub);
+                wa_fmt(line, sizeof line, "noise: intermediate certificate serial %u signed by WhatsApp's root key: %s%s", interc.serial, ok ? "VERIFIED" : "FAILED",
+                       ok ? (ncache.valid ? " (cache MISS, entry replaced)" : " (cache empty, entry stored)") : ""); logl(line);
+                if (ok) noise_cert_cache_store(&ncache, wa_cert_pub, interc.details, interc.details_len, interc.sig);
+            }
             if (!ok) { heartbeat_disarm(); return fail("RESULT: intermediate certificate rejected", 0, 0); }
+            cp(io->noise_cache_fp, ncache.fp, 32); io->noise_cache_valid = 1;
             ok = leaf.issuer_serial == interc.serial && xeddsa_verify(leaf.sig, leaf.details, leaf.details_len, interc.key);
             ok = ok && eq(leaf.key, server_static, 32);
             wa_fmt(line, sizeof line, "noise: leaf certificate serial %u signed by the intermediate, key == server static: %s", leaf.serial, ok ? "VERIFIED" : "FAILED"); logl(line);
@@ -372,7 +410,7 @@ int wa_probe_run(wa_probe_io *pio)
     }
     io->t_accepted = ms();
     {   uint8_t cl[16]; n = ws_frame_close(&w, 1000, cl, sizeof cl); if (n) app_send(cl, n); }
-    wa_fmt(io->result, sizeof io->result, "RESULT: handshake ACCEPTED by %s with our %s/WS/Noise stack, %T s hold, %u pongs", io->host,
-           io->tunnel ? "(openssl TLS 1.3 tunnel)" : "TLS 1.3", io->gap_ms, io->pongs);
+    wa_fmt(io->result, sizeof io->result, "RESULT: handshake ACCEPTED by %s with our %s/WS/Noise stack, %T s hold, %u pongs%s", io->host,
+           io->tunnel ? "(openssl TLS 1.3 tunnel)" : "TLS 1.3", io->gap_ms, io->pongs, io->noise_cert_cached ? ", Noise cert cache hit" : "");
     return 1;
 }

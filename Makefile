@@ -42,7 +42,7 @@ build/sha256_test: tests/sha256_test.c crypto/ref/sha256.c crypto/ref/sha256.h
 	@mkdir -p build
 	$(HOSTCC) $(HOST_CFLAGS) tests/sha256_test.c crypto/ref/sha256.c -o $@
 
-build/noise_test: tests/noise_test.c $(CRYPTO_SRC) crypto/ref/noise.h
+build/noise_test: tests/noise_test.c $(CRYPTO_SRC) crypto/ref/noise.h bench/xeddsa_vector.h
 	@mkdir -p build
 	$(HOSTCC) $(HOST_CFLAGS) tests/noise_test.c $(CRYPTO_SRC) -o $@
 
@@ -100,14 +100,16 @@ heartbeat-test: build/heartbeat_test
 # our own TLS 1.3 + WebSocket + Noise XX client against web.whatsapp.com with 30 s of simulated A500
 # computing time and the pong heartbeat (network, manual: make wa-probe GAP=30)
 GAP ?= 30
+FAST ?= 1024   # Fast RAM of the emulated machine in KiB for run-probe (2048 = the client's minimum)
 WAIP ?= $(shell dig +short web.whatsapp.com | grep -E '^[0-9.]+$$' | head -1)
 PROBE_CORE := tests/wa_probe_core.c tests/wa_probe_core.h tests/certs/wa_rsa_chain.h tests/vectors/wa_client_payload.h
 build/wa_probe: tests/wa_probe.c $(PROBE_CORE) $(CRYPTO_SRC) crypto/ref/heartbeat.h crypto/ref/tls13.h
 	@mkdir -p build
 	$(HOSTCC) $(HOST_CFLAGS) -Itests tests/wa_probe.c tests/wa_probe_core.c $(CRYPTO_SRC) -o $@
 
+NOISE_CACHE ?= build/wa_noise_cache.bin
 wa-probe: build/wa_probe
-	./build/wa_probe $(GAP) $(WAIP)
+	NOISE_CACHE=$(NOISE_CACHE) ./build/wa_probe $(GAP) $(WAIP)
 
 # same, with openssl s_client as the TLS 1.3/X25519 transport (reference run from before tls13.c existed)
 wa-probe-tunnel: build/wa_probe
@@ -227,7 +229,7 @@ build/amiga/wa_probe: bench/amiga/startup_probe.s build/amiga/wa_probe.s crypto/
 amiga-probe: build/amiga/wa_probe
 
 run-probe: build/amiga/wa_probe build/amiga/utility.library build/amiga/sana2_hold build/amiga/a2065fix.device
-	GAP=$(GAP) tools/run-fsuae-net.sh $< 600
+	GAP=$(GAP) NET_FAST=$(FAST) tools/run-fsuae-net.sh $< 600
 
 # utility.library V37 for Kickstart 1.3 (tools/amiga/utility13.*): 2.0-era SANA-II drivers (a2065.device) need it
 build/amiga/utility13_c.s: tools/amiga/utility13.c

@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include "noise.h"
 #include "x25519.h"
+#include "ed25519.h"
+#include "../bench/xeddsa_vector.h"
 
 static int failures;
 static void result(int ok, const char *what) { printf("%s %s\n", ok ? "PASS" : "FAIL", what); if (!ok) failures++; }
@@ -72,6 +74,26 @@ int main(int argc, char **argv)
         memset(ct, 0, 48);
         noise_client_hello(&hs, hdr, 4, z);
         result(noise_client_finish(&hs, z, z, z, z, ct, 48, cert, 16, z, 16, o1, o2, o3, o4, &t) == 0, "garbage ServerHello rejected");
+    }
+    {   /* certificate cache: a verified (root key, details, signature) triple is remembered as one fingerprint; any
+         * change to one of the three is a miss, an empty cache is a miss, and a hit does not alter the entry */
+        noise_cert_cache c; uint8_t sig2[64], pk2[32], msg2[2]; int i;
+        c.valid = 0;
+        result(xeddsa_verify(xeddsa_sig, xeddsa_msg, XEDDSA_MSG_LEN, xeddsa_pk), "cache test vector verifies");
+        result(!noise_cert_cache_match(&c, xeddsa_pk, xeddsa_msg, XEDDSA_MSG_LEN, xeddsa_sig), "empty cache: miss");
+        noise_cert_cache_store(&c, xeddsa_pk, xeddsa_msg, XEDDSA_MSG_LEN, xeddsa_sig);
+        result(c.valid && noise_cert_cache_match(&c, xeddsa_pk, xeddsa_msg, XEDDSA_MSG_LEN, xeddsa_sig), "stored entry: hit");
+        memcpy(sig2, xeddsa_sig, 64); sig2[5] ^= 1;
+        result(!noise_cert_cache_match(&c, xeddsa_pk, xeddsa_msg, XEDDSA_MSG_LEN, sig2), "changed signature: miss");
+        memcpy(pk2, xeddsa_pk, 32); pk2[0] ^= 1;
+        result(!noise_cert_cache_match(&c, pk2, xeddsa_msg, XEDDSA_MSG_LEN, xeddsa_sig), "different root key: miss");
+        msg2[0] = xeddsa_msg[0] ^ 1;
+        result(!noise_cert_cache_match(&c, xeddsa_pk, msg2, 1, xeddsa_sig), "changed details: miss");
+        msg2[0] = xeddsa_msg[0]; msg2[1] = 0;
+        result(!noise_cert_cache_match(&c, xeddsa_pk, msg2, 2, xeddsa_sig), "longer details: miss (length-prefixed)");
+        for (i = 0; i < 32; i++) if (c.fp[i]) break;
+        result(i < 32 && noise_cert_cache_match(&c, xeddsa_pk, xeddsa_msg, XEDDSA_MSG_LEN, xeddsa_sig), "entry unchanged after misses");
+        result(!noise_cert_cache_match(0, xeddsa_pk, xeddsa_msg, XEDDSA_MSG_LEN, xeddsa_sig), "no cache: miss");
     }
     printf(failures ? "\n%d FAILURE(S)\n" : "\nALL PASSED\n", failures);
     return failures ? 1 : 0;

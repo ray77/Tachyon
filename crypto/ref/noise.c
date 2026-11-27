@@ -118,3 +118,35 @@ int noise_client_finish(noise_hs *n,
     noise_finish(n, t);
     return 1;
 }
+
+/* ---- certificate cache ------------------------------------------------------------- */
+static void noise_u32_be(uint8_t b[4], uint32_t v) { b[0] = (uint8_t)(v >> 24); b[1] = (uint8_t)(v >> 16); b[2] = (uint8_t)(v >> 8); b[3] = (uint8_t)v; }
+
+void noise_cert_cache_fingerprint(uint8_t fp[32], const uint8_t root_pub[32],
+                                  const uint8_t *details, uint32_t details_len, const uint8_t sig[64])
+{
+    sha256_ctx h; uint8_t b[4];
+    sha256_init(&h);
+    sha256_update(&h, (const uint8_t *)"Tachyon noise cert cache v1", 27);   /* every field length-prefixed */
+    noise_u32_be(b, 32); sha256_update(&h, b, 4); sha256_update(&h, root_pub, 32);
+    noise_u32_be(b, details_len); sha256_update(&h, b, 4); sha256_update(&h, details, details_len);
+    noise_u32_be(b, 64); sha256_update(&h, b, 4); sha256_update(&h, sig, 64);
+    sha256_final(&h, fp);
+}
+
+int noise_cert_cache_match(const noise_cert_cache *c, const uint8_t root_pub[32],
+                           const uint8_t *details, uint32_t details_len, const uint8_t sig[64])
+{
+    uint8_t fp[32]; uint32_t i, diff = 0;
+    if (!c || !c->valid) return 0;
+    noise_cert_cache_fingerprint(fp, root_pub, details, details_len, sig);
+    for (i = 0; i < 32; i++) diff |= fp[i] ^ c->fp[i];
+    return diff == 0;
+}
+
+void noise_cert_cache_store(noise_cert_cache *c, const uint8_t root_pub[32],
+                            const uint8_t *details, uint32_t details_len, const uint8_t sig[64])
+{
+    noise_cert_cache_fingerprint(c->fp, root_pub, details, details_len, sig);
+    c->valid = 1;
+}

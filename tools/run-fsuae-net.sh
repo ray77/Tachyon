@@ -1,6 +1,6 @@
 #!/bin/sh
 # Run the Amiga WhatsApp probe (or any program needing TCP/IP) inside FS-UAE on the Tachyon reference
-# machine with network: A500, Kickstart 1.3, 512 KiB Chip + 1 MiB Fast, emulated A2065 Ethernet on
+# machine with network: A500, Kickstart 1.3, 512 KiB Chip + 1 MiB Fast, NET_FAST=2048 for 2 MiB, emulated A2065 Ethernet on
 # FS-UAE's slirp NAT (tools/fsuae/a500-1mb-fast-net.fs-uae), TheWire13 as the TCP/IP stack.
 #
 #   tools/run-fsuae-net.sh <amiga-executable> [timeout-seconds]
@@ -25,6 +25,7 @@ A2065DEV=${A2065DEV:-$ROOT/build/a2065dev/a2065.device}
 WORK=${TACHYON_NET_WORK:-"$ROOT/build/fsuae-net"}
 DH0="$WORK/dh0"
 NET_DHCP=${NET_DHCP:-0}
+NET_FAST=${NET_FAST:-1024}    # Fast RAM in KiB: 1024 = benchmark machine, 2048 = the client's minimum (docs/NETWORK.md 6)
 NET_RXBUF=${NET_RXBUF:-16384}  # socket_rx_buffer: TheWire13's TCP pool is max_tcp (12) x this; the default 40000 costs 480 KiB
 NET_LOG=${NET_LOG:-0}          # log_enabled in thewire13.conf
 NET_WAIT=${NET_WAIT:-8}        # seconds between starting the stack and the program
@@ -78,6 +79,10 @@ head -c 64 /dev/urandom > "$DH0/seed.bin"
 date -u +%Y%m%d%H%M%SZ | tr -d '\n' > "$DH0/now.txt"
 dig +short web.whatsapp.com 2>/dev/null | grep -E '^[0-9.]+$' | head -1 | tr -d '\n' > "$DH0/waip.txt" || true
 printf '%s' "$GAP" > "$DH0/gap.txt"
+# fingerprint of WhatsApp's verified intermediate Noise certificate (32 bytes, written by make wa-probe or an earlier
+# Amiga run): with it the probe skips the ~11 s XEdDSA verification of the intermediate; copied back after the run
+NCACHE=${NOISE_CACHE:-$ROOT/build/wa_noise_cache.bin}
+[ -f "$NCACHE" ] && cp "$NCACHE" "$DH0/noisecache.bin"
 # the redirection after the command name belongs to the started program (its banner, DHCP and SANA messages),
 # the one after Run only to Run's own "[CLI 2]" line
 # Order: the program first (it waits up to 60 s for the stack), then TheWire13, which sizes its TCP PCB pool
@@ -92,7 +97,7 @@ else printf "stack %s\n${HOLD_LINE}run >NIL: C:TheWire13 >SYS:stack.log\nwait %s
 "$FSUAE" "$HERE/fsuae/a500-1mb-fast-net.fs-uae" \
     --floppy_drive_0= \
     --hard_drive_0="$DH0" --hard_drive_0_label=DH0 --hard_drive_0_priority=6 \
-    --log_file="$WORK/fs-uae.log" >"$WORK/stdout.log" 2>&1 &
+    --fast_memory="$NET_FAST" --log_file="$WORK/fs-uae.log" >"$WORK/stdout.log" 2>&1 &
 PID=$!
 i=0
 while [ $i -lt "$TIMEOUT" ]; do
@@ -107,3 +112,4 @@ echo "--- SYS:stack.log ---"
 cat "$DH0/stack.log" 2>/dev/null || echo "(no stack.log)"
 echo "--- SYS:result.txt after ${i}s ---"
 cat "$DH0/result.txt" 2>/dev/null || echo "(no result.txt)"
+[ -f "$DH0/noisecache.bin" ] && [ -f "$DH0/done" ] && cp "$DH0/noisecache.bin" "$NCACHE" && echo "(noise certificate cache saved to $NCACHE)"

@@ -12,6 +12,9 @@
  * The protocol logic lives in tests/wa_probe_core.c and is shared with the Amiga build
  * (bench/wa_probe_amiga.c over bsdsocket.library); this file is the POSIX transport, clock and logging.
  *   TLS_CACHE=1: prime the certificate cache on a first connection, the real one must hit it (chain skipped).
+ *   NOISE_CACHE=<file>: 32-byte fingerprint of WhatsApp's verified intermediate Noise certificate; read before
+ *   the run (hit = XEdDSA of the intermediate skipped), written after a successful one (make wa-probe uses
+ *   build/wa_noise_cache.bin, which tools/run-fsuae-net.sh hands to the Amiga as SYS:noisecache.bin).
  *   TLS_HOLD=<seconds>: hold our TLS Finished that long after the server flight and report whether the server
  *   closes (measured 2026-11-27: close_notify after 60.0 s; 50 s accepted).
  *   WA_PROBE_DEBUG=1 dumps reads and messages, WA_PROBE_DUMP=1 writes a rejected chain to build/wa_live_cert*.der.
@@ -70,7 +73,8 @@ static int io_reconnect(void *ctx) { (void)ctx; close(fd); return tcp_connect();
 
 int main(int argc, char **argv)
 {
-    static wa_probe_io io; static uint8_t seed[64]; static char nowstr[16];
+    static wa_probe_io io; static uint8_t seed[64], ncache[32]; static char nowstr[16];
+    const char *ncache_path = getenv("NOISE_CACHE");
     double gap = argc > 1 ? atof(argv[1]) : 30.0;
     struct addrinfo hints;
     time_t tt = time(0); struct tm *tm = gmtime(&tt);
@@ -101,23 +105,35 @@ int main(int argc, char **argv)
     /* optional argv[2]: numeric address (the Makefile resolves it with dig; some sandboxes block the system resolver) */
     if (argc > 2) hints.ai_flags = AI_NUMERICHOST;
     { int ge = getaddrinfo(argc > 2 ? argv[2] : "web.whatsapp.com", "443", &hints, &ai); if (ge != 0) { printf("dns failed: %s\n", gai_strerror(ge)); return 1; } }
-    if (!tunnel) {
-        if (!tcp_connect()) return 1;
-        { char l[96]; snprintf(l, sizeof l, "tcp: connected to web.whatsapp.com:443 (%s)", argc > 2 ? argv[2] : "resolved"); log_line(0, l); }
-    }
-
     io.ctx = 0; io.send = io_send; io.recv = io_recv; io.reconnect = io_reconnect; io.now_ms = now_ms; io.log = log_line;
     io.host = "web.whatsapp.com"; io.now = nowstr; io.seed = seed; io.seed_len = 64;
     io.gap_ms = (uint32_t)(gap * 1000); io.tunnel = tunnel;
     io.use_cache = getenv("TLS_CACHE") != 0; io.debug = getenv("WA_PROBE_DEBUG") != 0;
     io.hold_ms = getenv("TLS_HOLD") ? (uint32_t)(atof(getenv("TLS_HOLD")) * 1000) : 0;
+    io.noise_cache_in = 0;
+    if (ncache_path && *ncache_path) {
+        FILE *cf = fopen(ncache_path, "rb");
+        if (cf) { if (fread(ncache, 1, 32, cf) == 32) io.noise_cache_in = ncache; fclose(cf); }
+        { char l[160]; snprintf(l, sizeof l, "noise: certificate cache %s (%s)", io.noise_cache_in ? "loaded" : "empty", ncache_path); log_line(0, l); }
+    }
+    /* the offline part (key pairs) before the connection, as the A500 does it */
+    if (!wa_probe_prepare(&io)) { printf("%s\n", io.result); return 1; }
+    if (!tunnel) {
+        if (!tcp_connect()) return 1;
+        { char l[96]; snprintf(l, sizeof l, "tcp: connected to web.whatsapp.com:443 (%s)", argc > 2 ? argv[2] : "resolved"); log_line(0, l); }
+    }
     {
         int ok = wa_probe_run(&io);
+        if (ok && io.noise_cache_valid && ncache_path && *ncache_path) {
+            FILE *cf = fopen(ncache_path, "wb");
+            if (cf) { fwrite(io.noise_cache_fp, 1, 32, cf); fclose(cf); }
+        }
         if (!ok && getenv("WA_PROBE_DUMP")) {
             tls13 *t = wa_probe_tls(); int i;
             for (i = 0; i < t->chain_len; i++) { char fn[64]; FILE *o; snprintf(fn, sizeof fn, "build/wa_live_cert%d.der", i); o = fopen(fn, "wb"); if (o) { fwrite(t->chain[i].der, 1, t->chain[i].len, o); fclose(o); } }
         }
-        if (ok) printf("TIMING: tls %u ms, ws %u ms, server hello %u ms, client finish %u ms, accepted %u ms\n", io.t_tls, io.t_ws, io.t_hello, io.t_finish, io.t_accepted);
+        if (ok) printf("TIMING: keys tls %u ms + noise %u ms (offline); tls %u ms, ws %u ms, server hello %u ms, client finish %u ms, accepted %u ms (since connect)%s\n",
+                       io.t_tls_key, io.t_noise_keys, io.t_tls, io.t_ws, io.t_hello, io.t_finish, io.t_accepted, io.noise_cert_cached ? ", Noise cert cache hit" : "");
         if (tunnel) { close(tun_out); close(tun_in); wait(0); } else close(fd);
         printf("%s\n", io.result);
         return ok ? 0 : 1;
