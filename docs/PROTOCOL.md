@@ -246,3 +246,71 @@ Testvektor `tests/vectors/pair_device_iq.bin`: erstes entschlüsseltes Frame ein
 41 704 Prüfungen, 0 Fehler: alle 1259 Token; der IQ-Baum wie oben, bytegleich zurückcodiert, jede Kürzung und jeder zu kleine Arena- bzw. Ausgabepuffer ergibt den passenden Fehler; 60 Vektoren aus whatsmeows Encoder (`make wabinary-vectors`, `tools/wabvectors`) – gleicher Baum wie whatsmeows Decoder, und unsere bevorzugte Codierung ist bytegleich mit der von whatsmeow; jede Codierungsart von Hand Byte für Byte; fehlerhafte Eingaben (übergroße Längen und Anzahlen, ungültige Token, Tiefe); 300 000 mutierte Frames, 33 975 angenommen, alle bytegleich zurückcodiert.
 
 Arena für den IQ: 736 Byte auf dem 68000, 1232 Byte auf dem 64-Bit-Host. Auf dem 68000 bisher nur ein Rauchtest unter vamos (nicht eingecheckt: IQ und 60 Vektoren bytegleich, alle Token gefunden); keine Zeitmessung, noch nicht Teil eines Amiga-Programms.
+
+## 11. Pairing als verknüpftes Gerät (2026-11-27, `proto/pairing.c`, `proto/identity.c`, `proto/clientpayload.c`, `proto/creds.c`)
+
+Vorlagen: whatsmeow `c2ce5c3` (`pair.go`, `qrchan.go`, `store/clientpayload.go`, `util/keys/keypair.go`, `connectionevents.go`), Baileys `bb0a87e` (`Utils/validate-connection.ts`, `Utils/companion-reg-client-utils.ts`), libsignal-go `v0.2.3` (`ecc/SignCurve25519.go`). Alles Offline-Prüfbare ist gegen diese Pakete selbst geprüft, nicht gegen eine Lesart davon (`tools/pairvectors`).
+
+### Identität des Begleitgeräts (`proto/identity.c`)
+
+| Teil | Erzeugung | Verwendung |
+|---|---|---|
+| Noise-Static `noise_priv/pub` | 32 Byte DRBG, geklemmt, Comb | Noise-Handshake; nach dem Pairing kennt der Server uns daran |
+| Signal-Identität `ident_priv/pub` | wie oben | XEdDSA-Signaturen (Prekey, `pair-device-sign`), später Signal-Sitzungen |
+| Signed Prekey `spk_priv/pub`, `spk_id` = 1 | wie oben; `spk_sig` = XEdDSA über `05 ‖ spk_pub` mit `ident_priv` | Registrierungs-Payload |
+| `reg_id` | 16 Bit Zufall (≠ 0) | Registrierungs-Payload (whatsmeow nimmt 32 Bit, libsignal 14 – der Server nimmt alles) |
+| `adv_secret` | 32 Byte DRBG | steht im QR-Code; das Telefon MACt damit unsere Geräte-Identität |
+
+Drei Comb-Multiplikationen plus eine XEdDSA-Signatur (zwei weitere Comb-Multiplikationen) ≈ 18 s auf dem 68000, alles vor der Verbindung (`wa_probe_prepare`).
+
+**XEdDSA-Signatur** (`xeddsa_sign`, `crypto/ref/ed25519.c`), bitgenau wie libsignal `ecc.CalculateSignature`: `a` = geklemmter Curve25519-Skalar, `A = [a]B` **ohne** Vorzeichenkorrektur (das Vorzeichenbit von `A` wandert in `sig[63]` Bit 7, der Prüfer baut `A` aus dem Montgomery-`u` und diesem Bit), `r = SHA-512(FE FF…FF ‖ a ‖ msg ‖ 64 Zufallsbytes) mod L`, `R = [r]B`, `h = SHA-512(R ‖ A ‖ msg) mod L`, `S = h·a + r mod L` (`sc_muladd`: Byte-Limbs in 32-Bit-Spalten, konstante Zeit). Die 64 Zufallsbytes sind nur eine Absicherung; jede Belegung ergibt eine gültige Signatur. Test: `tools/genvectors -mode xeddsa-sign` (eigener deterministischer Nachbau von libsignals `sign`, jede Signatur von `ecc.VerifySignature` bestätigt), `tests/ed25519_test.c` vergleicht 64 Signaturen byteweise.
+
+### ClientPayload (`proto/clientpayload.c`)
+
+Bytegleich mit `proto.Marshal(device.GetClientPayload())` von whatsmeow für dieselbe Identität (`make clientpayload-test`: 300 Byte Registrierung, 88 Byte Login). Felder in Nummernreihenfolge:
+
+- **Registrierung:** `passive(3)=false`, `userAgent(5)` {platform WEB=14, appVersion 2.3000.1054751086, mcc/mnc "000", osVersion "0.1", manufacturer "", device "Desktop", osBuildNumber "0.1", releaseChannel RELEASE, en/US}, `webInfo(6)` {webSubPlatform WEB_BROWSER}, `connectType(12)=WIFI_UNKNOWN`, `connectReason(13)=USER_ACTIVATED`, `devicePairingData(19)` {eRegid 4 Byte BE, eKeytype `05`, eIdent, eSkeyId 3 Byte BE, eSkeyVal, eSkeySig, buildHash = MD5("2.3000.1054751086") = `b1b08c67…` (Konstante, kein MD5 auf dem Ziel), deviceProps}, `pull(33)=false`.
+- **deviceProps:** whatsmeows `store.DeviceProps` mit `os = "Amiga 500"`, Version 0.1.0, `platformType UNKNOWN` (`WA_PLATFORM_TYPE`, treibt zugleich die Kennung am QR-Ende; Firefox wäre ein Einzeiler, siehe `clientpayload.h`), `requireFullSync=false`, HistorySyncConfig wie whatsmeow.
+- **Login:** `username(1)` = JID-Nutzer als uint64 (Varint aus zwei 32-Bit-Hälften, Dezimalzahl mit 16-Bit-Limbs geparst), `passive(3)=true`, dieselben Felder 5/6/12/13, `device(18)`, `lc(24)=1`, `pull(33)=true`, `lidDbMigrated(41)=true`.
+
+### Ablauf
+
+```text
+Server  <iq from=s.whatsapp.net type=set id=I xmlns=md><pair-device><ref>…</ref> ×6</pair-device></iq>
+Client  <iq to=s.whatsapp.net type=result id=I/>
+        QR-Text: https://wa.me/settings/linked_devices#REF,b64(noisePub),b64(identityPub),b64(advSecret),0
+        Code 1 60 s, dann je 20 s (whatsmeow qrchan.go; die Rotation ist clientseitig, der Server schickt keine neuen IQs)
+        währenddessen alle 4 s ein WebSocket-Pong (Abschnitt 8/9) und alle 25 s <iq xmlns=w:p type=get><ping/></iq>
+Phone   scannt → Server  <iq … id=J><pair-success><device-identity>ADVSignedDeviceIdentityHMAC</device-identity>
+                           <device jid=… lid=…/><platform name=…/><biz name=…/></pair-success></iq>
+Client  HMAC-SHA256(advSecret, details) == hmac (konstante Zeit)            sonst <iq type=error><error code=401 text=hmac-mismatch/>
+        ADVSignedDeviceIdentity{details, accountSignatureKey, accountSignature}; ADVDeviceIdentity{rawId, timestamp, keyIndex}
+        XEdDSA-Verify accountSignature über 06 00 ‖ details ‖ identityPub       sonst … text=signature-mismatch; Verbindung zu
+        deviceSignature = XEdDSA-Sign über 06 01 ‖ details ‖ identityPub ‖ accountSignatureKey  mit identityPriv
+        <iq to=s.whatsapp.net type=result id=J><pair-device-sign><device-identity key-index=K>
+            ADVSignedDeviceIdentity{details(1), accountSignature(3), deviceSignature(4)}   (accountSignatureKey entfernt)
+Server  <stream:error code=515/>, schließt
+Client  EINE neue Verbindung: TLS 1.3, WebSocket, Noise XX mit demselben Noise-Static und dem Login-Payload
+Server  <success t=… lid=…/>   → fertig
+```
+
+HOSTED-Konten (`accountType`/`deviceType` = 1): Präfix `06 05` statt `06 00` im HMAC-Eingang bzw. der Account-Signatur, wie in beiden Vorlagen. Die Geräte-Signatur bleibt `06 01`.
+
+QR-Text: 38 Zeichen Präfix + `ref` (102 Zeichen in den Aufzeichnungen) + 3 × 44 Base64 + 5 Trenner = **277 Zeichen → Version 11 L, 61 × 61 Module**. Auf dem Hires-Schirm 6 × 3 Pixel je Modul (414 × 207 mit Ruhezone), ab Version ≤ 9 8 × 4 (docs/UI.md). Decodiert mit zbar aus dem PBM/PNG des Hosts (`tools/pbm2png.py`).
+
+### Zugangsdaten (`proto/creds.c`)
+
+Ein flacher Datensatz von 810 Byte: Versionsbyte 1, Flags (gepaart, Noise-Cache gültig), alle sechs Schlüssel, Prekey-Signatur, `spk_id`, `reg_id`, `adv_secret`, JID-Nutzer/-Gerät, LID-Nutzer/-Gerät, Plattformname, Firmenname, ADV-Identität (details ≤ 128 Byte, Account-Schlüssel, Account- und Geräte-Signatur, key index, raw id, Typen), Fingerabdruck des Noise-Zwischenzertifikats, SHA-256 über alles davor. Host `build/tachyon.creds`, Amiga `SYS:tachyon.creds` (später ENVARC:). Jedes verfälschte Byte wird abgelehnt (Test über alle 810 Positionen); der Host prüft zusätzlich `wa_identity_check` (öffentliche Schlüssel und Prekey-Signatur nachgerechnet, ≈ 20 s auf dem 68000, dort deshalb übersprungen). Datensatz mit JID → Login-Payload, ohne → Pairing, keiner → neue Identität.
+
+### Offline-Tests (vor jedem Live-Versuch)
+
+- `make pairing-test` (ASan/UBSan): synthetisches `pair-success` aus `tools/pairvectors -mode pairsuccess` (Test-Account-Schlüssel signiert unsere Test-Identität, HMAC unter dem Test-ADV-Geheimnis, JID/LID/Plattform/Firma): Parsen, HMAC und Signatur **angenommen**; falsches Geheimnis, jedes veränderte Byte des Containers, fremde Identität, veränderte Signatur/Details/Schlüssel bei korrektem HMAC, Kürzungen: **abgelehnt**; Geräte-Signatur selbst geprüft; `pair-device-sign`-IQ codiert, von whatsmeow decodiert und von libsignal verifiziert, Bytes gleich whatsmeows eigenem `proto.Marshal` (`-mode verify-sign`); Refs und QR-Text aus dem aufgezeichneten pair-device-IQ; Ack- und Fehler-Knoten; Zugangsdaten hin und zurück. 77 Prüfungen.
+- `make pair-sim`: der echte `pair_session()`-Code von `tests/wa_probe_core.c` an einem Pseudo-Server auf einem Pseudo-WebSocket (Transport-Verschlüsselung durch Durchreich-Stubs ersetzt, Handshake übersprungen): Ack, zwei Codes mit kurzer Gültigkeit (das „Telefon“ scannt den zweiten), Verify + Sign, `pair-device-sign` (von whatsmeow geprüft), 515, Schließen und der Punkt, an dem die Login-Verbindung beginnt; fremdes ADV-Geheimnis → 401 `hmac-mismatch` und Schließen; sechs Codes ohne Scan → Schließen ohne Reconnect, Pongs und Keepalives unterwegs; Login-Frame `<success>` / `<failure>`. 74 Prüfungen.
+
+### Taktregel für Live-Versuche (verbindlich)
+
+WhatsApp drosselt und sperrt Konten oder Adressen; das Konto ist ein echtes. Deshalb: kein automatischer Wiederholungsversuch irgendwo im Code oder in den Skripten (nach sechs Codes ohne Scan schließt der Client und endet; nach einem Fehler ebenso), höchstens eine Live-Verbindung zugleich, alles zuerst offline (oben), Pairing-Versuche angekündigt, höchstens drei je Sitzung, mindestens fünf Minuten Abstand, nach einem Fehlschlag erst die Ursache aus dem Log, nach zwei Fehlschlägen keine weiteren Live-Versuche, sondern die Analyse. Reine Handshake-Proben (`make wa-probe`) bleiben bei wenigen pro Stunde; Achtung: `make vamos-probe` ist seit amitools' bsdsocket-Nachbildung eine echte Verbindung.
+
+### Live-Ergebnisse
+
+*(folgen nach den angekündigten Versuchen: Host `make wa-pair`, A500 `make run-pair FAST=2048`; gemessen werden Scan → `pair-device-sign`, Zeit bis 515, Login-Verbindung bis `<success>`.)*
