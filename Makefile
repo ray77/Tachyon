@@ -165,6 +165,20 @@ crypto/ref/ed25519_btable.h: tools/gen_btable.c crypto/ref/ed25519.c
 	$(HOSTCC) -O2 -Icrypto/ref tools/gen_btable.c crypto/ref/x25519_ref.c crypto/ref/sha512.c crypto/ref/ed25519.c crypto/ref/yield.c -o build/gen_btable
 	./build/gen_btable > $@
 
+# QR encoder (ui/qr.c) on the host: every code is decoded by zbarimg (brew install zbar) and compared module
+# by module with python-qrcode, installed into a venv under build/
+QR_PY := build/qr-venv/bin/python
+build/qr-venv/.ok:
+	python3 -m venv build/qr-venv && build/qr-venv/bin/pip install -q qrcode==8.2 && touch $@
+
+build/qr_test: tests/qr_test.c ui/qr.c ui/qr.h
+	@mkdir -p build
+	$(HOSTCC) $(HOST_CFLAGS) -D_POSIX_C_SOURCE=200809L tests/qr_test.c ui/qr.c -o $@
+
+.PHONY: qr-test
+qr-test: build/qr_test build/qr-venv/.ok
+	./build/qr_test $(QR_PY) build/qr
+
 # ---- amiga -----------------------------------------------------------------
 $(AMIGA_ASM): $(UNITY_SRC) $(CRYPTO_SRC) $(BENCH_SRC) crypto/ref/x25519.h crypto/ref/ed25519.h crypto/ref/tls13.h bench/xeddsa_vector.h bench/tls_vector.h bench/tls13_vector.h
 	@mkdir -p build/amiga
