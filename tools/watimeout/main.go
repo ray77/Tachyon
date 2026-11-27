@@ -10,7 +10,10 @@
 //
 //	go run ./tools/watimeout -noise-delay 300s                      # when does the server give up? (10.0 s)
 //	go run ./tools/watimeout -noise-delay 60s -ping 2s -pingop 10   # does a pong heartbeat keep it alive? (yes)
-//	go run ./tools/watimeout -tls-delay 300s -tls12rsa              # same for the TLS flight, A500 path (60.0 s)
+//	go run ./tools/watimeout -tls-delay 300s -tls12rsa              # same for the TLS flight, former A500 path (60.0 s)
+//	go run ./tools/watimeout -tls-delay 90s -tls13x25519 -addr IP   # TLS 1.3 / X25519: 60 s from connect, close_notify
+//	                                                                 # (in a sandbox without a resolver Go's chain check stalls;
+//	                                                                 #  TLS_HOLD=70 ./build/wa_probe measures with our own tls13.c)
 //
 // Findings 2026-11-27 (docs/PROTOCOL.md section 8): 10.0 s idle timeout on the WebSocket, reset by
 // any frame; unsolicited pong frames (opcode 10) are invisible to the WA layer and keep the handshake
@@ -74,6 +77,9 @@ func (d *delayConn) Write(p []byte) (int, error) {
 	d.writes++
 	n := d.writes
 	d.mu.Unlock()
+	if d.hold > 0 && len(p) > 0 {
+		logf("tls: write %d, %d bytes, record type %d", n, len(p), p[0])
+	}
 	if n == 2 && d.hold > 0 {
 		logf("tls: server flight received, holding our second flight for %s", d.hold)
 		start := time.Now()
@@ -97,9 +103,11 @@ func (d *delayConn) Write(p []byte) (int, error) {
 func main() {
 	tlsDelay := flag.Duration("tls-delay", 0, "hold the client's second TLS flight this long")
 	noiseDelay := flag.Duration("noise-delay", 0, "hold the Noise ClientFinish this long after the ServerHello")
-	tls12rsa := flag.Bool("tls12rsa", false, "TLS 1.2 with RSA key transport (the A500 path) instead of the default TLS 1.3")
+	tls12rsa := flag.Bool("tls12rsa", false, "TLS 1.2 with RSA key transport (the former A500 path) instead of the default TLS 1.3")
+	tls13x := flag.Bool("tls13x25519", false, "TLS 1.3 with X25519 as the only key share (the A500 path; Go cannot restrict signature_algorithms, so the server presents its ECDSA certificate here, tests/wa_probe.c TLS_HOLD covers the exact RSA-PSS profile)")
 	wait := flag.Duration("wait", 20*time.Second, "how long to wait for the first encrypted server frame after ClientFinish")
 	helloDelay := flag.Duration("hello-delay", 0, "wait this long after the WebSocket upgrade before sending the ClientHello")
+	dialAddr := flag.String("addr", "", "numeric address to dial instead of resolving web.whatsapp.com (sandboxes without a resolver: dig +short web.whatsapp.com)")
 	flag.IntVar(&pingOpcode, "pingop", 9, "WebSocket opcode for the keepalive frame: 9 = ping, 10 = unsolicited pong")
 	dump := flag.String("dump-payload", "", "write the registration ClientPayload as a C header to this path and exit (for tests/wa_probe.c)")
 	ping := flag.Duration("ping", 0, "during the Noise hold, send a WebSocket ping frame this often (does traffic reset the timer?)")
@@ -132,7 +140,14 @@ func main() {
 		tlsCfg.MaxVersion = tls.VersionTLS12
 		tlsCfg.CipherSuites = []uint16{tls.TLS_RSA_WITH_AES_128_GCM_SHA256}
 	}
+	if *tls13x {
+		tlsCfg.MinVersion = tls.VersionTLS13
+		tlsCfg.CurvePreferences = []tls.CurveID{tls.X25519}
+	}
 	dialTLS := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if *dialAddr != "" {
+			addr = *dialAddr + ":443"
+		}
 		raw, err := (&net.Dialer{Timeout: 20 * time.Second}).DialContext(ctx, network, addr)
 		if err != nil {
 			return nil, err

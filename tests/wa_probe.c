@@ -9,6 +9,8 @@
  * answer with its first encrypted frame (the pair-device IQ), which we decrypt with the transport
  * keys. Host only, network required: make wa-probe GAP=30. No pairing is completed; the
  * ClientPayload is a throwaway registration payload from tools/watimeout -dump-payload.
+ * TLS_HOLD=<seconds>: hold our TLS Finished that long after the server flight and report whether the server closes
+ * (measured 2026-11-27: close_notify after 60.0 s; 50 s accepted).
  *
  * Tunnel mode (third argument "tunnel"): the TLS layer is replaced by `openssl s_client` with the same
  * parameters (TLS 1.3, X25519, TLS_AES_128_GCM_SHA256, rsa_pss_rsae_sha256) as a reference transport;
@@ -25,6 +27,7 @@
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <netdb.h>
+#include <sys/select.h>
 #include "tls13.h"
 #include "ws.h"
 #include "noise.h"
@@ -91,8 +94,9 @@ static int pump(int want_tls_state, int want_msg, double timeout_s)
     uint32_t deadline = now_ms() + (uint32_t)(timeout_s * 1000);
     for (;;) {
         ssize_t r;
-        if (!flush_tls()) return 0;
+        /* the TLS-state wait returns before flushing, so the caller can hold the client Finished (TLS_HOLD) */
         if (want_tls_state >= 0 && (tunnel || t.state == want_tls_state)) return 1;
+        if (!flush_tls()) return 0;
         if (want_msg == 2 && w.state == WS_OPEN) return 1;
         if (want_msg) {
             /* feed pending decrypted bytes one at a time so nothing after a complete message is lost */
@@ -234,6 +238,25 @@ int main(int argc, char **argv)
         if (!tls13_keypair_generate(&kp, &rng)) { printf("keypair failed\n"); return 1; }
         if (!tls13_client_start_kp(&t, "web.whatsapp.com", root.n, root.n_len, root.e, nowstr, &rng, &kp)) { printf("tls start failed\n"); return 1; }
         if (!pump(TLS13_ST_CONNECTED, 0, 20)) { printf("RESULT: TLS handshake failed\n"); return 1; }
+        if (getenv("TLS_HOLD")) {
+            /* timeout measurement: our Finished sits in t.out; hold it and watch whether the server closes the socket.
+             * pump() flushed t.out before reading, so CONNECTED is reached with the Finished record still unsent only
+             * because tls13_input produced it during the last read: check that, then hold. */
+            double hold = atof(getenv("TLS_HOLD")); uint32_t start = now_ms(); fd_set rf; struct timeval tv; int sel; uint8_t probe[64];
+            if (!t.out_len) { printf("RESULT: nothing to hold (Finished already sent)\n"); return 1; }
+            logf_("tls: server flight done, holding our Finished (%u bytes) for %.0f s", t.out_len, hold);
+            tv.tv_sec = (long)hold; tv.tv_usec = (long)((hold - (long)hold) * 1e6);
+            FD_ZERO(&rf); FD_SET(fd, &rf);
+            sel = select(fd + 1, &rf, 0, 0, &tv);
+            if (sel > 0) { ssize_t r = read(fd, probe, sizeof probe); logf_("tls: SERVER CLOSED after %.1f s of silence (read %zd bytes%s)", (now_ms() - start) / 1000.0, r, r > 0 ? ", data follows" : "");
+                           if (r > 0) { ssize_t k; printf("    "); for (k = 0; k < r; k++) printf("%02x", probe[k]); printf("\n");
+                                        /* a protected record under the server application key: decrypt it to see the alert */
+                                        tls13_input(&t, probe, (uint32_t)r);
+                                        logf_("tls: record decodes as: %s%s (alert description %d)", tls13_errstr(t.error), t.error ? "" : " (no error?)", t.alert); }
+                           printf("RESULT: TLS 1.3 flight closed by the server after %.1f s\n", (now_ms() - start) / 1000.0); return 1; }
+            logf_("tls: server still silent after %.1f s, sending our Finished now", (now_ms() - start) / 1000.0);
+        }
+        if (!flush_tls()) { printf("RESULT: send failed\n"); return 1; }
         logf_("tls: TLS 1.3 TLS_AES_128_GCM_SHA256 / X25519 connected, %d certificates verified against the pinned G2 key, RSA-PSS CertificateVerify and Finished verified", t.chain_len);
     }
 
