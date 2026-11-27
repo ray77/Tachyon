@@ -275,6 +275,9 @@ bench/tls_vector.h: tests/vectors/tls_session.bin tools/gen_tls_vector.py
 bench/tls13_vector.h: tests/vectors/tls13_session.bin tools/gen_tls_vector.py
 	python3 tools/gen_tls_vector.py $< tv13 > $@
 
+bench/signal_vector.h: tests/vectors/signal_vectors.txt tools/gen_signal_vector.py
+	python3 tools/gen_signal_vector.py $< > $@
+
 crypto/ref/ed25519_btable.h: tools/gen_btable.c crypto/ref/ed25519.c
 	$(HOSTCC) -O2 -Icrypto/ref tools/gen_btable.c crypto/ref/x25519_ref.c crypto/ref/sha512.c crypto/ref/ed25519.c crypto/ref/yield.c -o build/gen_btable
 	./build/gen_btable > $@
@@ -294,7 +297,7 @@ qr-test: build/qr_test build/qr-venv/.ok
 	./build/qr_test $(QR_PY) build/qr
 
 # ---- amiga -----------------------------------------------------------------
-$(AMIGA_ASM): $(UNITY_SRC) $(CRYPTO_SRC) $(BENCH_SRC) crypto/ref/x25519.h crypto/ref/ed25519.h crypto/ref/tls13.h bench/xeddsa_vector.h bench/tls_vector.h bench/tls13_vector.h
+$(AMIGA_ASM): $(UNITY_SRC) $(CRYPTO_SRC) $(BENCH_SRC) crypto/ref/x25519.h crypto/ref/ed25519.h crypto/ref/tls13.h bench/xeddsa_vector.h bench/tls_vector.h bench/tls13_vector.h bench/signal_vector.h proto/signal.c proto/signal.h proto/prekeys.c
 	@mkdir -p build/amiga
 	$(VC) $(VCFLAGS) $(UNITY_SRC) -o=$@
 

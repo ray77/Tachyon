@@ -119,18 +119,19 @@ uint32_t ws_frame_close(ws_client *w, uint16_t code, uint8_t *out, uint32_t outc
 
 int ws_input(ws_client *w, const uint8_t *data, uint32_t len, uint8_t *out, uint32_t *outlen, uint32_t outcap)
 {
-    uint32_t i;
-    if (w->state == WS_ERROR) return 0;
+    uint32_t i, len0 = len;
+    w->consumed = 0;
+    if (w->state == WS_ERROR) { w->consumed = len0 - len; return 0; }
     if (w->state == WS_WAIT_HTTP) {
         while (len && w->http_len < sizeof w->http) {
             w->http[w->http_len++] = *data++; len--;
             if (w->http_len >= 4 && w->http[w->http_len-4] == '\r' && w->http[w->http_len-3] == '\n' && w->http[w->http_len-2] == '\r' && w->http[w->http_len-1] == '\n') {
-                if (!check_http(w)) { w->state = WS_ERROR; return 0; }
+                if (!check_http(w)) { w->state = WS_ERROR; { w->consumed = len0 - len; return 0; } }
                 w->state = WS_OPEN;
                 break;
             }
         }
-        if (w->state != WS_OPEN) { if (w->http_len >= sizeof w->http) { w->state = WS_ERROR; return 0; } return 1; }
+        if (w->state != WS_OPEN) { if (w->http_len >= sizeof w->http) { w->state = WS_ERROR; { w->consumed = len0 - len; return 0; } } { w->consumed = len0 - len; return 1; } }
     }
     while (len) {
         if (w->need == 0) {
@@ -138,21 +139,21 @@ int ws_input(ws_client *w, const uint8_t *data, uint32_t len, uint8_t *out, uint
             uint32_t hl;
             w->hdr[w->hdr_len++] = *data++; len--;
             if (w->hdr_len < 2) continue;
-            if (w->hdr[1] & 0x80) { w->state = WS_ERROR; return 0; }       /* server frames must not be masked */
+            if (w->hdr[1] & 0x80) { w->state = WS_ERROR; { w->consumed = len0 - len; return 0; } }       /* server frames must not be masked */
             hl = 2 + ((w->hdr[1] & 127) == 126 ? 2 : (w->hdr[1] & 127) == 127 ? 8 : 0);
             if (w->hdr_len < hl) continue;
             {
                 uint32_t plen = w->hdr[1] & 127;
                 if (plen == 126) plen = ((uint32_t)w->hdr[2] << 8) | w->hdr[3];
-                else if (plen == 127) { if (w->hdr[2] | w->hdr[3] | w->hdr[4] | w->hdr[5]) { w->state = WS_ERROR; return 0; } plen = ((uint32_t)w->hdr[6] << 24) | ((uint32_t)w->hdr[7] << 16) | ((uint32_t)w->hdr[8] << 8) | w->hdr[9]; }
+                else if (plen == 127) { if (w->hdr[2] | w->hdr[3] | w->hdr[4] | w->hdr[5]) { w->state = WS_ERROR; { w->consumed = len0 - len; return 0; } } plen = ((uint32_t)w->hdr[6] << 24) | ((uint32_t)w->hdr[7] << 16) | ((uint32_t)w->hdr[8] << 8) | w->hdr[9]; }
                 w->opcode = w->hdr[0] & 15; w->fin = (w->hdr[0] & 0x80) != 0;
-                if (w->hdr[0] & 0x70) { w->state = WS_ERROR; return 0; }     /* no extensions negotiated */
-                if (w->opcode == 1) { w->state = WS_ERROR; return 0; }       /* text frames: not used by WhatsApp */
-                if (w->opcode >= 8 && (plen > 125 || !w->fin)) { w->state = WS_ERROR; return 0; }
+                if (w->hdr[0] & 0x70) { w->state = WS_ERROR; { w->consumed = len0 - len; return 0; } }     /* no extensions negotiated */
+                if (w->opcode == 1) { w->state = WS_ERROR; { w->consumed = len0 - len; return 0; } }       /* text frames: not used by WhatsApp */
+                if (w->opcode >= 8 && (plen > 125 || !w->fin)) { w->state = WS_ERROR; { w->consumed = len0 - len; return 0; } }
                 if (w->opcode < 8) {
-                    if (w->opcode == 0 && !w->in_msg) { /* continuation without start */ w->state = WS_ERROR; return 0; }
+                    if (w->opcode == 0 && !w->in_msg) { /* continuation without start */ w->state = WS_ERROR; { w->consumed = len0 - len; return 0; } }
                     if (w->opcode == 2) { w->msg_len = 0; w->skipping = 0; w->in_msg = 1; }
-                    if (plen > WS_MAX_FRAME) { w->state = WS_ERROR; return 0; }
+                    if (plen > WS_MAX_FRAME) { w->state = WS_ERROR; { w->consumed = len0 - len; return 0; } }
                     if (w->stream) { /* delivered in pieces below, nothing is dropped */ }
                     else if (w->skipping || w->msg_len + plen > w->msg_cap) {
                         /* too big for the caller's buffer: swallow the whole message and report it (WhatsApp sends
@@ -177,7 +178,7 @@ int ws_input(ws_client *w, const uint8_t *data, uint32_t len, uint8_t *out, uint
                 uint32_t room = w->msg_cap - w->msg_len, c = take < room ? take : room;
                 for (i = 0; i < c; i++) w->msg[w->msg_len + i] = data[i];
                 w->msg_len += c; data += c; len -= c; w->need -= c;
-                if (w->need) { if (w->msg_len == w->msg_cap) { w->msg_partial = 1; return 1; } break; }
+                if (w->need) { if (w->msg_len == w->msg_cap) { w->msg_partial = 1; { w->consumed = len0 - len; return 1; } } break; }
                 goto frame_done;
             }
             if (w->opcode < 8) { if (!w->skipping) { for (i = 0; i < take; i++) w->msg[w->msg_len + i] = data[i]; w->msg_len += take; } }
@@ -189,20 +190,20 @@ frame_done:
         if (w->opcode < 8) {
             if (w->fin) w->in_msg = 0;
             if (w->fin && w->skipping) { w->skipping = 0; w->msg_len = 0; continue; }   /* discarded, no message */
-            if (w->fin) { w->msg_ready = 1; return 1; }       /* caller consumes before feeding more */
+            if (w->fin) { w->msg_ready = 1; { w->consumed = len0 - len; return 1; } }       /* caller consumes before feeding more */
         } else if (w->opcode == 9) {                          /* ping -> pong with the same payload */
             uint32_t f = 0;
-            if (!mask_and_emit(w, 10, w->hdr, w->hdr_len, out + *outlen, outcap - *outlen, &f)) { w->state = WS_ERROR; return 0; }
+            if (!mask_and_emit(w, 10, w->hdr, w->hdr_len, out + *outlen, outcap - *outlen, &f)) { w->state = WS_ERROR; { w->consumed = len0 - len; return 0; } }
             *outlen += f; w->hdr_len = 0;
         } else if (w->opcode == 8) {
             w->close_code = w->hdr_len >= 2 ? (uint16_t)(((uint16_t)w->hdr[0] << 8) | w->hdr[1]) : 1005;
             w->hdr_len = 0;
             if (w->state == WS_OPEN) { uint32_t f = 0; if (mask_and_emit(w, 8, 0, 0, out + *outlen, outcap - *outlen, &f)) *outlen += f; }
             w->state = WS_CLOSED;
-            return 1;
+            { w->consumed = len0 - len; return 1; }
         } else if (w->opcode == 10) {
             w->hdr_len = 0;                                   /* pong: ignore */
-        } else { w->state = WS_ERROR; return 0; }
+        } else { w->state = WS_ERROR; { w->consumed = len0 - len; return 0; } }
     }
-    return 1;
+    { w->consumed = len0 - len; return 1; }
 }

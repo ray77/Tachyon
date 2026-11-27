@@ -32,6 +32,23 @@
 #include "tls_vector.h"
 #include "tls13.h"
 #include "tls13_vector.h"
+#include "signal_vector.h"
+#include "../proto/signal.h"
+#include "../proto/prekeys.h"
+
+/* Signal: scripted randomness (the libsignal vectors were made with these fixed keys) */
+static const uint8_t *sv_script[4]; static int sv_script_i;
+static void sv_random(void *ctx, uint8_t *out, uint32_t n) { uint32_t i; const uint8_t *s = sv_script[sv_script_i < 4 ? sv_script_i : 3]; (void)ctx; sv_script_i++; for (i = 0; i < n; i++) out[i] = s ? s[i & 31] : 0; }
+static int sv_eq(const uint8_t *a, const uint8_t *b, uint32_t n) { uint32_t i; for (i = 0; i < n; i++) if (a[i] != b[i]) return 0; return 1; }
+static void sv_alice(sig_local *me, wa_prekeys *pk)
+{
+    uint32_t i;
+    me->ident_priv = sv_alice_ident_priv; me->ident_pub = sv_alice_ident_pub; me->reg_id = 0x1234;
+    me->spk_id = 1; me->spk_priv = sv_alice_spk_priv; me->spk_pub = sv_alice_spk_pub;
+    wa_prekeys_init(pk); pk->n = 1; pk->next_id = 6; pk->k[0].id = 5; pk->k[0].uploaded = 1;
+    for (i = 0; i < 32; i++) { pk->k[0].priv[i] = sv_alice_opk_priv[i]; pk->k[0].pub[i] = sv_alice_opk_pub[i]; }
+    me->prekeys = pk; me->random = sv_random; me->rctx = 0; sv_script_i = 0;
+}
 
 
 struct ExecBase *SysBase;
@@ -653,6 +670,64 @@ int main(void)
             out(r ? "PASS " : "FAIL "); out("tls 1.3 handshake replay with certificate cache hit reaches CONNECTED\n"); ok &= r;
             report("tls 1.3 client handshake, certificate + prepared key cached (X25519 + rsa_pub_check + RSA-PSS verify + HKDF + GCM)", t1 - t0, 1);
         }
+    }
+
+    /* Signal sessions (proto/signal.c, docs/SIGNAL.md): the libsignal vectors on the 68000 - X3DH as responder (the
+     * phone wrote to us first), the same with the message at an odd address (protobuf fields sit anywhere), X3DH as
+     * initiator from the phone's bundle (XEdDSA + 4 ladders + 2 key pairs + 1 ratchet ladder) and the first message */
+    {
+        static sig_local me; static wa_prekeys pk; static sig_session s; static sig_bundle b;
+        static uint8_t pt[SIG_BODY_MAX], odd[2048], ct[2048]; uint32_t ptlen, used, ctlen; int r, is_pk;
+        sv_alice(&me, &pk); sig_session_init(&s);
+        sv_script[0] = sv_s2_alice1_ratchet_priv; sv_script[1] = sv_script[2] = sv_script[3] = 0;   /* our ratchet key, drawn while receiving (libsignal does the same) */
+        t0 = ticks_now();
+        r = sig_decrypt(&s, &me, 1, sv_s2_pkmsg1, SV_S2_PKMSG1_LEN, pt, sizeof pt, &ptlen, &used);
+        t1 = ticks_now();
+        r = r == SIG_OK && ptlen == SV_S2_PKMSG1_PT_LEN && sv_eq(pt, sv_s2_pkmsg1_pt, ptlen) && used == 5 && pk.n == 0;
+        out(r ? "PASS " : "FAIL "); out("signal: X3DH as responder + first message (libsignal s2_pkmsg1), one-time prekey 5 consumed\n"); ok &= r;
+        report("signal responder: pkmsg (4 X25519 ladders + ratchet: 2 ladders + 1 key pair)", t1 - t0, 1);
+        /* our reply: the first message of the sending chain made above, then Bob's answer on his next chain */
+        t0 = ticks_now();
+        r = sig_encrypt(&s, &me, sv_s2_msg1_pt, SV_S2_MSG1_PT_LEN, ct, sizeof ct, &ctlen, &is_pk);
+        t1 = ticks_now();
+        r = r == SIG_OK && !is_pk && ctlen == SV_S2_MSG1_LEN && sv_eq(ct, sv_s2_msg1, ctlen);
+        out(r ? "PASS " : "FAIL "); out("signal: our reply on the new session bit-exact to libsignal (s2_msg1)\n"); ok &= r;
+        report("signal responder: first reply (DH ratchet: 1 key pair + 1 ladder, HKDF, AES-CBC, HMAC)", t1 - t0, 1);
+        t0 = ticks_now();
+        r = sig_decrypt(&s, &me, 0, sv_s2_msg2, SV_S2_MSG2_LEN, pt, sizeof pt, &ptlen, &used);
+        t1 = ticks_now();
+        r = r == SIG_OK && ptlen == SV_S2_MSG2_PT_LEN && sv_eq(pt, sv_s2_msg2_pt, ptlen);
+        out(r ? "PASS " : "FAIL "); out("signal: Bob's answer on his new chain (s2_msg2)\n"); ok &= r;
+        report("signal: message with a new ratchet key (1 ladder + 1 key pair + 1 ladder, HKDF, AES-CBC, HMAC)", t1 - t0, 1);
+        /* the phone's two prekey messages, the first copied to an odd address */
+        sv_alice(&me, &pk); sig_session_init(&s);
+        for (i = 0; i < (int)SV_WA_PKMSG1_LEN; i++) odd[1 + i] = sv_wa_pkmsg1[i];
+        r = sig_decrypt(&s, &me, 1, odd + 1, SV_WA_PKMSG1_LEN, pt, sizeof pt, &ptlen, &used);
+        r = r == SIG_OK && ptlen == SV_WA_PKMSG1_PT_LEN && sv_eq(pt, sv_wa_pkmsg1_pt, ptlen);
+        out(r ? "PASS " : "FAIL "); out("signal: the phone's waE2E prekey message from an odd address (wa_pkmsg1)\n"); ok &= r;
+        r = sig_decrypt(&s, &me, 1, sv_wa_msg2, SV_WA_MSG2_LEN, pt, sizeof pt, &ptlen, &used);
+        r = r == SIG_OK && ptlen == SV_WA_MSG2_PT_LEN && sv_eq(pt, sv_wa_msg2_pt, ptlen);
+        out(r ? "PASS " : "FAIL "); out("signal: the phone's second prekey message on the same session (wa_msg2)\n"); ok &= r;
+        /* initiator: Bob's bundle, scripted base and ratchet keys, the first prekey message bit-exact */
+        sv_alice(&me, &pk); sig_session_init(&s);
+        sv_script[0] = sv_s1_alice_base_priv; sv_script[1] = sv_s1_alice_ratchet1_priv; sv_script[2] = sv_script[3] = 0;
+        b.reg_id = 0xBEEF; b.spk_id = 7; b.has_opk = 1; b.opk_id = 42;
+        for (i = 0; i < 32; i++) { b.ident[i] = sv_bob_ident_pub[i]; b.spk[i] = sv_bob_spk_pub[i]; b.opk[i] = sv_bob_opk_pub[i]; }
+        for (i = 0; i < 64; i++) b.spk_sig[i] = sv_bob_spk_sig[i];
+        t0 = ticks_now();
+        r = sig_session_start(&s, &me, &b);
+        t1 = ticks_now();
+        out(r == SIG_OK ? "PASS " : "FAIL "); out("signal: X3DH as initiator from the phone's bundle (XEdDSA verified)\n"); ok &= r == SIG_OK;
+        report("signal initiator: XEdDSA + X3DH (4 ladders) + 2 key pairs + ratchet ladder", t1 - t0, 1);
+        t0 = ticks_now();
+        r = sig_encrypt(&s, &me, sv_s1_pkmsg1_pt, SV_S1_PKMSG1_PT_LEN, ct, sizeof ct, &ctlen, &is_pk);
+        t1 = ticks_now();
+        r = r == SIG_OK && is_pk && ctlen == SV_S1_PKMSG1_LEN && sv_eq(ct, sv_s1_pkmsg1, ctlen);
+        out(r ? "PASS " : "FAIL "); out("signal: first prekey message bit-exact to libsignal (s1_pkmsg1)\n"); ok &= r;
+        report("signal: encrypt (HKDF, AES-CBC, HMAC)", t1 - t0, 1);
+        b.spk_sig[3] ^= 1; sig_session_init(&s); sv_alice(&me, &pk); sv_script[0] = sv_s1_alice_base_priv; sv_script[1] = sv_s1_alice_ratchet1_priv;
+        r = sig_session_start(&s, &me, &b);
+        out(r == SIG_ERR_SIGNATURE ? "PASS " : "FAIL "); out("signal: a tampered signed-prekey signature is rejected\n"); ok &= r == SIG_ERR_SIGNATURE;
     }
 
     blitter_bench();

@@ -59,7 +59,7 @@ static uint8_t cached_static[32]; static int have_cached_static;   /* the server
 static int prepared;
 static noise_transport tr;            /* transport keys of the current connection */
 static int pump_quiet;                /* suppress the "timeout" log line (QR wait loop) */
-static int offline_done;               /* <ib><offline count/></ib>: the server has delivered everything that waited for us */
+static int offline_done, offline_preview;   /* <ib><offline_preview count/></ib> announces the batch, <ib><offline count/></ib> ends it */
 static uint32_t msg_off, msg_have, skip_left;    /* one WebSocket message may carry several WA frames (3-byte length each,
                                          whatsmeow socket/framesocket.go processData): the ones not taken yet */
 
@@ -172,15 +172,19 @@ static int pump(int want_tls_state, int want_msg, uint32_t timeout_ms)
         if (!flush_tls()) return 0;
         if (want_msg == 2 && w.state == WS_OPEN) return 1;
         if (want_msg) {
-            /* feed pending decrypted bytes one at a time so nothing after a complete message is lost */
+            /* feed the pending decrypted bytes; ws_input stops at a complete message or a full buffer and says how
+             * many bytes it used, the rest waits (feeding one byte at a time and shifting the buffer each time cost
+             * minutes per 16 KiB on the 68000 - the first live chat attempts) */
             while (pend_len && !w.msg_ready && !w.msg_partial) {
-                uint32_t i;
+                uint32_t i, c;
                 ol = 0;
                 { uint32_t d = w.dropped;
-                  if (!ws_input(&w, pend, 1, out, &ol, sizeof out)) { wa_fmt(line, sizeof line, "ws error, state %d", w.state); logl(line); return 0; }
+                  if (!ws_input(&w, pend, pend_len, out, &ol, sizeof out)) { wa_fmt(line, sizeof line, "ws error, state %d", w.state); logl(line); return 0; }
                   if (w.dropped != d) { wa_fmt(line, sizeof line, "ws: a %u-byte message was dropped (larger than the %u-byte buffer)", w.dropped_len, (uint32_t)WA_PROBE_MSG_MAX); logl(line); } }
                 if (ol && !app_send(out, ol)) return 0;
-                pend_len--; for (i = 0; i < pend_len; i++) pend[i] = pend[i + 1];
+                c = w.consumed > pend_len ? pend_len : w.consumed;
+                if (!c) break;
+                pend_len -= c; for (i = 0; i < pend_len; i++) pend[i] = pend[i + c];
             }
             if (w.msg_ready || w.msg_partial) { if (io->debug) { wa_fmt(line, sizeof line, "  ws message %u bytes%s:", w.msg_len, w.msg_partial ? " (partial)" : ""); log_hex(line, w.msg, w.msg_len < 4 ? w.msg_len : 4); } return 1; }
             if (w.state == WS_CLOSED) { wa_fmt(line, sizeof line, "server closed the WebSocket (code %u)", (uint32_t)w.close_code); logl(line); return 0; }
@@ -338,6 +342,7 @@ int wa_probe_prepare(wa_probe_io *pio)
 
 static int recv_frame(uint32_t timeout_ms, uint8_t *plain, uint32_t *plen);
 static void frames_reset(void);
+static uint32_t dec_value(const wab_value *v);
 
 /* TCP is connected: TLS -> WebSocket -> Noise XX with `payload` as the ClientPayload; the first decrypted server
  * frame lands in plain[0..*plain_len). Shared by the probe, the pairing connection and the login connection. */
@@ -744,7 +749,11 @@ static int handle_async(const wab_node *n)
     }
     if (wab_str_eq(&n->tag, "ib") && n->val.kind == WAB_LIST) {
         uint32_t i;
-        for (i = 0; i < n->n_children; i++) { log_node("  ib: ", &n->children[i]); if (wab_str_eq(&n->children[i].tag, "offline")) offline_done = 1; }
+        for (i = 0; i < n->n_children; i++) {
+            log_node("  ib: ", &n->children[i]);
+            if (wab_str_eq(&n->children[i].tag, "offline")) offline_done = 1;
+            if (wab_str_eq(&n->children[i].tag, "offline_preview") && dec_value(wab_get_attr(&n->children[i], "count"))) offline_preview = 1;
+        }
     }
     return 1;                                   /* ib (offline_preview, offline, dirty, edge_routing), iq from the server, ...: logged only */
 }
@@ -780,7 +789,7 @@ static int iq_is_result(const wab_node *r) { const wab_value *ty = r ? wab_get_a
 
 /* ---- messages: Signal sessions, <message> in and out (docs/SIGNAL.md; whatsmeow send.go, message.go, receipt.go) ---- */
 static sig_local me_local;
-static uint8_t msg_pt[1024], msg_ct[1400], msg_plain[2048], msg_devid[600];   /* a Signal body is at most SIG_BODY_MAX = 2048 */
+static uint8_t msg_pt[1024], msg_ct[1400], msg_plain[SIG_BODY_MAX], msg_devid[600];   /* the phone's first message to a new device was 2757 bytes (live attempt 2) */
 static char chat_line[256];
 
 static void core_random(void *ctx, uint8_t *out, uint32_t n) { (void)ctx; drbg_generate(&rng, out, n); }
@@ -818,7 +827,7 @@ static int fetch_bundle(const char *user, uint32_t device, int lid, sig_bundle *
     a[3].key = wab_s("to"); a[3].val = wab_jid_value("", WA_SERVER_JID, 0);
     iq.attrs = a; iq.n_attrs = 4; iq.val.kind = WAB_LIST; iq.children = &key; iq.n_children = 1;
     if (!send_node(&iq, "prekey bundle query")) return 0;
-    r = wait_result(id, 30000);
+    r = wait_result(id, 120000);                    /* stanzas in between are handled; a message to us may cost a minute on the 68000 */
     if (!iq_is_result(r)) { logl("signal: no prekey bundle (no result or an error IQ, see recv: line)"); return 0; }
     list = wab_get_child(r, "list");
     if (!list || list->val.kind != WAB_LIST) { logl("signal: bundle result without <list>"); return 0; }
@@ -1118,13 +1127,18 @@ static int post_login(void)
           attempt), ending with <ib><offline count/></ib>. Each stanza is handled as it arrives (acknowledged, messages
           decrypted when we have sessions); nothing else goes out until the batch is done or the line has been quiet. */
     {
-        uint32_t t0 = ms(), last = ms(), before = io->frames_after_login; offline_done = 0;
-        while (!offline_done && ms() - last < 6000) {
-            const wab_node *n = recv_node(1000, &gone);
+        uint32_t t0 = ms(), last = ms(), before = io->frames_after_login, quiet; offline_done = 0; offline_preview = 0;
+        for (;;) {
+            const wab_node *n;
+            /* until the preview: 8 s of silence ends the wait; after a preview announcing stanzas: 45 s between frames
+             * (a 16 KiB TLS record takes the 68000 about 3 s to decrypt and parse), 15 minutes in all */
+            quiet = offline_preview ? 45000 : 8000;
+            if (offline_done || ms() - last >= quiet || ms() - t0 > 900000) break;
+            n = recv_node(1000, &gone);
             if (gone) { logl("login: connection closed by the server during the offline batch"); close_ws(); return 1; }
             if (n) { last = ms(); if (!handle_async(n)) { close_ws(); return 1; } }
         }
-        wa_fmt(line, sizeof line, "login: offline batch: %u stanzas in %T s%s", io->frames_after_login - before, ms() - t0, offline_done ? ", <offline> marker seen" : ", no <offline> marker (line quiet for 6 s)"); logl(line);
+        wa_fmt(line, sizeof line, "login: offline batch: %u stanzas in %T s%s", io->frames_after_login - before, ms() - t0, offline_done ? ", <offline> marker seen" : offline_preview ? ", NO <offline> marker (line quiet for 45 s)" : ", nothing announced (quiet for 8 s)"); logl(line);
     }
     /* 4. idle time: the key material for the next start (two key pairs, es with the server static just verified),
           pongs from the heartbeat keep the WebSocket alive meanwhile; the record goes to the caller right away */

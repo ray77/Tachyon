@@ -131,7 +131,7 @@ int main(int argc, char **argv)
     enc_eq(&alice, &la, "s1_pkmsg1", 1);
     enc_eq(&alice, &la, "s1_pkmsg2", 1);
     check(alice.cur.send_index == 2 && alice.cur.has_pending, "alice: chain stepped twice, prekey message still unacknowledged");
-    check(sig_encrypt(&alice, &la, pt, 5000, out, sizeof out, &outlen, &is_pk) == SIG_ERR_BUFFER, "oversize plaintext refused");
+    { static uint8_t big[SIG_BODY_MAX + 32]; check(sig_encrypt(&alice, &la, big, SIG_BODY_MAX + 1, out, sizeof out, &outlen, &is_pk) == SIG_ERR_BUFFER, "oversize plaintext refused"); }
 
     push(&rb, "s1_bob1_ratchet_priv");
     dec_eq(&bob, &lb, "s1_pkmsg1", 1, "bob");

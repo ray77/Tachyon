@@ -38,6 +38,8 @@ struct wa_prekeys;
 #define SIG_RECV_CHAINS  3        /* libsignal: 5 */
 #define SIG_SKIPPED      12       /* skipped message keys kept per state; libsignal: 2000 */
 #define SIG_MAX_FUTURE   2000     /* libsignal maxFutureMessages */
+#define SIG_BODY_MAX     6144     /* padded plaintext / ciphertext body; the phone's first message to a new device (app state
+                                     keys) was 2757 bytes on the wire in the second live attempt */
 #define SIG_USER_MAX     24
 #define SIG_STORE_MAX    6        /* sessions (one per remote device) */
 

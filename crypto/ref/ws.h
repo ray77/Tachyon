@@ -29,6 +29,8 @@ typedef struct {
     int msg_partial;                     /* stream mode: msg[0..msg_len) is full but the message goes on - the caller consumes
                                             whole WA frames from the front, moves the rest down, sets msg_len and clears this */
     int in_msg;                          /* between the first and the final fragment of a data message */
+    uint32_t consumed;                   /* bytes of the last ws_input() call that were used (it returns early on
+                                            msg_ready / msg_partial; the caller drops exactly these and feeds the rest later) */
     int skipping;                        /* a message larger than msg_cap is being discarded (not an error) */
     uint32_t dropped, dropped_len;       /* how many messages were discarded, and the last one's size */
     uint16_t close_code;

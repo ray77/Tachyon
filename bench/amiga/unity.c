@@ -18,4 +18,8 @@
 #include "../../crypto/ref/ws.c"
 #include "../../crypto/ref/heartbeat.c"
 #include "../../crypto/ref/yield.c"
+#include "../../proto/wabinary.c"
+#include "../../proto/identity.c"
+#include "../../proto/prekeys.c"
+#include "../../proto/signal.c"
 #include "../x25519_bench.c"

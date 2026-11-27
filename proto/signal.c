@@ -7,7 +7,7 @@
 #include "pb.h"
 #include "prekeys.h"
 
-#define SIG_BODY_MAX 2048                       /* padded plaintext / ciphertext body (texts; media travel as references) */
+/* SIG_BODY_MAX: proto/signal.h */
 #define SIG_INNER_MAX (1 + 2 + 33 + 6 + 6 + 3 + SIG_BODY_MAX + SIG_MAC_LEN)
 
 /* ---- helpers --------------------------------------------------------------------------------------- */
@@ -208,7 +208,9 @@ int sig_encrypt(sig_session *s, const sig_local *me, const uint8_t *pt, uint32_t
 }
 
 /* ---- decrypt ------------------------------------------------------------------------------------------ */
-typedef struct { const uint8_t *ratchet; uint32_t counter, prev; const uint8_t *ct; uint32_t ctlen; } sig_msg;
+/* ratchet / base / identity keys are copied out of the protobuf: they sit at any byte offset there, and the 68000
+ * field arithmetic wants its 32-byte inputs word-aligned */
+typedef struct { uint8_t ratchet[32]; uint32_t counter, prev; const uint8_t *ct; uint32_t ctlen; int have_ratchet; } sig_msg;
 
 static int parse_message(const uint8_t *in, uint32_t len, sig_msg *m)
 {
@@ -218,13 +220,13 @@ static int parse_message(const uint8_t *in, uint32_t len, sig_msg *m)
     if ((in[0] >> 4) != SIG_VERSION) return SIG_ERR_VERSION;
     p = in + 1; end = in + len - SIG_MAC_LEN;
     while (pb_next(&p, end, &f, &wire, &v, &d, &l)) {
-        if (f == 1 && wire == PB_BYTES) { if (l != 33 || d[0] != 0x05) return SIG_ERR_FORMAT; m->ratchet = d + 1; }
+        if (f == 1 && wire == PB_BYTES) { if (l != 33 || d[0] != 0x05) return SIG_ERR_FORMAT; sig_cp(m->ratchet, d + 1, 32); m->have_ratchet = 1; }
         else if (f == 2 && wire == PB_VARINT) m->counter = v;
         else if (f == 3 && wire == PB_VARINT) m->prev = v;
         else if (f == 4 && wire == PB_BYTES) { m->ct = d; m->ctlen = l; }
     }
     if (p != end) return SIG_ERR_FORMAT;
-    if (!m->ratchet || !m->ct || m->ctlen < 16 || (m->ctlen & 15)) return SIG_ERR_FORMAT;
+    if (!m->have_ratchet || !m->ct || m->ctlen < 16 || (m->ctlen & 15) || m->ctlen > SIG_BODY_MAX) return SIG_ERR_FORMAT;
     return SIG_OK;
 }
 
@@ -295,8 +297,9 @@ static int decrypt_with_state(sig_state *st, const sig_local *me, const uint8_t 
     sig_zero(mac, 32); sig_zero(mkey, 32);
     if (r != SIG_OK) { sig_zero(ckey, 32); return r; }
     if (m.ctlen > cap) { sig_zero(ckey, 32); return SIG_ERR_BUFFER; }
+    sig_cp(body_ct, m.ct, m.ctlen);
     aes_set_key(&ak, ckey, 256);
-    aes_cbc_decrypt(&ak, iv, m.ct, m.ctlen, pt);
+    aes_cbc_decrypt(&ak, iv, body_ct, m.ctlen, pt);
     sig_zero(ckey, 32); sig_zero(&ak, sizeof ak);
     pad = pt[m.ctlen - 1];
     if (pad == 0 || pad > 16 || pad > m.ctlen) { sig_zero(pt, m.ctlen); return SIG_ERR_PADDING; }
@@ -306,7 +309,7 @@ static int decrypt_with_state(sig_state *st, const sig_local *me, const uint8_t 
     return SIG_OK;
 }
 
-typedef struct { uint32_t opk_id, reg_id, spk_id; const uint8_t *base, *ident, *msg; uint32_t msg_len; } sig_pkmsg;
+typedef struct { uint32_t opk_id, reg_id, spk_id; uint8_t base[32], ident[32]; int have_base, have_ident; const uint8_t *msg; uint32_t msg_len; } sig_pkmsg;
 
 static int parse_pkmsg(const uint8_t *in, uint32_t len, sig_pkmsg *m)
 {
@@ -317,13 +320,13 @@ static int parse_pkmsg(const uint8_t *in, uint32_t len, sig_pkmsg *m)
     p = in + 1; end = in + len;
     while (pb_next(&p, end, &f, &wire, &v, &d, &l)) {
         if (f == 1 && wire == PB_VARINT) m->opk_id = v;
-        else if (f == 2 && wire == PB_BYTES) { if (l != 33 || d[0] != 0x05) return SIG_ERR_FORMAT; m->base = d + 1; }
-        else if (f == 3 && wire == PB_BYTES) { if (l != 33 || d[0] != 0x05) return SIG_ERR_FORMAT; m->ident = d + 1; }
+        else if (f == 2 && wire == PB_BYTES) { if (l != 33 || d[0] != 0x05) return SIG_ERR_FORMAT; sig_cp(m->base, d + 1, 32); m->have_base = 1; }
+        else if (f == 3 && wire == PB_BYTES) { if (l != 33 || d[0] != 0x05) return SIG_ERR_FORMAT; sig_cp(m->ident, d + 1, 32); m->have_ident = 1; }
         else if (f == 4 && wire == PB_BYTES) { m->msg = d; m->msg_len = l; }
         else if (f == 5 && wire == PB_VARINT) m->reg_id = v;
         else if (f == 6 && wire == PB_VARINT) m->spk_id = v;
     }
-    if (p != end || !m->base || !m->ident || !m->msg) return SIG_ERR_FORMAT;
+    if (p != end || !m->have_base || !m->have_ident || !m->msg) return SIG_ERR_FORMAT;
     return SIG_OK;
 }
 
