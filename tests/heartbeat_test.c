@@ -70,7 +70,7 @@ int main(int argc, char **argv)
         while (w.state == WS_WAIT_HTTP && (r = read(fd, buf, sizeof buf)) > 0) if (!ws_input(&w, buf, (uint32_t)r, out, &ol, sizeof out)) break; }
     result(w.state == WS_OPEN, "WebSocket open");
 
-    heartbeat_init(&hb, 0, &w, fake_now, 8000, flush_fd, &fd);
+    heartbeat_init(&hb, &w, fake_now, 8000, flush_fd, &fd);
     /* not yet armed: a computation sends nothing */
     fake_ms = 20000; x25519_ref_base(pk1, sk);
     result(hb.sent == 0, "no pong without an armed heartbeat");

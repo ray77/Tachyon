@@ -1,6 +1,7 @@
 /*
- * End-to-end probe of the WhatsA500 C stack against the real server: our TLS 1.2 RSA client
- * (root pinned to the DigiCert G2 key from tests/certs/wa_rsa_chain.h), our WebSocket client,
+ * End-to-end probe of the WhatsA500 C stack against the real server: our TLS 1.3 client
+ * (X25519, TLS_AES_128_GCM_SHA256, RSA-PSS CertificateVerify, chain pinned to the DigiCert G2 key
+ * from tests/certs/wa_rsa_chain.h), our WebSocket client,
  * our Noise_XX handshake (ClientHello, ServerHello, certificate chain verified with XEdDSA
  * against WhatsApp's root key, ClientFinish) and the pong heartbeat from crypto/ref/heartbeat.c.
  * Between ServerHello and ClientFinish the probe burns `gap` seconds in X25519 ladders, as the
@@ -9,10 +10,10 @@
  * keys. Host only, network required: make wa-probe GAP=30. No pairing is completed; the
  * ClientPayload is a throwaway registration payload from tools/watimeout -dump-payload.
  *
- * Tunnel mode (third argument "tunnel"): the TLS layer is replaced by `openssl s_client` pinned to the
- * planned A500 parameters (TLS 1.3, X25519, TLS_AES_128_GCM_SHA256, rsa_pss_rsae_sha256), because the
- * live edge does not complete TLS_RSA_WITH_AES_128_GCM_SHA256 for any client (docs/PROTOCOL.md 7).
- * Everything above TLS - WebSocket, Noise, certificate chain, heartbeat - is still our code.
+ * Tunnel mode (third argument "tunnel"): the TLS layer is replaced by `openssl s_client` with the same
+ * parameters (TLS 1.3, X25519, TLS_AES_128_GCM_SHA256, rsa_pss_rsae_sha256) as a reference transport;
+ * kept from the days before tls13.c existed (docs/PROTOCOL.md 7). Everything above TLS - WebSocket,
+ * Noise, certificate chain, heartbeat - is our code in both modes.
  */
 #include <stdio.h>
 #include <stdarg.h>
@@ -24,7 +25,7 @@
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <netdb.h>
-#include "tls12.h"
+#include "tls13.h"
 #include "ws.h"
 #include "noise.h"
 #include "heartbeat.h"
@@ -40,7 +41,7 @@ static const uint8_t wa_cert_pub[32] = { 0x14, 0x23, 0x75, 0x57, 0x4d, 0x0a, 0x5
 #define WA_CERT_ISSUER_SERIAL 0
 
 static int fd, tunnel, tun_in = -1, tun_out = -1;
-static tls12 t;
+static tls13 t;
 static ws_client w;
 static uint8_t msgbuf[65536], pend[65536]; static uint32_t pend_len;
 static struct timespec t0;
@@ -59,20 +60,20 @@ static void logf_(const char *fmt, ...)
 
 static int send_all(const uint8_t *p, uint32_t n) { int o = tunnel ? tun_out : fd; while (n) { ssize_t r = write(o, p, n); if (r <= 0) return 0; p += r; n -= (uint32_t)r; } return 1; }
 static int flush_tls(void) { if (tunnel || !t.out_len) return 1; if (!send_all(t.out, t.out_len)) return 0; t.out_len = 0; return 1; }
-static int hb_flush(void *io, const uint8_t *p, uint32_t n) { (void)io; return send_all(p, n); }
 /* plaintext towards the server: through our TLS record layer, or straight into the tunnel */
 static int app_send(const uint8_t *p, uint32_t n)
 {
     uint32_t off = 0;
     if (tunnel) return send_all(p, n);
     while (off < n) {
-        int c = tls12_send(&t, p + off, n - off);
+        int c = tls13_send(&t, p + off, n - off);
         if (c < 0) return 0;
         if (c == 0) { if (!flush_tls()) return 0; continue; }
         off += (uint32_t)c;
     }
     return flush_tls();
 }
+static int hb_send(void *io, const uint8_t *p, uint32_t n) { (void)io; return app_send(p, n); }
 
 /* send one WebSocket binary message through TLS */
 static int ws_send(const uint8_t *payload, uint32_t len)
@@ -113,9 +114,9 @@ static int pump(int want_tls_state, int want_msg, double timeout_s)
             continue;
         }
         if (getenv("WA_PROBE_DEBUG")) { ssize_t k, m = r < 100 ? r : 100; logf_("  read %zd bytes:", r); printf("    "); for (k = 0; k < m; k++) printf("%02x", buf[k]); printf("\n"); }
-        if (!tls12_input(&t, buf, (uint32_t)r)) {
+        if (!tls13_input(&t, buf, (uint32_t)r)) {
             int i;
-            logf_("tls error: %s (state %d), chain of %d:", tls12_errstr(t.error), t.state, t.chain_len);
+            logf_("tls error: %s (state %d, alert %d), chain of %d:", tls13_errstr(t.error), t.state, t.alert, t.chain_len);
             for (i = 0; i < t.chain_len; i++) {
                 const x509_cert *c = &t.chain[i]; uint32_t k;
                 printf("    cert %d: %u bytes, n %u bytes e %u, ca %d, sha256RSA %d, %s..%s, subject ", i, c->len, c->n_len, c->e, c->is_ca, c->sig_sha256_rsa, c->not_before, c->not_after);
@@ -189,7 +190,7 @@ int main(int argc, char **argv)
     static uint8_t cstatic_ct[48], payload_ct[1024], finish[2048], plain[65536];
     uint32_t server_static_ct_len = 0, cert_ct_len = 0, n, ladders = 0;
     const uint8_t *p, *end, *d; uint32_t f, wire, l; uint64_t v;
-    noise_hs hs; noise_transport tr; heartbeat hb;
+    noise_hs hs; noise_transport tr; heartbeat hb; tls13_keypair kp;
     hmac_drbg rng;
     x509_cert root;
     char nowstr[16];
@@ -229,10 +230,11 @@ int main(int argc, char **argv)
         if (connect(fd, ai->ai_addr, ai->ai_addrlen) != 0) { printf("connect failed\n"); return 1; }
         logf_("tcp: connected to web.whatsapp.com:443 (%s)", argc > 2 ? argv[2] : "resolved");
 
-        /* TLS 1.2 RSA with our own client, root pinned to the G2 key */
-        if (!tls12_client_start(&t, "web.whatsapp.com", root.n, root.n_len, root.e, nowstr, &rng)) { printf("tls start failed\n"); return 1; }
-        if (!pump(TLS_ST_CONNECTED, 0, 20)) { printf("RESULT: TLS handshake failed\n"); return 1; }
-        logf_("tls: TLS_RSA_WITH_AES_128_GCM_SHA256 connected, %d certificates verified against the pinned G2 key", t.chain_len);
+        /* TLS 1.3 with our own client, X25519 key pair precomputed (as the A500 does it), root pinned to the G2 key */
+        if (!tls13_keypair_generate(&kp, &rng)) { printf("keypair failed\n"); return 1; }
+        if (!tls13_client_start_kp(&t, "web.whatsapp.com", root.n, root.n_len, root.e, nowstr, &rng, &kp)) { printf("tls start failed\n"); return 1; }
+        if (!pump(TLS13_ST_CONNECTED, 0, 20)) { printf("RESULT: TLS handshake failed\n"); return 1; }
+        logf_("tls: TLS 1.3 TLS_AES_128_GCM_SHA256 / X25519 connected, %d certificates verified against the pinned G2 key, RSA-PSS CertificateVerify and Finished verified", t.chain_len);
     }
 
     /* WebSocket upgrade */
@@ -276,7 +278,7 @@ int main(int argc, char **argv)
     {
         uint32_t t_hello = now_ms();
         /* the A500's computing time: X25519 ladders with the heartbeat armed */
-        heartbeat_init(&hb, tunnel ? 0 : &t, &w, now_ms, 4000, hb_flush, 0);
+        heartbeat_init(&hb, &w, now_ms, 4000, hb_send, 0);
         heartbeat_arm(&hb);
         logf_("noise: holding ClientFinish for %.0f s of X25519 ladders, pong heartbeat every 4 s", gap);
         spin_ladders(gap, &ladders);
@@ -323,6 +325,6 @@ int main(int argc, char **argv)
     }
     {   uint8_t cl[16]; n = ws_frame_close(&w, 1000, cl, sizeof cl); if (n) app_send(cl, n); }
     if (tunnel) { close(tun_out); close(tun_in); wait(0); } else close(fd);
-    printf("RESULT: handshake ACCEPTED by web.whatsapp.com with our %s/WS/Noise stack, %.0f s hold, %u pongs\n", tunnel ? "(openssl TLS 1.3 tunnel)" : "TLS", gap, hb.sent);
+    printf("RESULT: handshake ACCEPTED by web.whatsapp.com with our %s/WS/Noise stack, %.0f s hold, %u pongs\n", tunnel ? "(openssl TLS 1.3 tunnel)" : "TLS 1.3", gap, hb.sent);
     return 0;
 }

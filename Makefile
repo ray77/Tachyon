@@ -97,18 +97,18 @@ heartbeat-test: build/heartbeat_test
 	for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do grep -q READY build/wsserver_hb.log 2>/dev/null && break; sleep 0.5; done; \
 	./build/heartbeat_test 4435; r=$$?; sleep 0.5; cat build/wsserver_hb.log; exit $$r
 
-# our own TLS 1.2 + WebSocket + Noise XX client against web.whatsapp.com with 30 s of simulated A500
+# our own TLS 1.3 + WebSocket + Noise XX client against web.whatsapp.com with 30 s of simulated A500
 # computing time and the pong heartbeat (network, manual: make wa-probe GAP=30)
 GAP ?= 30
 WAIP ?= $(shell dig +short web.whatsapp.com | grep -E '^[0-9.]+$$' | head -1)
-build/wa_probe: tests/wa_probe.c $(CRYPTO_SRC) crypto/ref/heartbeat.h tests/certs/wa_rsa_chain.h tests/vectors/wa_client_payload.h
+build/wa_probe: tests/wa_probe.c $(CRYPTO_SRC) crypto/ref/heartbeat.h crypto/ref/tls13.h tests/certs/wa_rsa_chain.h tests/vectors/wa_client_payload.h
 	@mkdir -p build
 	$(HOSTCC) $(HOST_CFLAGS) tests/wa_probe.c $(CRYPTO_SRC) -o $@
 
 wa-probe: build/wa_probe
 	./build/wa_probe $(GAP) $(WAIP)
 
-# same, with openssl s_client as TLS 1.3/X25519 transport (the live edge does not complete RSA key transport)
+# same, with openssl s_client as the TLS 1.3/X25519 transport (reference run from before tls13.c existed)
 wa-probe-tunnel: build/wa_probe
 	./build/wa_probe $(GAP) $(WAIP) tunnel
 
