@@ -42,7 +42,31 @@ Konstruktion (`tools/blitaes/gen_blitaes.py`, `crypto/blit/`, `bench/blitaes_ben
 | Kopie heraus (CPU, C) | 160 ms |
 | CPU-T-Tabellen zum Vergleich (1024 Blöcke) | 2,32 s = 7,06 KB/s |
 
-Einordnung: Mit C-Setup kostet jeder Blit ≈ 900 Takte Overhead (bei 1024 Blits je Runde ≈ 0,9 M Takte = 130 ms je Runde – fast die Hälfte der MixColumns-Zeit); ein Assembler-Executor (≈ 250 Takte) ist der nächste Schritt, danach Copper-Steuerung (0 % CPU) und Display-DMA-Abschaltung (+40 % Blitter-Durchsatz). CPU und Blitter zusammen: ≈ 11 KB/s AES-256 für Medien statt 7. Nicht umsonst: ≈ 100 KiB Chip-RAM, zwei AES-Implementierungen.
+Einordnung: Mit C-Setup kostet jeder Blit ≈ 900 Takte Overhead. **Assembler-Executor gemessen** (`crypto/m68k/blitexec.s`, BBUSY-Polling + 14 Registerschreibzugriffe, ≈ 250 Takte): MixColumns 82 → 74 ms je Runde, Transposition heraus 80 → 60 ms, SubBytes unverändert 180 ms; gesamt 3,76 → **3,70 s = 4,43 KB/s**. Die Erklärung steht in den Zahlen: 226 SubBytes-Blits à 512 Wörter mit drei Quellen und einem Ziel sind 463 k Chip-RAM-Zugriffe je Runde; bei 180 ms sind das 2,6 M Zugriffe/s – der Blitter ist durch den Chip-Bus begrenzt (3,55 M Zyklen/s abzüglich Display-DMA), nicht durch das Setup. Der Blitter-Pfad ist also **DMA-bandbreitenbegrenzt**; weniger Blits (Setup) bringen nichts mehr, nur weniger Zugriffe (Gatterzahl, Display-DMA aus) oder Nebenläufigkeit (Copper statt CPU). CPU und Blitter zusammen: ≈ 11 KB/s AES-256 für Medien statt 7. Nicht umsonst: ≈ 100 KiB Chip-RAM, zwei AES-Implementierungen.
+
+## 2b. Copper-gesteuerte Blit-Kette – umgesetzt und gemessen (27.11., früh)
+
+**Ergebnis: Der Copper treibt die gesamte AES-Pipeline ohne CPU-Beteiligung je Blit: 2,28 s je 16 KiB = 7,2 KB/s auf dem Blitter allein, die CPU ist dabei zu 90 % frei. Verschlüsselt die CPU nebenher mit ihren T-Tabellen eigene Blöcke, liefern beide zusammen 14,2 KB/s AES-256 – das Doppelte der CPU allein (7,06 KB/s).** Bitgenau gegen die CPU-Referenz in allen sechs Varianten eines Laufs (4 × fe16-Last, 1 × AES-Last, 1 × GHASH-Last).
+
+Konstruktion (`bench/blitaes_bench.c`, Abschnitt „Copper-driven“):
+* Je Blit ein Copper-Block von 88 Bytes: `WAIT 0,0` mit BFD = 0 (wartet nur auf Blitter-Ende), 17 MOVEs für BLTCON0/1, Masken, vier Zeiger, vier Modulos und BLTSIZE, zwei NOOP-MOVEs ($1FE), dann `MOVE COP1LCH/L` auf den Folgeblock. Letzteres macht die Kette **VBL-fest**: der Hardware-Neustart des Coppers am Vertical Blank landet im noch nicht ausgeführten Folgeblock; schlimmstenfalls wird ein Blit wiederholt – alle Ketten-Blits sind idempotent (nur das Whitening arbeitet in place und bleibt CPU-gesteuert).
+* Terminator: `WAIT` auf Blitter-Ende, `MOVE INTREQ $8400` (AUD3-Bit als Fertig-Flag), `WAIT $FFFF,$FFFE`. Die CPU pollt INTREQR und rechnet dazwischen (fe16_mul, AES-Blöcke oder GHASH – wählbar).
+* Fünf Listen je Batch (TIN 64, SBOX 226, MIX 432, FINAL 128, TOUT 64 Blits = 50 KiB Chip-RAM); die MIX-Liste wird je Runde an 13 × 2 Wörtern (Schlüsselzeiger) gepatcht.
+* Betriebssystem-Verträglichkeit: COPCON CDANG; `GfxBase->LOFlist/SHFlist` während des Laufs auf eine Leerliste, weil der VBL-Server der graphics.library COP1LC jeden Frame zurückschreibt (die Kette gewinnt, weil sie COP1LC nach jedem Blit selbst setzt); OwnBlitter; keine Konsolenausgabe im Blitter-Besitz. Alles in docs/TOOLCHAIN.md.
+
+| Variante (16 KiB, AES-256, Lauf 25) | Zeit | Blitter | CPU nebenher | CPU frei |
+|---|---:|---:|---|---:|
+| CPU-Executor (asm), Display an | 3,70 s | 4,43 KB/s | – | 0 % |
+| Copper-Kette, Bitplane-/Sprite-DMA aus, CPU rechnet fe16_mul (3 Wiederholungen) | **2,28 s** | **7,2 KB/s** | 693 fe16_mul | 90 % |
+| Copper-Kette, CPU verschlüsselt eigene AES-Blöcke | 2,28 s | 7,2 KB/s | 993 Blöcke = 15,5 KiB | 91 % |
+| **→ kombiniert Blitter + CPU** | 2,28 s | | | **14,2 KB/s AES-256** |
+| Copper-Kette, CPU rechnet GHASH | 2,28 s | 7,2 KB/s | 3170 GHASH-Blöcke (1390/s = 22 KB/s) | 77 % |
+
+Lesart: Die Copper-Kette ist nicht nur CPU-frei, sie ist auch schneller als der CPU-Executor (kein 250-Takte-Setup zwischen den Blits, der Blitter läuft lückenlos). Die 90 % freie CPU sind real nutzbar: mit AES-Last verschlüsselt sie in derselben Zeit fast so viel wie der Blitter. GHASH nebenher verliert mehr (77 %), weil seine Tabellenzugriffe mit dem Blitter um den Bus konkurrieren (Tabellen im Fast RAM, Daten im Chip-RAM). Damit ist für GCM auf Medien eine Aufteilung sinnvoll: Blitter rechnet den CTR-Keystream eines Batches, die CPU rechnet GHASH über alle Blöcke plus eigene AES-Blöcke – geschätzt ≈ 9–10 KB/s GCM statt 5,45.
+
+Display-DMA: In Lauf 21/23 lief die Kette mit Display an in 3,40 s (4,8 KB/s) und mit abgeschalteter Bitplane-DMA in 2,38 s; die Einzelliste S-Box maß 8 gegen 6 Ticks (Bitplane-DMA kostet den Blitter ≈ 30 %). In Lauf 25 war die Display-an-Variante genauso schnell wie Display aus – vermutlich fiel die Bitplane-DMA weg, weil die System-Copperliste (die BPLCON0/Zeiger je Frame setzt) seit Beginn des Laufs nicht mehr lief. DMACONR wird seit Lauf 25 mitprotokolliert; offen. Für den Betrieb heißt es ohnehin: während eines Medientransfers kann die Anzeige auf eine Copper-Farbfläche ohne Bitplanes reduziert werden (Fortschritt als Farbbalken per Copper-Liste, kostet keine DMA).
+
+Fehler auf dem Weg (jeder kostete einen FS-UAE-Lauf, zusammen eine Nacht): Konsolen-Write im Blitter-Besitz (Deadlock), COPER-Flag von der Systemliste gesetzt, zweimal falsch gezählte Blockgröße (Blöcke überlappen → kein COP1LC-Update → Endlosschleife ab dem VBL), Diagnose-Blits, die die Schlüssel-Lanes im Arena überschrieben (danach verglichen Copper und Executor denselben Schrott erfolgreich), Rücktransposition mit der falschen Liste. Methode, die am Ende zog: eine Sektion nach der anderen per Copper ausführen, Rest per Executor, Ergebnis vergleichen (Hybridtest).
 
 ## 2a. Erste Rechnung (vor der Umsetzung)
 
@@ -66,6 +90,8 @@ X25519/Ed25519 bestehen aus 16×16-Bit-Multiplikationen (MULU, 256 je Feldmultip
 
 ## 5. Offene Experimente (bei Bedarf)
 
-* Blit-Setup in Assembler messen (erwartet ≈ 300 statt 900 Takte) – relevant nur für kleine Blits.
-* Copper-gesteuerte Blit-Kette als Machbarkeitsnachweis (CPU-Last 0 %).
+* ~~Blit-Setup in Assembler~~ gemessen: 3,76 → 3,70 s, der Blitter ist DMA-begrenzt.
+* ~~Copper-gesteuerte Blit-Kette~~ umgesetzt: 6,9 KB/s bei 87 % freier CPU (Abschnitt 2b).
+* CTR-Zählerblöcke direkt als Lanes erzeugen (die unteren 6 Zählerbits sind periodische Bitmuster, die oberen je 64er-Chunk konstant): spart Kopie-hinein und Transposition-hinein (≈ 220 ms je Batch).
+* Weniger Blitter-Zugriffe statt weniger Blits: S-Box-Gatter mit drei Eingängen (A^B^C, Minterm 0x96) statt Zweier-XOR-Ketten, MixColumns-Termteilung.
 * Echte Hardware: Blitter-Timing ist in FS-UAE zyklengenau modelliert, Chip-RAM-Konflikte mit Bitplane-DMA ebenfalls; eine Bestätigung auf dem A500 steht aus.

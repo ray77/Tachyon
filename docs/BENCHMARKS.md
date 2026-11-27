@@ -200,3 +200,19 @@ Fehler auf dem Weg (dokumentiert in docs/TOOLCHAIN.md): vbcc-Fehlkompilierung vo
 ## 2026-11-26 – Schritt 9: Blitter vs CPU (Custom-Chip-Hypothese)
 
 Details und Bewertung in docs/CUSTOM-CHIPS.md. Kurz: 3-Quellen-XOR über 2 KiB CPU 6,70 ms, Blitter 2,06 ms (1,40 ms ohne Bitplane-DMA); Fixkosten ≈ 900 Takte je Blit; CPU in Fast RAM verliert bei laufendem Blitter 3,5 %, mit BLITHOG wird sie blockiert. Bit-sliced AES auf dem Blitter rechnet sich zu 1,5–2,2 KB/s gegen 5,45 KB/s auf der CPU → nicht umgesetzt. Blitter bleibt für WebSocket-Maskierung, Keystream-XOR und die Anzeige vorgesehen.
+
+## 2026-11-27 – Schritt 10: Bit-sliced AES auf dem Blitter, Copper-gesteuert
+
+Details in docs/CUSTOM-CHIPS.md Abschnitte 2 und 2b. A500/FS-UAE, 16 KiB AES-256 je Batch (1024 Blöcke), bitgenau gegen die CPU-Referenz.
+
+| Variante | Zeit je 16 KiB | Durchsatz | CPU dabei |
+|---|---:|---:|---:|
+| CPU T-Tabellen (asm), Referenz | 2,32 s | 7,06 KB/s | 100 % belegt |
+| Blitter, CPU-Executor in C (900 Takte je Blit) | 3,76 s | 4,36 KB/s | 100 % belegt |
+| Blitter, CPU-Executor in asm (250 Takte je Blit) | 3,70 s | 4,43 KB/s | 100 % belegt |
+| Blitter, Copper-Kette (0 CPU je Blit), Bitplane-DMA aus | **2,28 s** | **7,2 KB/s** | **90 % frei** |
+| Blitter + CPU gleichzeitig (Copper-Kette + T-Tabellen) | 2,28 s für 31,5 KiB | **14,2 KB/s** | – |
+
+Hypothese bestätigt und übertroffen: Die erste Rechnung (Abschnitt 2a in CUSTOM-CHIPS.md) sagte 1,5–2,2 KB/s für den Blitter voraus und riet ab; mit Blitter-seitiger Transposition, 113-Gatter-S-Box und Copper-Steuerung liefert der Blitter so viel wie die CPU, und beide zusammen das Doppelte. Preis: ≈ 100 KiB Chip-RAM (Arena) + 50 KiB Copper-Listen, Display-DMA aus während des Batches, zwei AES-Implementierungen.
+
+Fehler auf dem Weg (docs/TOOLCHAIN.md, Abschnitt Stolperfallen): Konsolenausgabe im Blitter-Besitz (Deadlock), COPER als Fertig-Flag (Systemliste setzt es), VBL-Server schreibt COP1LC, zweimal falsch gezählte Copper-Blockgröße, Diagnose-Blits zerstörten die Schlüssel-Lanes, Rücktransposition mit der TIN- statt TOUT-Liste. 25 FS-UAE-Läufe à 2–5 Minuten.

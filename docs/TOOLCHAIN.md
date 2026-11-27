@@ -65,3 +65,10 @@ Installation: in das amitools-venv zusätzlich `pip install greenlet machine68k`
 ## vbcc-Fehlkompilierung (2026-11-26)
 
 vbcc 0.9h mit `-O=1023 -speed -cpu=68000` übersetzt in `comb_select` den Ausdruck `(digit ^ (int8_t)neg) - (int8_t)neg` mit `int8_t digit` falsch: Es verwendet den vorher für `(uint8_t)digit >> 7` nullerweiterten Wert auch dort, wo C die vorzeichenerweiterte Promotion verlangt. Ergebnis: `|digit|` ist für negative Ziffern falsch, die Comb-Tabellenauswahl liefert die Identität, `x25519_base_comb` ist falsch – nur auf dem Ziel, der Host-Compiler macht es richtig. Workaround: Parameter als `int` übergeben und das Vorzeichen ohne Byte-Casts aus dem `uint32_t`-Shift ableiten. Regel für dieses Projekt: keine Byte-Casts in signed/unsigned-gemischten Ausdrücken; jede neue Funktion zuerst mit `make vamos` gegen die Host-Vektoren prüfen.
+
+## Stolperfallen beim Custom-Chip-Zugriff unter Kickstart 1.3 (2026-11-26, Nacht)
+
+* **Kein `Write()` auf die Konsole zwischen `OwnBlitter()` und `DisownBlitter()`.** Der CON:-Handler rendert Text über graphics.library mit dem Blitter und wartet dann ewig auf dessen Freigabe – das Programm steht ohne Fehlermeldung (drei verlorene FS-UAE-Läufe). Messwerte zwischenspeichern, nach `DisownBlitter()` ausgeben.
+* **INTREQ COPER taugt nicht als eigenes Fertig-Flag**: die System-Copperliste setzt es jeden Frame. Freie Bits sind z. B. AUD3 (`INTF_AUD3`), solange audio.device den Kanal nicht nutzt und das Bit in INTENA aus ist.
+* **Der VBL-Server der graphics.library schreibt jeden Frame COP1LC = `GfxBase->LOFlist`/`SHFlist`.** Eine eigene Copper-Kette überlebt nur, wenn (a) sie COP1LC nach jedem Schritt selbst setzt und (b) LOFlist/SHFlist für die Laufzeit auf eine Leerliste (`$FFFF,$FFFE`) zeigen. VERTB in INTENA abzuschalten ist keine Option: DOS-Zeit (`DateStamp`) und `WaitTOF()` hängen in 1.3 am VBL.
+* Copper-Zugriff auf Blitter-Register ($40–$7E) braucht COPCON CDANG (`copcon = 2`), sonst hält der Copper an.
