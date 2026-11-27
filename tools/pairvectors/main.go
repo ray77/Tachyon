@@ -151,16 +151,20 @@ func main() {
 				{Tag: "biz", Attrs: waBinary.Attrs{"name": "Amiga Test"}},
 			}}},
 		}
-		frame, err := waBinary.Marshal(node)
+		frame, err := waBinary.Marshal(node) // flags byte 0 + node, as the server sends it inside the Noise frame
 		must(err)
-		os.Stdout.Write(append([]byte{0}, frame...))
-		fmt.Fprintf(os.Stderr, "pair-success frame %d bytes, account key %x\n", len(frame)+1, accountKey.Pub[:])
+		os.Stdout.Write(frame)
+		fmt.Fprintf(os.Stderr, "pair-success frame %d bytes, account key %x\n", len(frame), accountKey.Pub[:])
 
 	case "verify-sign":
 		data, err := os.ReadFile(*in)
 		must(err)
 		refData, err := os.ReadFile(*ref)
 		must(err)
+		if len(data) < 2 || data[0] != 0 || len(refData) < 2 || refData[0] != 0 {
+			fmt.Fprintln(os.Stderr, "FAIL verify-sign: frames must start with the flags byte 0")
+			os.Exit(1)
+		}
 		node, err := waBinary.Unmarshal(data[1:])
 		must(err)
 		refNode, err := waBinary.Unmarshal(refData[1:])

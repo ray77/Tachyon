@@ -14,6 +14,11 @@
  *              Noise computation on the 68000 already takes 25-40 s)
  *   noisecache.bin  optional, 32 bytes: fingerprint of WhatsApp's verified intermediate Noise certificate from
  *              an earlier run (host or Amiga); written back after a successful run (ENVARC: in the client)
+ *   pair.txt   present: pairing / login mode (docs/PROTOCOL.md 11) instead of the plain probe. The credentials record
+ *              SYS:tachyon.creds (proto/creds.c) is loaded when present (paired -> login, else the stored identity
+ *              pairs); without it a new identity is generated. The QR codes are drawn on the client screen
+ *              (ui/screen.c, 8x4 or 6x3 pixels per module) with a countdown; the record is written as soon as the
+ *              pairing is complete and again after the run.
  * The three X25519 key pairs (TLS, Noise static, Noise ephemeral) are computed first, while the stack is
  * still starting, so none of it sits in the connected window.
  */
@@ -25,6 +30,8 @@
 #include <proto/dos.h>
 #include "../net/bsdsock_io.h"
 #include "../tests/wa_probe_core.h"
+#include "../proto/creds.h"
+#include "../ui/screen.h"
 
 struct ExecBase *SysBase;
 struct DosLibrary *DOSBase;
@@ -84,6 +91,67 @@ static int clock_string(char *s)
     return y >= 2025;
 }
 
+/* ---- pairing: credentials file and the QR screen ------------------------------------------------- */
+static wa_creds creds; static int screen_open, pair_mode;
+
+static void write_creds(void *ctx)
+{
+    static uint8_t rec[WA_CREDS_SIZE]; BPTR f; (void)ctx;
+    if (wa_creds_write(rec, sizeof rec, &creds) != WA_CREDS_SIZE) return;
+    f = Open((STRPTR)"SYS:tachyon.creds", MODE_NEWFILE);
+    if (f) { Write(f, rec, WA_CREDS_SIZE); Close(f); logf1("creds: SYS:tachyon.creds written (%s)", creds.paired ? "paired" : "identity only", 0); }
+    else log_line(0, "creds: cannot write SYS:tachyon.creds");
+}
+
+#define QR_TOP 40                     /* first pixel row of the quiet zone */
+static void screen_text_line(int row, int pen, const char *s)
+{
+    scr_fill(0, row, SCR_W, 8, SCR_PAL_BG);
+    scr_text(8, row, pen, s);
+}
+static void show_qr(void *ctx, const char *text, const qr *code, uint32_t valid_ms, uint32_t index, uint32_t count)
+{
+    int sx, sy, n = code->size, w, h, x, y; char l[96]; uint32_t t0 = now_ms(); (void)ctx; (void)text;
+    if (!screen_open) {
+        int rc = scr_open();
+        if (rc) { logf1("screen: scr_open failed (%u) - the code is only in the log", (const char *)(ULONG)rc, 0); return; }
+        screen_open = 1;
+        scr_clear(SCR_PAL_BG);
+        scr_fill(0, 0, SCR_W, 12, SCR_PAL_DKGREEN);
+        scr_text(8, 2, SCR_PAL_WHITE, "Tachyon - WhatsApp fuer den Amiga 500");
+        scr_text(SCR_W - 8 - 8 * 13, 2, SCR_PAL_LTGREEN, "Kickstart 1.3");
+        scr_text(8, 16, SCR_PAL_LTGREY, "WhatsApp am Telefon: Einstellungen > Verknuepfte Geraete > Geraet hinzufuegen, dann diesen Code scannen.");
+    }
+    /* PAL hires pixels are ~0.52:1: 8x4 px per module up to 53 modules (V9), 6x3 above (docs/UI.md) */
+    if (n <= 53) { sx = 8; sy = 4; } else { sx = 6; sy = 3; }
+    w = (n + 8) * sx; h = (n + 8) * sy;
+    x = (int)((uint32_t)(SCR_W - w) >> 1); x &= ~7; y = QR_TOP;   /* unsigned: no __divs on the 68000 */
+    scr_fill(x, y, w, h, SCR_PAL_WHITE);                                           /* quiet zone, 4 modules */
+    scr_bitmap_1bpp_ex(x + 4 * sx, y + 4 * sy, n, n, code->modules, QR_STRIDE, sx, sy, SCR_PAL_BLACK, SCR_PAL_WHITE);
+    wa_fmt(l, sizeof l, "Code %u von %u  -  Version %u, %u x %u Module, %ux%u Pixel je Modul", index, count, (uint32_t)code->version, (uint32_t)n, (uint32_t)n, (uint32_t)sx, (uint32_t)sy);
+    screen_text_line(SCR_H - 20, SCR_PAL_LTGREY, l);
+    wa_fmt(l, sizeof l, "gueltig noch %u s", valid_ms / 1000);
+    screen_text_line(SCR_H - 10, SCR_PAL_YELLOW, l);
+    wa_fmt(l, sizeof l, "screen: code drawn in %u ms: %u x %u modules at %ux%u px, %u x %u px with quiet zone", now_ms() - t0, (uint32_t)n, (uint32_t)n, (uint32_t)sx, (uint32_t)sy, (uint32_t)w, (uint32_t)h);
+    log_line(0, l);
+}
+static void qr_tick(void *ctx, uint32_t remaining_ms)
+{
+    static uint32_t last = 0xffffffffUL; uint32_t s = (remaining_ms + 500) / 1000; char l[48]; (void)ctx;
+    if (!screen_open || s == last) return;
+    last = s;
+    wa_fmt(l, sizeof l, "gueltig noch %u s   ", s);
+    screen_text_line(SCR_H - 10, s <= 5 ? SCR_PAL_RED : SCR_PAL_YELLOW, l);
+}
+static void qr_hide(void *ctx, const char *status)
+{
+    (void)ctx;
+    if (!screen_open) return;
+    scr_fill(0, QR_TOP, SCR_W, SCR_H - QR_TOP - 24, SCR_PAL_BG);
+    screen_text_line(SCR_H - 20, SCR_PAL_LTGREEN, status);
+    screen_text_line(SCR_H - 10, SCR_PAL_BG, "");
+}
+
 static int io_send(void *ctx, const uint8_t *p, uint32_t n) { (void)ctx; return bsdsock_send(&net, p, n); }
 static int32_t io_recv(void *ctx, uint8_t *p, uint32_t cap, uint32_t timeout_ms) { (void)ctx; return (int32_t)bsdsock_recv(&net, p, cap, timeout_ms); }
 static int io_reconnect(void *ctx) { (void)ctx; return bsdsock_connect(&net, wa_addr, 443); }
@@ -91,6 +159,7 @@ static int io_reconnect(void *ctx) { (void)ctx; return bsdsock_connect(&net, wa_
 static void finish(void)
 {
     BPTR done;
+    if (screen_open) { scr_close(); screen_open = 0; }
     bsdsock_close(&net);
     if (logfile) Close(logfile);
     done = Open((STRPTR)"SYS:done", MODE_NEWFILE);
@@ -129,6 +198,19 @@ int main(void)
     io.gap_ms = gap_ms; io.tunnel = 0; io.use_cache = 0; io.debug = 0; io.hold_ms = 0;
     io.noise_cache_in = read_file("SYS:noisecache.bin", ncache, 32) == 32 ? ncache : 0;
     log_line(0, io.noise_cache_in ? "noise: certificate cache loaded from SYS:noisecache.bin" : "noise: certificate cache empty (no SYS:noisecache.bin)");
+    pair_mode = read_file("SYS:pair.txt", small, 4) >= 0;
+    io.mode = pair_mode ? WA_MODE_PAIR : WA_MODE_PROBE;
+    if (pair_mode) {
+        static uint8_t rec[WA_CREDS_SIZE + 1];
+        io.creds = &creds; io.creds_loaded = 0; io.qr_mask = 2;        /* fixed mask: ~2 s less per code on the 68000 */
+        io.show_qr = show_qr; io.qr_tick = qr_tick; io.qr_hide = qr_hide; io.save_creds = write_creds;
+        n = read_file("SYS:tachyon.creds", rec, sizeof rec);
+        if (n > 0) {
+            if (!wa_creds_read(&creds, rec, (uint32_t)n)) { out("RESULT: SYS:tachyon.creds is not a valid record - refusing to continue (delete it to pair anew)\n"); finish(); return 10; }
+            io.creds_loaded = 1;
+            log_line(0, creds.paired ? "creds: SYS:tachyon.creds loaded: paired, will log in (identity check skipped on the 68000: 20 s)" : "creds: SYS:tachyon.creds loaded: identity only, will pair");
+        } else log_line(0, "creds: no SYS:tachyon.creds: a new identity will be generated, QR pairing follows");
+    }
 
     /* offline part first: the three X25519 key pairs (~10 s on the 68000) while the stack starts in parallel */
     t_prep = now_ms();
@@ -168,6 +250,12 @@ int main(void)
         wa_fmt(aline, sizeof aline, "TIMING: keys %u ms (tls %u + noise %u, before connect), dns %u ms, tcp connect %u ms, tls %u ms, ws %u ms, server hello %u ms, client finish %u ms, accepted %u ms (ms since connect, %u pongs%s)\n",
                t_prep, io.t_tls_key, io.t_noise_keys, t_dns, t_conn, io.t_tls, io.t_ws, io.t_hello, io.t_finish, io.t_accepted, io.pongs, io.noise_cert_cached ? ", Noise cert cache hit" : "");
         out(aline);
+        if (pair_mode) {
+            wa_fmt(aline, sizeof aline, "PAIRING: codes shown %u, first code at %u ms, pair-success at %u ms, verify %u ms, sign %u ms, pair-device-sign at %u ms, stream:error 515 at %u ms, login connect at %u ms, login success at %u ms\n",
+                   io.qr_shown, io.t_qr_shown, io.t_pair_success, io.d_verify, io.d_sign, io.t_sign_sent, io.t_515, io.t_login_connect, io.t_login_accepted);
+            out(aline);
+            if (io.creds_loaded) write_creds(0);
+        }
         out(io.result); out("\n");
         finish();
         return ok ? 0 : 5;

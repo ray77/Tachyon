@@ -20,3 +20,11 @@
 #include "../../net/bsdsock_io.c"
 #include "../../tests/wa_probe_core.c"
 #include "../wa_probe_amiga.c"
+/* pairing (docs/PROTOCOL.md 11): protocol modules, QR encoder, the client screen for the code */
+#include "../../proto/wabinary.c"
+#include "../../proto/identity.c"
+#include "../../proto/clientpayload.c"
+#include "../../proto/pairing.c"
+#include "../../proto/creds.c"
+#include "../../ui/qr.c"
+#include "../../ui/screen.c"

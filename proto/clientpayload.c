@@ -64,7 +64,7 @@ static uint32_t device_props(uint8_t *out, uint32_t cap)
     pb_w_init(&w, out, cap);
     pb_w_str(&w, 1, WA_DEVICE_OS);                    /* os */
     pb_w_bytes(&w, 2, ver, v.len);                    /* version */
-    pb_w_uint(&w, 3, 0);                              /* platformType UNKNOWN */
+    pb_w_uint(&w, 3, WA_PLATFORM_TYPE);               /* platformType */
     pb_w_bool(&w, 4, 0);                              /* requireFullSync */
     pb_w_bytes(&w, 5, hs, h.len);                     /* historySyncConfig */
     return w.ok && v.ok && h.ok ? w.len : 0;

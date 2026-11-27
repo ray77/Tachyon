@@ -7,6 +7,12 @@
 #include "ed25519.h"
 #include "certs/wa_rsa_chain.h"
 #include "vectors/wa_client_payload.h"
+#include "wabinary.h"
+#include "identity.h"
+#include "clientpayload.h"
+#include "pairing.h"
+#include "creds.h"
+#include "pb.h"
 
 /* whatsmeow socket/constants.go */
 static const uint8_t wa_header[4] = { 'W', 'A', 6, 3 };
@@ -27,6 +33,8 @@ static hmac_drbg rng; static x509_cert root, inter; static tls13_keypair kp;
 static uint8_t eph_priv[32], eph_pub[32], st_priv[32], st_pub[32];
 static noise_cert_cache ncache;
 static int prepared;
+static noise_transport tr;            /* transport keys of the current connection */
+static int pump_quiet;                /* suppress the "timeout" log line (QR wait loop) */
 
 /* ---- freestanding helpers ------------------------------------------------------------------------ */
 static void cp(uint8_t *d, const uint8_t *s, uint32_t n) { while (n--) *d++ = *s++; }
@@ -149,9 +157,9 @@ static int pump(int want_tls_state, int want_msg, uint32_t timeout_ms)
             if (w.state == WS_CLOSED) { wa_fmt(line, sizeof line, "server closed the WebSocket (code %u)", (uint32_t)w.close_code); logl(line); return 0; }
         }
         now = ms();
-        if (now > deadline) { logl("timeout"); return 0; }
+        if (now > deadline) { if (!pump_quiet) logl("timeout"); return 0; }
         r = io->recv(io->ctx, rdbuf, sizeof rdbuf, deadline - now);
-        if (r == 0) { logl("timeout"); return 0; }
+        if (r == 0) { if (!pump_quiet) logl("timeout"); return 0; }
         if (r < 0) { logl("socket closed by server"); return 0; }
         if (io->tunnel) {
             if (w.state == WS_WAIT_HTTP) { ol = 0; if (!ws_input(&w, rdbuf, (uint32_t)r, out, &ol, sizeof out)) { logl("ws upgrade failed"); return 0; } }
@@ -173,21 +181,7 @@ static int pump(int want_tls_state, int want_msg, uint32_t timeout_ms)
     }
 }
 
-/* ---- protobuf (32-bit values suffice: field numbers, lengths, serials) -------------------------- */
-static int pb_next(const uint8_t **pp, const uint8_t *end, uint32_t *field, uint32_t *wire, uint32_t *val, const uint8_t **data, uint32_t *len)
-{
-    const uint8_t *p = *pp; uint32_t tag = 0, v = 0; int sh = 0;
-    if (p >= end) return 0;
-    do { if (p >= end) return 0; if (sh < 32) tag |= (uint32_t)(*p & 0x7f) << sh; sh += 7; } while (*p++ & 0x80);
-    *field = tag >> 3; *wire = tag & 7; *data = 0; *len = 0; *val = 0;
-    if (*wire == 0) { sh = 0; do { if (p >= end) return 0; if (sh < 32) v |= (uint32_t)(*p & 0x7f) << sh; sh += 7; } while (*p++ & 0x80); *val = v; }
-    else if (*wire == 2) { sh = 0; do { if (p >= end) return 0; if (sh < 32) v |= (uint32_t)(*p & 0x7f) << sh; sh += 7; } while (*p++ & 0x80);
-                           if (v > (uint32_t)(end - p)) return 0; *data = p; *len = v; p += v; }
-    else if (*wire == 1) { if (end - p < 8) return 0; p += 8; }
-    else if (*wire == 5) { if (end - p < 4) return 0; p += 4; }
-    else return 0;
-    *pp = p; return 1;
-}
+/* ---- protobuf: reader from proto/pb.h; one bare varint writer for the handshake frames ---------- */
 static uint32_t pb_varint(uint8_t *o, uint32_t v) { uint32_t n = 0; while (v >= 0x80) { o[n++] = (uint8_t)(v | 0x80); v >>= 7; } o[n++] = (uint8_t)v; return n; }
 
 typedef struct { const uint8_t *details; uint32_t details_len; const uint8_t *sig; uint32_t sig_len;
@@ -229,10 +223,25 @@ static int tls_connect(x509_cert *root, x509_cert *inter, hmac_drbg *rng, tls13_
 
 /* Everything that needs no connection: the DRBG, the pinned TLS chain, the TLS 1.3 X25519 key pair and the two
  * Noise X25519 key pairs (static + ephemeral). On the A500 this is ~10 s of fixed-base comb multiplications that
- * used to sit inside the connected window; now the caller runs it before the TCP connect. */
+ * used to sit inside the connected window; now the caller runs it before the TCP connect. In WA_MODE_PAIR the Noise
+ * static key is the identity's (the server knows a paired companion by it), and a missing identity is generated
+ * here (3 more comb multiplications + 1 XEdDSA signature, ~18 s on the 68000). */
+static int connection_keys(void)
+{
+    uint32_t t0 = ms();
+    if (!tls13_keypair_generate(&kp, &rng)) return fail("RESULT: keypair failed", 0, 0);
+    io->t_tls_key = ms() - t0;
+    t0 = ms();
+    drbg_generate(&rng, eph_priv, 32);
+    x25519_base_comb(eph_pub, eph_priv);
+    if (io->mode == WA_MODE_PAIR) { cp(st_priv, io->creds->id.noise_priv, 32); cp(st_pub, io->creds->id.noise_pub, 32); }
+    else { drbg_generate(&rng, st_priv, 32); x25519_base_comb(st_pub, st_priv); }
+    io->t_noise_keys = ms() - t0;
+    return 1;
+}
+
 int wa_probe_prepare(wa_probe_io *pio)
 {
-    uint32_t t0;
     io = pio; t_start = io->now_ms(); prepared = 0;
     io->t_tls_key = io->t_noise_keys = 0; io->result[0] = 0;
     io->noise_cert_cached = 0; io->noise_cache_valid = 0;
@@ -242,34 +251,41 @@ int wa_probe_prepare(wa_probe_io *pio)
     /* the stored fingerprint of WhatsApp's intermediate Noise certificate, if the caller kept one */
     ncache.valid = 0;
     if (io->noise_cache_in) { cp(ncache.fp, io->noise_cache_in, 32); ncache.valid = 1; }
-    t0 = ms();
-    if (!tls13_keypair_generate(&kp, &rng)) return fail("RESULT: keypair failed", 0, 0);
-    io->t_tls_key = ms() - t0;
+    else if (io->mode == WA_MODE_PAIR && io->creds && io->creds_loaded && io->creds->noise_cache_valid) { cp(ncache.fp, io->creds->noise_cache_fp, 32); ncache.valid = 1; logl("noise: certificate cache fingerprint taken from the credentials"); }
+    if (io->mode == WA_MODE_PAIR) {
+        uint32_t t0 = ms();
+        if (!io->creds) return fail("RESULT: pair mode without a credentials record", 0, 0);
+        if (!io->creds_loaded) {
+            uint32_t i; uint8_t *z = (uint8_t *)io->creds; for (i = 0; i < sizeof *io->creds; i++) z[i] = 0;
+            wa_identity_generate(&io->creds->id, &rng);
+            io->creds_loaded = 1;
+            wa_fmt(line, sizeof line, "identity: new companion identity generated (Noise static, Signal identity, signed prekey id %u, registration id %u) in %T s, before the connection",
+                   io->creds->id.spk_id, io->creds->id.reg_id, ms() - t0); logl(line);
+        } else {
+            wa_fmt(line, sizeof line, "identity: stored companion identity loaded (registration id %u, %s)", io->creds->id.reg_id,
+                   io->creds->paired ? "paired: login" : "not paired yet: QR pairing"); logl(line);
+        }
+    }
+    if (!connection_keys()) return 0;
     wa_fmt(line, sizeof line, "tls: X25519 key pair ready (%T s, before the connection)", io->t_tls_key); logl(line);
-    t0 = ms();
-    drbg_generate(&rng, eph_priv, 32); drbg_generate(&rng, st_priv, 32);
-    x25519_base_comb(st_pub, st_priv);
-    x25519_base_comb(eph_pub, eph_priv);
-    io->t_noise_keys = ms() - t0;
     wa_fmt(line, sizeof line, "noise: static + ephemeral X25519 key pairs ready (%T s, before the connection)", io->t_noise_keys); logl(line);
     prepared = 1;
     return 1;
 }
 
-int wa_probe_run(wa_probe_io *pio)
+/* TCP is connected: TLS -> WebSocket -> Noise XX with `payload` as the ClientPayload; the first decrypted server
+ * frame lands in plain[0..*plain_len). Shared by the probe, the pairing connection and the login connection. */
+static int handshake(const uint8_t *payload, uint32_t payload_len, uint8_t *plain, uint32_t *plain_len)
 {
     static uint8_t out[4096];
     static uint8_t server_eph[32], server_static[32], server_static_ct[64], cert_ct[4096], cert_pt[4096];
-    static uint8_t cstatic_ct[48], payload_ct[1024], finish[2048], inner[2048], plain[WA_PROBE_MSG_MAX];
-    static noise_hs hs; static noise_transport tr; static heartbeat hb; static x509_cache cache;
+    static uint8_t cstatic_ct[48], payload_ct[WA_CLIENTPAYLOAD_MAX + 16], finish[2048], inner[2048];
+    static noise_hs hs; static heartbeat hb; static x509_cache cache;
     uint32_t server_static_ct_len = 0, cert_ct_len = 0, n, ladders = 0;
     const uint8_t *p, *end, *d; uint32_t f, wire, l, v;
 
-    if (!prepared || io != pio) { if (!wa_probe_prepare(pio)) return 0; }
-    prepared = 0;                               /* key pairs are used once */
-    io = pio; t_start = io->now_ms(); pend_len = 0;
-    io->t_tls = io->t_ws = io->t_hello = io->t_finish = io->t_accepted = 0; io->pongs = io->ladders = 0; io->result[0] = 0;
-
+    pend_len = 0; pump_quiet = 0;
+    if (payload_len + 16 > sizeof payload_ct) return fail("RESULT: ClientPayload too long", 0, 0);
     if (!io->tunnel) {
         /* use_cache: a first connection fills the certificate cache (full chain verification), then the real one
          * must hit it and skip the chain - as a second A500 session would after storing the entry in ENVARC: */
@@ -319,7 +335,7 @@ int wa_probe_run(wa_probe_io *pio)
     wa_fmt(line, sizeof line, "ws: wss://%s/ws/chat open", io->host); logl(line);
 
     /* Noise ClientHello: WA header + 3-byte length + HandshakeMessage{clientHello{ephemeral}}; the key pairs
-     * come from wa_probe_prepare */
+     * come from wa_probe_prepare / connection_keys */
     {
         uint8_t pb[64 + 7 + 4]; uint32_t k = 0;
         noise_client_hello(&hs, wa_header, 4, eph_pub);
@@ -353,11 +369,11 @@ int wa_probe_run(wa_probe_io *pio)
         /* the A500's computing time: X25519 ladders with the heartbeat armed */
         heartbeat_init(&hb, &w, io->now_ms, 4000, hb_send, 0);
         heartbeat_arm(&hb);
-        wa_fmt(line, sizeof line, "noise: holding ClientFinish for %T s of X25519 ladders, pong heartbeat every 4 s", io->gap_ms); logl(line);
+        if (io->gap_ms) { wa_fmt(line, sizeof line, "noise: holding ClientFinish for %T s of X25519 ladders, pong heartbeat every 4 s", io->gap_ms); logl(line); }
         spin_ladders(io->gap_ms, &ladders);
         /* the real work (the A500 does this inside the gap; here it takes milliseconds) */
         if (!noise_client_finish(&hs, eph_priv, st_priv, st_pub, server_eph, server_static_ct, 48, cert_ct, cert_ct_len,
-                                 wa_client_payload, sizeof wa_client_payload, server_static, cert_pt, cstatic_ct, payload_ct, &tr)) {
+                                 payload, payload_len, server_static, cert_pt, cstatic_ct, payload_ct, &tr)) {
             heartbeat_disarm(); return fail("RESULT: Noise AEAD failure on ServerHello", 0, 0);
         }
         {   /* certificate chain: CertChain{leaf=1, intermediate=2}, each NoiseCertificate{details=1, signature=2} */
@@ -379,18 +395,19 @@ int wa_probe_run(wa_probe_io *pio)
             }
             if (!ok) { heartbeat_disarm(); return fail("RESULT: intermediate certificate rejected", 0, 0); }
             cp(io->noise_cache_fp, ncache.fp, 32); io->noise_cache_valid = 1;
+            if (io->mode == WA_MODE_PAIR && io->creds) { cp(io->creds->noise_cache_fp, ncache.fp, 32); io->creds->noise_cache_valid = 1; }
             ok = leaf.issuer_serial == interc.serial && xeddsa_verify(leaf.sig, leaf.details, leaf.details_len, interc.key);
             ok = ok && eq(leaf.key, server_static, 32);
             wa_fmt(line, sizeof line, "noise: leaf certificate serial %u signed by the intermediate, key == server static: %s", leaf.serial, ok ? "VERIFIED" : "FAILED"); logl(line);
             if (!ok) { heartbeat_disarm(); return fail("RESULT: leaf certificate rejected", 0, 0); }
         }
         heartbeat_disarm();
-        io->pongs = hb.sent; io->ladders = ladders;
+        io->pongs += hb.sent; io->ladders += ladders;
         wa_fmt(line, sizeof line, "noise: %u X25519 ladders during the hold, %u pongs sent, heartbeat error %d", ladders, hb.sent, hb.error); logl(line);
         if (hb.error) return fail("RESULT: heartbeat send failed", 0, 0);
         /* ClientFinish: 3-byte length + HandshakeMessage{clientFinish(4){static(1)=48, payload(2)=ct}} */
         {
-            uint32_t k = 0, pl = sizeof wa_client_payload + 16, m;
+            uint32_t k = 0, pl = payload_len + 16, m;
             inner[k++] = 0x0a; inner[k++] = 48; cp(inner + k, cstatic_ct, 48); k += 48;
             inner[k++] = 0x12; k += pb_varint(inner + k, pl); cp(inner + k, payload_ct, pl); k += pl;
             m = 3; finish[m++] = 0x22; m += pb_varint(finish + m, k); cp(finish + m, inner, k); m += k;
@@ -398,19 +415,357 @@ int wa_probe_run(wa_probe_io *pio)
             if (!ws_send(finish, m)) return fail("RESULT: ClientFinish send failed", 0, 0);
         }
         io->t_finish = ms();
-        wa_fmt(line, sizeof line, "noise: ClientFinish sent %T s after ServerHello", ms() - t_hello); logl(line);
+        wa_fmt(line, sizeof line, "noise: ClientFinish sent %T s after ServerHello (%u-byte ClientPayload)", ms() - t_hello, payload_len); logl(line);
     }
     if (!pump(-1, 1, 20000)) { wa_fmt(io->result, sizeof io->result, "RESULT: handshake REJECTED (no encrypted frame after ClientFinish, gap %T s)", io->gap_ms); return 0; }
     {
         uint32_t flen = ((uint32_t)w.msg[0] << 16) | ((uint32_t)w.msg[1] << 8) | w.msg[2];
-        if (w.msg_len < 3 + 16 || flen != w.msg_len - 3 || flen - 16 > sizeof plain) return fail("RESULT: bad encrypted frame", 0, 0);
+        if (w.msg_len < 3 + 16 || flen != w.msg_len - 3 || flen - 16 > WA_PROBE_MSG_MAX) return fail("RESULT: bad encrypted frame", 0, 0);
         if (!noise_transport_decrypt(&tr, w.msg + 3, flen, plain)) return fail("RESULT: first server frame does not decrypt", 0, 0);
-        wa_fmt(line, sizeof line, "noise: first encrypted server frame: %u bytes ciphertext -> %u bytes plaintext, first bytes %02x %02x %02x %02x (binary node, pair-device IQ)",
+        *plain_len = flen - 16;
+        w.msg_ready = 0;
+        wa_fmt(line, sizeof line, "noise: first encrypted server frame: %u bytes ciphertext -> %u bytes plaintext, first bytes %02x %02x %02x %02x (binary node)",
                flen, flen - 16, (uint32_t)plain[0], (uint32_t)plain[1], (uint32_t)plain[2], (uint32_t)plain[3]); logl(line);
     }
     io->t_accepted = ms();
-    {   uint8_t cl[16]; n = ws_frame_close(&w, 1000, cl, sizeof cl); if (n) app_send(cl, n); }
-    wa_fmt(io->result, sizeof io->result, "RESULT: handshake ACCEPTED by %s with our %s/WS/Noise stack, %T s hold, %u pongs%s", io->host,
-           io->tunnel ? "(openssl TLS 1.3 tunnel)" : "TLS 1.3", io->gap_ms, io->pongs, io->noise_cert_cached ? ", Noise cert cache hit" : "");
     return 1;
 }
+
+/* ---- pairing session ----------------------------------------------------------------------------- */
+static uint8_t arena_mem[6144]; static wab_arena arena;
+static uint8_t refbuf[WA_QR_REFS_MAX][128]; static uint32_t reflen[WA_QR_REFS_MAX], nrefs;
+static char qr_text[WA_PAIR_QR_MAX]; static qr qr_code; static qr_work qr_scratch;
+static uint32_t iq_counter; static char iq_prefix[16];
+
+static void close_ws(void) { uint8_t cl[16]; uint32_t n = ws_frame_close(&w, 1000, cl, sizeof cl); if (n) app_send(cl, n); }
+
+/* one binary node, encrypted with the transport keys: 3-byte length + ciphertext */
+static int send_node(const wab_node *n, const char *what)
+{
+    static uint8_t pt[2048], ct[2048 + 16 + 3]; uint32_t len; int e;
+    e = wab_encode_frame(n, pt, sizeof pt, &len);
+    if (e != WAB_OK) { wa_fmt(line, sizeof line, "wab: encoding %s failed: %s", what, wab_errstr(e)); logl(line); return 0; }
+    noise_transport_encrypt(&tr, pt, len, ct + 3);
+    ct[0] = (uint8_t)((len + 16) >> 16); ct[1] = (uint8_t)((len + 16) >> 8); ct[2] = (uint8_t)(len + 16);
+    if (io->debug) { wa_fmt(line, sizeof line, "  send %s, %u bytes node:", what, len); log_hex(line, pt, len < 64 ? len : 64); }
+    return ws_send(ct, len + 16 + 3);
+}
+
+/* next frame: 1 = decrypted into plain (*plen), 0 = nothing within timeout_ms, -1 = connection gone */
+static int recv_frame(uint32_t timeout_ms, uint8_t *plain, uint32_t *plen)
+{
+    uint32_t flen;
+    pump_quiet = 1;
+    if (!pump(-1, 1, timeout_ms)) { pump_quiet = 0; return w.state == WS_CLOSED || w.state == WS_ERROR || t.error ? -1 : 0; }
+    pump_quiet = 0;
+    flen = ((uint32_t)w.msg[0] << 16) | ((uint32_t)w.msg[1] << 8) | w.msg[2];
+    w.msg_ready = 0;
+    if (w.msg_len < 3 + 16 || flen != w.msg_len - 3 || flen - 16 > WA_PROBE_MSG_MAX) { logl("wab: bad encrypted frame"); return -1; }
+    if (!noise_transport_decrypt(&tr, w.msg + 3, flen, plain)) { logl("wab: frame does not decrypt"); return -1; }
+    *plen = flen - 16;
+    return 1;
+}
+
+static void log_node(const char *prefix, const wab_node *n)
+{
+    uint32_t o = wa_fmt(line, sizeof line, "%s<", prefix), i;
+    for (i = 0; i < n->tag.len && o + 1 < sizeof line; i++) line[o++] = (char)n->tag.p[i];
+    for (i = 0; i < n->n_attrs && o + 4 < sizeof line; i++) {
+        const wab_attr *a = &n->attrs[i]; uint32_t k;
+        line[o++] = ' ';
+        for (k = 0; k < a->key.len && o + 3 < sizeof line; k++) line[o++] = (char)a->key.p[k];
+        line[o++] = '=';
+        if (a->val.kind == WAB_JID) { for (k = 0; k < a->val.jid.user.len && o + 2 < sizeof line; k++) line[o++] = (char)a->val.jid.user.p[k];
+                                      if (a->val.jid.device) o += wa_fmt(line + o, sizeof line - o, ":%u", (uint32_t)a->val.jid.device);
+                                      line[o++] = '@'; for (k = 0; k < a->val.jid.server.len && o + 2 < sizeof line; k++) line[o++] = (char)a->val.jid.server.p[k]; }
+        else for (k = 0; k < a->val.str.len && o + 2 < sizeof line; k++) line[o++] = a->val.str.p[k] >= 32 && a->val.str.p[k] < 127 ? (char)a->val.str.p[k] : '.';
+    }
+    o += wa_fmt(line + o, sizeof line - o, n->val.kind == WAB_LIST ? "> [%u children]" : n->val.kind == WAB_BYTES ? "> [%u bytes]" : ">", n->val.kind == WAB_LIST ? n->n_children : n->val.str.len);
+    line[o] = 0;
+    logl(line);
+}
+
+/* decode a decrypted frame into the arena; 0 on error (logged) */
+static const wab_node *decode(const uint8_t *plain, uint32_t plen)
+{
+    const wab_node *n; int e;
+    wab_arena_init(&arena, arena_mem, sizeof arena_mem);
+    e = wab_decode_frame(plain, plen, &arena, &n);
+    if (e != WAB_OK) { wa_fmt(line, sizeof line, "wab: %s (flags %02x, %u bytes)%s", wab_errstr(e), (uint32_t)plain[0], plen,
+                              e == WAB_ERR_COMPRESSED ? " - zlib-compressed frames are not supported yet" : ""); logl(line); return 0; }
+    log_node("recv: ", n);
+    return n;
+}
+
+static const char *attr_cstr(const wab_node *n, const char *key, char *buf, uint32_t cap)
+{
+    const wab_value *v = wab_get_attr(n, key); uint32_t i, l, o = 0;
+    if (!v) return "";
+    if (v->kind == WAB_JID) {
+        for (i = 0; i < v->jid.user.len && o + 2 < cap; i++) buf[o++] = (char)v->jid.user.p[i];
+        if (v->jid.device) o += wa_fmt(buf + o, cap - o, ":%u", (uint32_t)v->jid.device);
+        if (o + 2 < cap) buf[o++] = '@';
+        for (i = 0; i < v->jid.server.len && o + 1 < cap; i++) buf[o++] = (char)v->jid.server.p[i];
+        buf[o] = 0;
+        return buf;
+    }
+    if (v->kind != WAB_STR) return "";
+    l = v->str.len < cap - 1 ? v->str.len : cap - 1;
+    for (i = 0; i < l; i++) buf[i] = (char)v->str.p[i];
+    buf[l] = 0;
+    return buf;
+}
+
+/* whatsmeow keepAliveLoop: <iq id=.. xmlns=w:p type=get to=s.whatsapp.net><ping/></iq> every 20-30 s */
+static int send_keepalive(void)
+{
+    static wab_node iq, ping; static wab_attr a[4]; static char id[32];
+    if (!iq_prefix[0]) { uint8_t r[2]; drbg_generate(&rng, r, 2); wa_fmt(iq_prefix, sizeof iq_prefix, "%u.%u-", (uint32_t)r[0], (uint32_t)r[1]); }
+    wa_fmt(id, sizeof id, "%s%u", iq_prefix, ++iq_counter);
+    wab_node_init(&iq, "iq"); wab_node_init(&ping, "ping");
+    a[0].key = wab_s("id"); a[0].val = wab_text(id);
+    a[1].key = wab_s("xmlns"); a[1].val = wab_text("w:p");
+    a[2].key = wab_s("type"); a[2].val = wab_text("get");
+    a[3].key = wab_s("to"); a[3].val = wab_jid_value("", WA_SERVER_JID, 0);
+    iq.attrs = a; iq.n_attrs = 4; iq.val.kind = WAB_LIST; iq.children = &ping; iq.n_children = 1;
+    return send_node(&iq, "keepalive ping");
+}
+
+static int take_refs(const wab_node *iq)
+{
+    wab_str refs[WA_QR_REFS_MAX]; uint32_t i, n = wa_pair_refs(iq, refs, WA_QR_REFS_MAX);
+    nrefs = 0;
+    for (i = 0; i < n; i++) { if (refs[i].len > sizeof refbuf[0]) continue; cp(refbuf[nrefs], refs[i].p, refs[i].len); reflen[nrefs++] = refs[i].len; }
+    return nrefs != 0;
+}
+
+static int show_code(uint32_t index)
+{
+    uint32_t tl = wa_pair_qr_text(qr_text, sizeof qr_text, refbuf[index], reflen[index], &io->creds->id), t0 = ms();
+    if (!tl) return fail("RESULT: QR text does not fit", 0, 0);
+    if (qr_encode_ex(&qr_code, &qr_scratch, (const uint8_t *)qr_text, tl, QR_ECC_L, 1, io->qr_mask) != 0) return fail("RESULT: QR encoding failed", 0, 0);
+    wa_fmt(line, sizeof line, "qr: code %u/%u, %u chars -> version %u, %u x %u modules, mask %u, encoded in %T s", index + 1, nrefs, tl,
+           (uint32_t)qr_code.version, (uint32_t)qr_code.size, (uint32_t)qr_code.size, (uint32_t)qr_code.mask, ms() - t0); logl(line);
+    return 1;
+}
+
+/* the first frame of a login connection must be <success>; anything else ends the session */
+static int expect_success(const uint8_t *plain, uint32_t plen)
+{
+    const wab_node *n = decode(plain, plen); char b1[48], b2[48];
+    if (!n) return fail("RESULT: login: first frame undecodable", 0, 0);
+    if (wab_str_eq(&n->tag, "success")) {
+        io->logged_in = 1; io->t_login_accepted = ms();
+        wa_fmt(line, sizeof line, "login: <success> - logged in as %s:%u@%s (lid %s, server time %s)", io->creds->jid_user, io->creds->jid_device, WA_SERVER_JID,
+               attr_cstr(n, "lid", b1, sizeof b1), attr_cstr(n, "t", b2, sizeof b2)); logl(line);
+        return 1;
+    }
+    if (wab_str_eq(&n->tag, "failure") || wab_str_eq(&n->tag, "stream:error")) {
+        const wab_node *c = n->val.kind == WAB_LIST && n->n_children ? &n->children[0] : 0;
+        wa_fmt(io->result, sizeof io->result, "RESULT: login REJECTED: <%s%s reason/code %s%s%s>", wab_str_eq(&n->tag, "failure") ? "failure" : "stream:error",
+               "", attr_cstr(n, "reason", b1, sizeof b1), attr_cstr(n, "code", b2, sizeof b2), c ? " (child present)" : "");
+        return 0;
+    }
+    return fail("RESULT: login: unexpected first frame (see recv: line)", 0, 0);
+}
+
+/* after the handshake with the registration payload: pair-device -> QR codes -> pair-success -> pair-device-sign
+ * -> stream:error 515 -> ONE reconnect with the login payload -> <success>. No retry loop anywhere. */
+static int pair_session(uint8_t *plain, uint32_t plen)
+{
+    static wa_pair_reply reply; static heartbeat hb; static wa_adv_identity adv; static wa_pair_success ps;
+    static uint8_t self_signed[512], rnd[64];
+    const wab_node *n; int r, scanned = 0; uint32_t idx = 0, sl, first_ms = io->qr_first_ms ? io->qr_first_ms : 60000, next_ms = io->qr_next_ms ? io->qr_next_ms : 20000;
+
+    /* 1. the pair-device IQ (the first frame, as a rule) */
+    n = decode(plain, plen);
+    if (!n) return fail("RESULT: first frame undecodable", 0, 0);
+    while (!take_refs(n)) {
+        logl("pair: not a pair-device IQ, waiting for one");
+        r = recv_frame(20000, plain, &plen);
+        if (r <= 0) return fail(r ? "RESULT: connection lost before pair-device" : "RESULT: no pair-device IQ within 20 s", 0, 0);
+        n = decode(plain, plen);
+        if (!n) return fail("RESULT: frame undecodable", 0, 0);
+    }
+    {   const wab_value *idv = wab_get_attr(n, "id");
+        if (!idv) return fail("RESULT: pair-device IQ without id", 0, 0);
+        if (!send_node(wa_pair_ack_node(&reply, &idv->str), "pair-device ack")) return fail("RESULT: ack send failed", 0, 0); }
+    wa_fmt(line, sizeof line, "pair: %u refs received, ack sent; showing code 1 for %T s, then %T s each", nrefs, first_ms, next_ms); logl(line);
+
+    /* 2. show codes, wait for the phone */
+    while (idx < nrefs && !scanned) {
+        uint32_t valid = idx == 0 ? first_ms : next_ms, shown, last_pong, last_ping;
+        if (!show_code(idx)) return 0;
+        shown = ms(); last_pong = shown; last_ping = shown;
+        if (!io->t_qr_shown) io->t_qr_shown = shown;
+        io->qr_shown++;
+        if (io->show_qr) io->show_qr(io->ctx, qr_text, &qr_code, valid, idx + 1, nrefs);
+        for (;;) {
+            uint32_t now = ms(), slice;
+            if (now - shown >= valid) break;
+            slice = valid - (now - shown); if (slice > 1000) slice = 1000;
+            r = recv_frame(slice, plain, &plen);
+            if (r < 0) { if (io->qr_hide) io->qr_hide(io->ctx, "connection lost"); return fail("RESULT: connection lost while showing code %u", 0, idx + 1); }
+            if (r == 0) {
+                now = ms();
+                if (io->qr_tick) io->qr_tick(io->ctx, valid - (now - shown));
+                if (now - last_pong >= 4000) { uint8_t pf[16]; uint32_t pn = ws_frame_pong(&w, pf, sizeof pf); if (!pn || !app_send(pf, pn)) return fail("RESULT: pong send failed", 0, 0); last_pong = now; io->pongs++; }
+                if (now - last_ping >= 25000) { if (!send_keepalive()) return fail("RESULT: keepalive send failed", 0, 0); last_ping = now; }
+                continue;
+            }
+            n = decode(plain, plen);
+            if (!n) continue;
+            if (wab_str_eq(&n->tag, "iq") && wab_get_child(n, "pair-success")) { scanned = 1; break; }
+            if (wab_str_eq(&n->tag, "iq") && wab_get_child(n, "pair-device")) {
+                const wab_value *idv = wab_get_attr(n, "id");
+                if (take_refs(n) && idv) { send_node(wa_pair_ack_node(&reply, &idv->str), "pair-device ack"); idx = 0; logl("pair: new refs from the server, starting over with code 1"); goto next_code; }
+            }
+            if (wab_str_eq(&n->tag, "stream:error")) { if (io->qr_hide) io->qr_hide(io->ctx, "stream error"); return fail("RESULT: stream:error while showing the code (see recv: line)", 0, 0); }
+            if (wab_str_eq(&n->tag, "ib")) { logl("pair: <ib> from the server (downgrade_webclient = phone without multi-device?)"); }
+            /* iq results (keepalive answers) and anything else: ignored */
+        }
+        if (!scanned) idx++;
+next_code: ;
+    }
+    if (!scanned) {
+        if (io->qr_hide) io->qr_hide(io->ctx, "no scan, codes exhausted");
+        close_ws();
+        wa_fmt(io->result, sizeof io->result, "RESULT: not scanned: %u codes shown over %T s, connection closed (no reconnect)", io->qr_shown, ms() - io->t_qr_shown);
+        return 0;
+    }
+
+    /* 3. pair-success: verify, sign, answer */
+    io->t_pair_success = ms();
+    if (io->qr_hide) io->qr_hide(io->ctx, "code scanned - verifying the phone's signature");
+    wa_fmt(line, sizeof line, "pair: pair-success %T s after the first code (code %u shown %T s ago)", io->t_pair_success - io->t_qr_shown, idx + 1, 0u); logl(line);
+    if (!wa_pair_parse_success(n, &ps)) { send_node(wa_pair_error_node(&reply, &ps.id, 500, "internal-error"), "pair error"); close_ws(); return fail("RESULT: pair-success without device-identity / jid", 0, 0); }
+    /* copy what the arena holds before anything else is decoded */
+    if (!wa_creds_set_user(io->creds->jid_user, ps.jid.user.p, ps.jid.user.len)) { close_ws(); return fail("RESULT: JID user not numeric or too long", 0, 0); }
+    io->creds->jid_device = ps.jid.device;
+    if (ps.have_lid) { wa_creds_set_user(io->creds->lid_user, ps.lid.user.p, ps.lid.user.len); io->creds->lid_device = ps.lid.device; }
+    { uint32_t i; for (i = 0; i < ps.platform.len && i < WA_CREDS_NAME_MAX - 1; i++) io->creds->platform[i] = (char)ps.platform.p[i]; io->creds->platform[i] = 0;
+      for (i = 0; i < ps.biz.len && i < WA_CREDS_BIZ_MAX - 1; i++) io->creds->business[i] = (char)ps.biz.p[i]; io->creds->business[i] = 0; }
+    wa_fmt(line, sizeof line, "pair: our JID %s:%u@%s, lid %s:%u, phone platform \"%s\"%s%s", io->creds->jid_user, io->creds->jid_device, WA_SERVER_JID, io->creds->lid_user, io->creds->lid_device,
+           io->creds->platform, io->creds->business[0] ? ", business " : "", io->creds->business); logl(line);
+    heartbeat_init(&hb, &w, io->now_ms, 4000, hb_send, 0);
+    heartbeat_arm(&hb);
+    {   uint32_t t0 = ms(), e;
+        e = wa_pair_verify(ps.device_identity, ps.device_identity_len, &io->creds->id, &adv);
+        io->d_verify = ms() - t0;
+        wa_fmt(line, sizeof line, "pair: device identity %u bytes: HMAC under the ADV secret and account signature (XEdDSA) %s in %T s%s", ps.device_identity_len,
+               e == WA_PAIR_OK ? "VERIFIED" : "REJECTED", io->d_verify, e == WA_PAIR_OK ? "" : ""); logl(line);
+        if (e != WA_PAIR_OK) { wa_fmt(line, sizeof line, "pair: reason: %s", wa_pair_errstr((int)e)); logl(line); }
+        if (e != WA_PAIR_OK) {
+            heartbeat_disarm();
+            send_node(wa_pair_error_node(&reply, &ps.id, e == WA_PAIR_ERR_HMAC ? 401 : e == WA_PAIR_ERR_SIG ? 401 : 500,
+                                         e == WA_PAIR_ERR_HMAC ? "hmac-mismatch" : e == WA_PAIR_ERR_SIG ? "signature-mismatch" : "internal-error"), "pair error");
+            close_ws();
+            return fail("RESULT: pair-success REJECTED (%s), connection closed", wa_pair_errstr((int)e), 0);
+        }
+        wa_fmt(line, sizeof line, "pair: account type %u, device type %u, key index %u, raw id %u", (uint32_t)adv.account_type, (uint32_t)adv.device_type, adv.key_index, adv.raw_id); logl(line);
+        t0 = ms();
+        drbg_generate(&rng, rnd, 64);
+        wa_pair_sign(&adv, &io->creds->id, rnd);
+        io->d_sign = ms() - t0;
+        wa_fmt(line, sizeof line, "pair: device signature (XEdDSA over 06 01 || details || identityPub || accountKey) in %T s, %u pongs during verify + sign", io->d_sign, hb.sent); logl(line);
+    }
+    heartbeat_disarm(); io->pongs += hb.sent;
+    if (hb.error) return fail("RESULT: heartbeat send failed during the signature", 0, 0);
+    sl = wa_pair_self_signed(self_signed, sizeof self_signed, &adv);
+    if (!sl || !send_node(wa_pair_sign_node(&reply, &ps.id, adv.key_index, self_signed, sl), "pair-device-sign")) return fail("RESULT: pair-device-sign send failed", 0, 0);
+    io->t_sign_sent = ms();
+    io->creds->adv = adv; io->creds->paired = 1; io->paired_now = 1;
+    if (io->save_creds) io->save_creds(io->ctx);
+    wa_fmt(line, sizeof line, "pair: pair-device-sign sent %T s after pair-success (verify %T s + sign %T s); credentials complete", io->t_sign_sent - io->t_pair_success, io->d_verify, io->d_sign); logl(line);
+
+    /* 4. the server answers with stream:error 515 and closes */
+    for (;;) {
+        r = recv_frame(30000, plain, &plen);
+        if (r == 0) { logl("pair: no stream:error within 30 s of pair-device-sign, closing ourselves"); break; }
+        if (r < 0) { logl("pair: server closed the connection (expected after pair-device-sign)"); break; }
+        n = decode(plain, plen);
+        if (n && wab_str_eq(&n->tag, "stream:error")) { char b[16]; io->t_515 = ms(); wa_fmt(line, sizeof line, "pair: stream:error code %s %T s after pair-device-sign: restart requested", attr_cstr(n, "code", b, sizeof b), io->t_515 - io->t_sign_sent); logl(line); break; }
+    }
+    close_ws();
+    if (!io->reconnect) return fail("RESULT: paired, but no reconnect callback for the login connection", 0, 0);
+    /* 5. the login connection: fresh TLS and Noise ephemeral keys (no server timer runs while we are disconnected) */
+    { uint32_t t0 = ms(); if (!connection_keys()) return 0; wa_fmt(line, sizeof line, "login: new TLS + Noise ephemeral key pairs in %T s", ms() - t0); logl(line); }
+    if (!io->reconnect(io->ctx)) return fail("RESULT: paired, but the TCP reconnect for the login failed", 0, 0);
+    io->t_login_connect = ms();
+    logl("login: TCP connected again, handshake with the login ClientPayload");
+    {   static uint8_t payload[WA_CLIENTPAYLOAD_MAX]; uint32_t pl = wa_clientpayload_login(payload, sizeof payload, io->creds->jid_user, io->creds->jid_device);
+        if (!pl) return fail("RESULT: login payload failed", 0, 0);
+        if (!handshake(payload, pl, plain, &plen)) return 0; }
+    r = expect_success(plain, plen);
+    close_ws();
+    if (r) wa_fmt(io->result, sizeof io->result, "RESULT: PAIRED and LOGGED IN as %s:%u (scan -> sign %T s, login connection %T s)", io->creds->jid_user, io->creds->jid_device,
+                  io->t_sign_sent - io->t_pair_success, io->t_login_accepted - io->t_login_connect);
+    return r;
+}
+
+int wa_probe_run(wa_probe_io *pio)
+{
+    static uint8_t plain[WA_PROBE_MSG_MAX], payload[WA_CLIENTPAYLOAD_MAX];
+    const uint8_t *pp = wa_client_payload; uint32_t pl = sizeof wa_client_payload, plen = 0;
+
+    if (!prepared || io != pio) { if (!wa_probe_prepare(pio)) return 0; }
+    prepared = 0;                               /* key pairs are used once */
+    io = pio; t_start = io->now_ms(); pend_len = 0;
+    io->t_tls = io->t_ws = io->t_hello = io->t_finish = io->t_accepted = 0; io->pongs = io->ladders = 0; io->result[0] = 0;
+    io->paired_now = io->logged_in = 0; io->t_qr_shown = io->t_pair_success = io->d_verify = io->d_sign = io->t_sign_sent = io->t_515 = io->t_login_connect = io->t_login_accepted = 0; io->qr_shown = 0;
+    iq_counter = 0; iq_prefix[0] = 0;
+
+    if (io->mode == WA_MODE_PAIR) {
+        if (io->creds->paired) pl = wa_clientpayload_login(payload, sizeof payload, io->creds->jid_user, io->creds->jid_device);
+        else pl = wa_clientpayload_registration(payload, sizeof payload, &io->creds->id);
+        if (!pl) return fail("RESULT: ClientPayload failed", 0, 0);
+        pp = payload;
+        wa_fmt(line, sizeof line, "payload: %s ClientPayload, %u bytes", io->creds->paired ? "login" : "registration", pl); logl(line);
+    }
+    if (!handshake(pp, pl, plain, &plen)) return 0;
+    if (io->mode != WA_MODE_PAIR) {
+        close_ws();
+        wa_fmt(io->result, sizeof io->result, "RESULT: handshake ACCEPTED by %s with our %s/WS/Noise stack, %T s hold, %u pongs%s", io->host,
+               io->tunnel ? "(openssl TLS 1.3 tunnel)" : "TLS 1.3", io->gap_ms, io->pongs, io->noise_cert_cached ? ", Noise cert cache hit" : "");
+        return 1;
+    }
+    if (io->creds->paired && !io->paired_now) {
+        int r = expect_success(plain, plen);
+        close_ws();
+        if (r) wa_fmt(io->result, sizeof io->result, "RESULT: LOGGED IN with the stored credentials as %s:%u (%T s since connect)", io->creds->jid_user, io->creds->jid_device, io->t_login_accepted);
+        return r;
+    }
+    return pair_session(plain, plen);
+}
+
+#ifdef WA_PROBE_SIM
+/* Offline simulation entry points (tests/wa_pair_sim.c, make pair-sim): the transport is the caller's fake WebSocket
+ * server, noise_transport_encrypt/decrypt are replaced by pass-through stubs at compile time, the TLS layer is skipped
+ * (tunnel mode) and the Noise handshake is not run - everything from the first decrypted frame on is the real code. */
+static void sim_open(wa_probe_io *pio)
+{
+    static uint8_t out[1024]; uint32_t i;
+    io = pio; t_start = io->now_ms(); pend_len = 0; io->tunnel = 1; io->result[0] = 0;
+    io->paired_now = io->logged_in = 0; io->pongs = 0; io->qr_shown = 0;
+    io->t_qr_shown = io->t_pair_success = io->d_verify = io->d_sign = io->t_sign_sent = io->t_515 = io->t_login_connect = io->t_login_accepted = 0;
+    iq_counter = 0; iq_prefix[0] = 0;
+    if (!rng.instantiated) drbg_instantiate(&rng, io->seed, io->seed_len);
+    ws_client_start(&w, io->host, "/ws/chat", "https://web.whatsapp.com", msgbuf, sizeof msgbuf, &rng, out, sizeof out);
+    w.state = WS_OPEN;
+    for (i = 0; i < sizeof tr; i++) ((uint8_t *)&tr)[i] = 0;
+}
+int wa_probe_sim_pair(wa_probe_io *pio, const uint8_t *first_frame, uint32_t len)
+{
+    static uint8_t plain[WA_PROBE_MSG_MAX];
+    sim_open(pio);
+    cp(plain, first_frame, len);
+    return pair_session(plain, len);
+}
+int wa_probe_sim_login(wa_probe_io *pio, const uint8_t *first_frame, uint32_t len)
+{
+    static uint8_t plain[WA_PROBE_MSG_MAX];
+    sim_open(pio);
+    cp(plain, first_frame, len);
+    return expect_success(plain, len);
+}
+#endif

@@ -26,7 +26,7 @@ static inline int pb_read_varint(const uint8_t **pp, const uint8_t *end, uint32_
     *pp = p; *v = r; return 1;
 }
 
-/* next field: *field, *wire; varint value in *val; length-delimited data in *data/*len. 0 at the end or on error. */
+/* next field: *field, *wire; varint value in *val; length-delimited data in *data and *len. 0 at the end or on error. */
 static inline int pb_next(const uint8_t **pp, const uint8_t *end, uint32_t *field, uint32_t *wire, uint32_t *val, const uint8_t **data, uint32_t *len)
 {
     const uint8_t *p = *pp; uint32_t tag, v;

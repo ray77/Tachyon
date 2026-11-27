@@ -490,7 +490,7 @@ static void modL(uint8_t r[32], int32_t x[64])
         for (j = i - 32; j < i - 12; j++) {
             x[j] += carry - 16 * x[i] * L[j - (i - 32)];
             carry = (x[j] + 128) >> 8;
-            x[j] -= carry << 8;
+            x[j] -= carry * 256;         /* not <<: carry may be negative (UB in C99) */
         }
         x[j] += carry;
         x[i] = 0;

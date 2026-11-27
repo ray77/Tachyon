@@ -25,7 +25,7 @@ BENCH_SRC  := bench/x25519_bench.c
 UNITY_SRC  := bench/amiga/unity.c
 AMIGA_ASM  := build/amiga/x25519bench.s
 
-.PHONY: all host-test amiga run vamos vectors clean tls-test tls13-test ws-test heartbeat-test wa-probe wa-probe-tunnel wa-capture wabinary-test wabinary-vectors run-blitaes run-blitgcm amiga-probe run-probe vamos-probe utility13 utility13-test sana2-probe run-sana2 sanafix amiga-screen run-screen
+.PHONY: all host-test amiga run vamos vectors clean tls-test tls13-test ws-test heartbeat-test wa-probe wa-pair wa-probe-tunnel wa-capture run-pair wabinary-test wabinary-vectors run-blitaes run-blitgcm amiga-probe run-probe vamos-probe utility13 utility13-test sana2-probe run-sana2 sanafix amiga-screen run-screen
 
 all: host-test amiga
 
@@ -103,9 +103,12 @@ GAP ?= 30
 FAST ?= 1024   # Fast RAM of the emulated machine in KiB for run-probe (2048 = the client's minimum)
 WAIP ?= $(shell dig +short web.whatsapp.com | grep -E '^[0-9.]+$$' | head -1)
 PROBE_CORE := tests/wa_probe_core.c tests/wa_probe_core.h tests/certs/wa_rsa_chain.h tests/vectors/wa_client_payload.h
-build/wa_probe: tests/wa_probe.c $(PROBE_CORE) $(CRYPTO_SRC) crypto/ref/heartbeat.h crypto/ref/tls13.h
+# pairing (docs/PROTOCOL.md 11): the protocol modules and the QR encoder are part of the probe since the pair mode
+PROBE_PROTO := proto/wabinary.c proto/identity.c proto/clientpayload.c proto/pairing.c proto/creds.c ui/qr.c
+PROBE_INC := -Itests -Iproto -Iui
+build/wa_probe: tests/wa_probe.c $(PROBE_CORE) $(PROBE_PROTO) $(CRYPTO_SRC) crypto/ref/heartbeat.h crypto/ref/tls13.h proto/pairing.h proto/creds.h proto/pb.h
 	@mkdir -p build
-	$(HOSTCC) $(HOST_CFLAGS) -Itests tests/wa_probe.c tests/wa_probe_core.c $(CRYPTO_SRC) -o $@
+	$(HOSTCC) $(HOST_CFLAGS) $(PROBE_INC) tests/wa_probe.c tests/wa_probe_core.c $(PROBE_PROTO) $(CRYPTO_SRC) -o $@
 
 NOISE_CACHE ?= build/wa_noise_cache.bin
 wa-probe: build/wa_probe
@@ -116,11 +119,30 @@ wa-probe: build/wa_probe
 CAPTURE ?= tests/vectors/pair_device_iq.bin
 build/wa_capture: tests/wa_capture.c tests/wa_probe.c $(PROBE_CORE) $(CRYPTO_SRC) crypto/ref/heartbeat.h crypto/ref/tls13.h
 	@mkdir -p build
-	$(HOSTCC) $(HOST_CFLAGS) -Itests -Dnoise_transport_decrypt=wa_capture_decrypt -c tests/wa_probe_core.c -o build/wa_probe_core_capture.o
-	$(HOSTCC) $(HOST_CFLAGS) -Itests tests/wa_probe.c tests/wa_capture.c build/wa_probe_core_capture.o $(CRYPTO_SRC) -o $@
+	$(HOSTCC) $(HOST_CFLAGS) $(PROBE_INC) -Dnoise_transport_decrypt=wa_capture_decrypt -c tests/wa_probe_core.c -o build/wa_probe_core_capture.o
+	$(HOSTCC) $(HOST_CFLAGS) $(PROBE_INC) tests/wa_probe.c tests/wa_capture.c build/wa_probe_core_capture.o $(PROBE_PROTO) $(CRYPTO_SRC) -o $@
 
 wa-capture: build/wa_capture
 	WA_CAPTURE=$(CAPTURE) NOISE_CACHE=$(NOISE_CACHE) ./build/wa_capture $(GAP) $(WAIP)
+
+# companion pairing / login on the host (network, manual, PACED: see docs/PROTOCOL.md 11): no build/tachyon.creds ->
+# new identity + QR codes in the terminal; record present -> login with it. CREDS=<file> overrides the record path.
+CREDS ?= build/tachyon.creds
+wa-pair: build/wa_probe
+	CREDS=$(CREDS) NOISE_CACHE=$(NOISE_CACHE) ./build/wa_probe 0 $(WAIP) pair
+
+# offline simulation of the pairing session (tests/wa_pair_sim.c): fake server on a fake WebSocket, pass-through transport
+# stubs, the real pair_session() code; then whatsmeow verifies the pair-device-sign the core produced
+build/wa_pair_sim: tests/wa_pair_sim.c tests/clientpayload_test.c $(PROBE_CORE) $(PROBE_PROTO) $(CRYPTO_SRC) proto/pairing.h proto/creds.h
+	@mkdir -p build
+	$(HOSTCC) $(HOST_CFLAGS) $(PROBE_INC) -DWA_PROBE_SIM -Dnoise_transport_encrypt=sim_encrypt -Dnoise_transport_decrypt=sim_decrypt -c tests/wa_probe_core.c -o build/wa_probe_core_sim.o
+	$(HOSTCC) $(HOST_CFLAGS) $(PROBE_INC) -Dmain=clientpayload_test_main -c tests/clientpayload_test.c -o build/clientpayload_test_identity_sim.o
+	$(HOSTCC) $(HOST_CFLAGS) $(PROBE_INC) -D_POSIX_C_SOURCE=200809L tests/wa_pair_sim.c build/wa_probe_core_sim.o build/clientpayload_test_identity_sim.o $(PROBE_PROTO) $(CRYPTO_SRC) -o $@
+
+.PHONY: pair-sim
+pair-sim: build/wa_pair_sim
+	./build/wa_pair_sim tests/vectors/pair_device_iq.bin tests/vectors/pair_success_iq.bin
+	go run ./tools/pairvectors -mode verify-sign -in build/pair_sim_sign.bin -ref tests/vectors/pair_success_iq.bin
 
 # same, with openssl s_client as the TLS 1.3/X25519 transport (reference run from before tls13.c existed)
 wa-probe-tunnel: build/wa_probe
@@ -170,6 +192,23 @@ clientpayload-test: build/clientpayload_test
 	go run ./tools/pairvectors -mode clientpayload > build/clientpayload_ref.bin
 	./build/clientpayload_test build/clientpayload_ref.bin
 
+# pairing protocol code (proto/pairing.c, proto/creds.c) against a synthetic pair-success IQ signed by a test account key
+# (tools/pairvectors -mode pairsuccess -> tests/vectors/pair_success_iq.bin) and the recorded pair-device IQ; the
+# pair-device-sign IQ the C code answers with is verified by whatsmeow/libsignal (-mode verify-sign). ASan + UBSan.
+PAIRING_TEST_SRC := tests/pairing_test.c proto/pairing.c proto/creds.c proto/identity.c proto/clientpayload.c proto/wabinary.c
+build/pairing_test: $(PAIRING_TEST_SRC) proto/pairing.h proto/creds.h proto/pb.h tests/clientpayload_test.c $(CRYPTO_SRC)
+	@mkdir -p build
+	$(HOSTCC) -O1 -Wall -Wextra -std=c99 -Iproto -Icrypto/ref $(SANITIZE) -Dmain=clientpayload_test_main tests/clientpayload_test.c -c -o build/clientpayload_test_identity.o
+	$(HOSTCC) -O1 -Wall -Wextra -std=c99 -Iproto -Icrypto/ref $(SANITIZE) $(PAIRING_TEST_SRC) build/clientpayload_test_identity.o $(CRYPTO_SRC) -o $@
+
+.PHONY: pairing-test pair-success-vector
+pair-success-vector:
+	go run ./tools/pairvectors -mode pairsuccess > tests/vectors/pair_success_iq.bin
+
+pairing-test: build/pairing_test
+	./build/pairing_test tests/vectors/pair_success_iq.bin tests/vectors/pair_device_iq.bin build/pair_device_sign.bin
+	go run ./tools/pairvectors -mode verify-sign -in build/pair_device_sign.bin -ref tests/vectors/pair_success_iq.bin
+
 host-test: build/x25519_test build/ed25519_test build/sha256_test build/aes_test build/drbg_test build/noise_test build/rsa_test build/x509_test build/blitaes_test build/blitgcm_test
 	./build/x25519_test tests/vectors/x25519_random.txt
 	./build/ed25519_test tests/vectors
@@ -181,6 +220,9 @@ host-test: build/x25519_test build/ed25519_test build/sha256_test build/aes_test
 	./build/x509_test
 	./build/blitaes_test
 	./build/blitgcm_test
+	$(MAKE) clientpayload-test
+	$(MAKE) pairing-test
+	$(MAKE) pair-sim
 	$(MAKE) tls13-test
 
 vectors:
@@ -270,9 +312,9 @@ run: build/amiga/x25519bench
 # WhatsApp probe on the Amiga: the host probe's core over bsdsocket.library (net/bsdsock_io.c), TheWire13 as the
 # stack, FS-UAE's emulated A2065 on slirp (tools/run-fsuae-net.sh, docs/NETWORK.md). Network, several minutes.
 PROBE_UNITY := bench/amiga/wa_probe_unity.c
-build/amiga/wa_probe.s: $(PROBE_UNITY) $(CRYPTO_SRC) $(PROBE_CORE) net/bsdsock_io.c net/bsdsock_io.h net/bsdsocket13.h bench/wa_probe_amiga.c
+build/amiga/wa_probe.s: $(PROBE_UNITY) $(CRYPTO_SRC) $(PROBE_CORE) $(PROBE_PROTO) ui/screen.c ui/screen.h ui/amiga13.h proto/pairing.h proto/creds.h net/bsdsock_io.c net/bsdsock_io.h net/bsdsocket13.h bench/wa_probe_amiga.c
 	@mkdir -p build/amiga
-	$(VC) $(VCFLAGS) -Itests $(PROBE_UNITY) -o=$@
+	$(VC) $(VCFLAGS) $(PROBE_INC) $(PROBE_UNITY) -o=$@
 
 build/amiga/wa_probe: bench/amiga/startup_probe.s build/amiga/wa_probe.s crypto/m68k/fe16.s crypto/m68k/sha256.s crypto/m68k/aes.s crypto/m68k/mont.s
 	$(VASM) $(VASMFLAGS) -o $@ $<
@@ -281,6 +323,11 @@ amiga-probe: build/amiga/wa_probe
 
 run-probe: build/amiga/wa_probe build/amiga/utility.library build/amiga/sana2_hold build/amiga/a2065fix.device
 	GAP=$(GAP) NET_FAST=$(FAST) tools/run-fsuae-net.sh $< 600
+
+# companion pairing / login on the emulated A500 (network, manual, PACED - docs/PROTOCOL.md 11): the QR code appears on the
+# emulated screen, the phone scans the FS-UAE window; build/tachyon-a500.creds carries the credentials between runs
+run-pair: build/amiga/wa_probe build/amiga/utility.library build/amiga/sana2_hold build/amiga/a2065fix.device
+	PAIR=1 GAP=0 NET_FAST=$(FAST) tools/run-fsuae-net.sh $< 900
 
 # utility.library V37 for Kickstart 1.3 (tools/amiga/utility13.*): 2.0-era SANA-II drivers (a2065.device) need it
 build/amiga/utility13_c.s: tools/amiga/utility13.c

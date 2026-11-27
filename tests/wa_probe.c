@@ -19,6 +19,12 @@
  *   closes (measured 2026-11-27: close_notify after 60.0 s; 50 s accepted).
  *   WA_PROBE_DEBUG=1 dumps reads and messages, WA_PROBE_DUMP=1 writes a rejected chain to build/wa_live_cert*.der.
  *
+ * Pairing mode (third argument "pair", make wa-pair): the companion pairing of docs/PROTOCOL.md 11 with the identity
+ * and credentials in CREDS (default build/tachyon.creds). No record: a new identity is generated, the QR codes are
+ * printed with Unicode half blocks (light modules as blocks for a dark terminal; WA_QR_INVERT=1 flips) and written to
+ * build/wa_qr.pbm, after pair-success the probe signs, expects the 515 restart and logs in ONCE with the stored
+ * record. Record present: login only. No retry loop anywhere; the pacing rule is the user's (docs/PROTOCOL.md 11).
+ *
  * Tunnel mode (third argument "tunnel"): the TLS layer is replaced by `openssl s_client` with the same
  * parameters (TLS 1.3, X25519, TLS_AES_128_GCM_SHA256, rsa_pss_rsae_sha256) as a reference transport;
  * kept from the days before tls13.c existed (docs/PROTOCOL.md 7).
@@ -34,8 +40,10 @@
 #include <netdb.h>
 #include <sys/select.h>
 #include "wa_probe_core.h"
+#include "creds.h"
 
 static int fd = -1, tunnel, tun_in = -1, tun_out = -1;
+static wa_creds creds; static const char *creds_path;
 static struct timespec t0;
 static struct addrinfo *ai;
 
@@ -71,6 +79,42 @@ static int32_t io_recv(void *ctx, uint8_t *p, uint32_t cap, uint32_t timeout_ms)
 }
 static int io_reconnect(void *ctx) { (void)ctx; close(fd); return tcp_connect(); }
 
+/* ---- pairing glue ------------------------------------------------------------------------------ */
+static void write_creds(void *ctx)
+{
+    static uint8_t rec[WA_CREDS_SIZE]; FILE *f; (void)ctx;
+    if (!creds_path || wa_creds_write(rec, sizeof rec, &creds) != WA_CREDS_SIZE) return;
+    f = fopen(creds_path, "wb");
+    if (f) { fwrite(rec, 1, sizeof rec, f); fclose(f); printf("creds: %s written (%u bytes, %s)\n", creds_path, (unsigned)WA_CREDS_SIZE, creds.paired ? "paired" : "identity only"); }
+    else printf("creds: cannot write %s\n", creds_path);
+}
+static void show_qr(void *ctx, const char *text, const qr *code, uint32_t valid_ms, uint32_t index, uint32_t count)
+{
+    static char pbm[QR_MAX_SIZE * QR_MAX_SIZE + 64]; uint32_t x, y, n = code->size, inv = getenv("WA_QR_INVERT") != 0; FILE *f; (void)ctx;
+    printf("\n=== QR code %u/%u, valid %u s: scan it with WhatsApp > Linked devices > Link a device ===\n%s\n\n", index, count, valid_ms / 1000, text);
+    /* two module rows per text line; light modules are drawn as blocks (dark terminal), dark ones stay black */
+    for (y = 0; y + 0 < n + 8; y += 2) {
+        printf("    ");
+        for (x = 0; x < n + 8; x++) {
+            int top = y >= 4 && y - 4 < n && x >= 4 && x - 4 < n ? (int)qr_module(code, x - 4, y - 4) : 0;
+            int bot = y + 1 >= 4 && y + 1 - 4 < n && x >= 4 && x - 4 < n ? (int)qr_module(code, x - 4, y + 1 - 4) : 0;
+            if (!inv) { top = !top; bot = !bot; }
+            printf("%s", top && bot ? "\xe2\x96\x88" : top ? "\xe2\x96\x80" : bot ? "\xe2\x96\x84" : " ");
+        }
+        printf("\n");
+    }
+    printf("\n");
+    fflush(stdout);
+    n = qr_render_pbm(code, pbm, sizeof pbm, 1);
+    if (n && (f = fopen("build/wa_qr.pbm", "wb")) != 0) { fwrite(pbm, 1, n, f); fclose(f); }
+}
+static void qr_tick(void *ctx, uint32_t remaining_ms)
+{
+    static uint32_t last = 0xffffffffu; uint32_t s = (remaining_ms + 500) / 1000; (void)ctx;
+    if (s / 10 != last / 10 || s <= 5) { if (s != last) { log_line(0, s <= 5 ? "qr: code expires in a moment" : "qr: waiting for the scan"); last = s; } }
+}
+static void qr_hide(void *ctx, const char *status) { char l[160]; (void)ctx; snprintf(l, sizeof l, "qr: %s", status); log_line(0, l); }
+
 int main(int argc, char **argv)
 {
     static wa_probe_io io; static uint8_t seed[64], ncache[32]; static char nowstr[16];
@@ -86,6 +130,7 @@ int main(int argc, char **argv)
 
     memset(&hints, 0, sizeof hints); hints.ai_socktype = SOCK_STREAM;
     tunnel = argc > 3 && strcmp(argv[3], "tunnel") == 0;
+    io.mode = argc > 3 && strcmp(argv[3], "pair") == 0 ? WA_MODE_PAIR : WA_MODE_PROBE;
     if (tunnel) {
         /* openssl s_client as the TLS 1.3 transport, stdin/stdout piped to us */
         int to_child[2], from_child[2]; pid_t pid; char target[64];
@@ -116,6 +161,20 @@ int main(int argc, char **argv)
         if (cf) { if (fread(ncache, 1, 32, cf) == 32) io.noise_cache_in = ncache; fclose(cf); }
         { char l[160]; snprintf(l, sizeof l, "noise: certificate cache %s (%s)", io.noise_cache_in ? "loaded" : "empty", ncache_path); log_line(0, l); }
     }
+    if (io.mode == WA_MODE_PAIR) {
+        static uint8_t rec[WA_CREDS_SIZE + 1]; FILE *cf;
+        creds_path = getenv("CREDS") && *getenv("CREDS") ? getenv("CREDS") : "build/tachyon.creds";
+        io.creds = &creds; io.creds_loaded = 0; io.qr_mask = QR_MASK_AUTO;
+        io.show_qr = show_qr; io.qr_tick = qr_tick; io.qr_hide = qr_hide; io.save_creds = write_creds;
+        cf = fopen(creds_path, "rb");
+        if (cf) {
+            size_t n = fread(rec, 1, sizeof rec, cf); fclose(cf);
+            if (!wa_creds_read(&creds, rec, (uint32_t)n)) { printf("creds: %s is not a valid credentials record (%zu bytes) - refusing to continue; delete it to pair anew\n", creds_path, n); return 1; }
+            if (!wa_identity_check(&creds.id)) { printf("creds: %s: identity inconsistent (public keys / prekey signature) - refusing to continue\n", creds_path); return 1; }
+            io.creds_loaded = 1;
+            { char l[200]; snprintf(l, sizeof l, "creds: %s loaded: %s", creds_path, creds.paired ? "paired, will log in" : "identity only, will pair"); log_line(0, l); }
+        } else { char l[200]; snprintf(l, sizeof l, "creds: no %s: a new identity will be generated, QR pairing follows", creds_path); log_line(0, l); }
+    }
     /* the offline part (key pairs) before the connection, as the A500 does it */
     if (!wa_probe_prepare(&io)) { printf("%s\n", io.result); return 1; }
     if (!tunnel) {
@@ -132,8 +191,13 @@ int main(int argc, char **argv)
             tls13 *t = wa_probe_tls(); int i;
             for (i = 0; i < t->chain_len; i++) { char fn[64]; FILE *o; snprintf(fn, sizeof fn, "build/wa_live_cert%d.der", i); o = fopen(fn, "wb"); if (o) { fwrite(t->chain[i].der, 1, t->chain[i].len, o); fclose(o); } }
         }
-        if (ok) printf("TIMING: keys tls %u ms + noise %u ms (offline); tls %u ms, ws %u ms, server hello %u ms, client finish %u ms, accepted %u ms (since connect)%s\n",
+        if (ok || io.mode == WA_MODE_PAIR) printf("TIMING: keys tls %u ms + noise %u ms (offline); tls %u ms, ws %u ms, server hello %u ms, client finish %u ms, accepted %u ms (since connect)%s\n",
                        io.t_tls_key, io.t_noise_keys, io.t_tls, io.t_ws, io.t_hello, io.t_finish, io.t_accepted, io.noise_cert_cached ? ", Noise cert cache hit" : "");
+        if (io.mode == WA_MODE_PAIR) {
+            printf("PAIRING: codes shown %u, first code at %u ms, pair-success at %u ms, verify %u ms, sign %u ms, pair-device-sign at %u ms, stream:error 515 at %u ms, login connect at %u ms, login success at %u ms, pongs %u\n",
+                   io.qr_shown, io.t_qr_shown, io.t_pair_success, io.d_verify, io.d_sign, io.t_sign_sent, io.t_515, io.t_login_connect, io.t_login_accepted, io.pongs);
+            if (io.creds_loaded) write_creds(0);     /* identity (so a second attempt reuses it), JID after pairing, Noise cache fingerprint */
+        }
         if (tunnel) { close(tun_out); close(tun_in); wait(0); } else close(fd);
         printf("%s\n", io.result);
         return ok ? 0 : 1;

@@ -20,6 +20,23 @@
 #define WA_VERSION_TERTIARY  1054751086u
 #define WA_VERSION_STRING    "2.3000.1054751086"
 #define WA_DEVICE_OS         "Amiga 500"
+/* DeviceProps.platformType and the matching QR client id (whatsmeow getQRClientType): 0 UNKNOWN -> "0" (the whatsmeow
+ * default, byte-checked), 1 CHROME -> "1", 2 FIREFOX -> "3", 5 SAFARI -> "6", 6 EDGE -> "2". The phone shows the Os
+ * string under "linked devices"; posing as a browser would clash with Os "Amiga 500" and the non-browser UserAgent. */
+#define WA_PLATFORM_TYPE     0u
+#if WA_PLATFORM_TYPE == 0
+#define WA_PAIR_CLIENT_ID    "0"
+#elif WA_PLATFORM_TYPE == 1
+#define WA_PAIR_CLIENT_ID    "1"
+#elif WA_PLATFORM_TYPE == 2
+#define WA_PAIR_CLIENT_ID    "3"
+#elif WA_PLATFORM_TYPE == 5
+#define WA_PAIR_CLIENT_ID    "6"
+#elif WA_PLATFORM_TYPE == 6
+#define WA_PAIR_CLIENT_ID    "2"
+#else
+#error "no QR client id for this WA_PLATFORM_TYPE"
+#endif
 #define WA_CLIENTPAYLOAD_MAX 512u       /* the registration payload is about 330 bytes */
 
 /* both return the length written, 0 if cap is too small */

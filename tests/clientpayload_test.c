@@ -88,7 +88,7 @@ int main(int argc, char **argv)
 
     /* a generated identity is self-consistent; a damaged one is not */
     {
-        static const uint8_t seed[48] = "clientpayload_test seed, not a secret............";
+        static const uint8_t seed[48] = "clientpayload_test seed, not a secret..........";
         hmac_drbg rng; wa_identity g;
         drbg_instantiate(&rng, seed, 48);
         wa_identity_generate(&g, &rng);

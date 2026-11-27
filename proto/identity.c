@@ -42,7 +42,7 @@ int wa_identity_check(const wa_identity *id)
 
 uint32_t wa_base64(char *out, const uint8_t *in, uint32_t n)
 {
-    static const char tab[64] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    static const char tab[65] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     uint32_t i, o = 0;
     for (i = 0; i + 2 < n; i += 3) {
         uint32_t v = ((uint32_t)in[i] << 16) | ((uint32_t)in[i + 1] << 8) | in[i + 2];
