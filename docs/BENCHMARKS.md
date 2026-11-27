@@ -216,3 +216,19 @@ Details in docs/CUSTOM-CHIPS.md Abschnitte 2 und 2b. A500/FS-UAE, 16 KiB AES-256
 Hypothese bestätigt und übertroffen: Die erste Rechnung (Abschnitt 2a in CUSTOM-CHIPS.md) sagte 1,5–2,2 KB/s für den Blitter voraus und riet ab; mit Blitter-seitiger Transposition, 113-Gatter-S-Box und Copper-Steuerung liefert der Blitter so viel wie die CPU, und beide zusammen das Doppelte. Preis: ≈ 100 KiB Chip-RAM (Arena) + 50 KiB Copper-Listen, Display-DMA aus während des Batches, zwei AES-Implementierungen.
 
 Fehler auf dem Weg (docs/TOOLCHAIN.md, Abschnitt Stolperfallen): Konsolenausgabe im Blitter-Besitz (Deadlock), COPER als Fertig-Flag (Systemliste setzt es), VBL-Server schreibt COP1LC, zweimal falsch gezählte Copper-Blockgröße, Diagnose-Blits zerstörten die Schlüssel-Lanes, Rücktransposition mit der TIN- statt TOUT-Liste. 25 FS-UAE-Läufe à 2–5 Minuten.
+
+## 2026-11-27 – Schritt 11: RSA-2048, X.509-Kette, TLS-1.2-Handshake (Montgomery in Assembler)
+
+A500/FS-UAE, DateStamp-Ticks, alle Vektoren gegen Go (`tools/genvectors/rsa.go`, `tools/tlsserver`) bestanden.
+
+| Operation | vorher | jetzt |
+|---|---:|---:|
+| `rsa_mont_mul` 2048 Bit (Comba, 16-Bit-Limbs, 48-Bit-Akkumulator) | 1,86 s (C) | **0,448 s** |
+| `rsa_mont_sqr` 2048 Bit (Paarsymmetrie) | – | **0,340 s** |
+| `rsa_pub_set` (n0inv, R² mod n: Verdoppeln + 5 Quadrierungen statt 2048 Verdoppelungen) | 6,94 s | **1,94 s** |
+| RSA-2048 öffentliche Operation x^65537 (16 sqr + 1 mul + Konvertierungen) | 9,38 s | **7,68 s** |
+| X.509-Kette web.whatsapp.com (Parsen + 2 RSA-2048-Verifikationen) | 32,7 s | **19,5 s** |
+| TLS-1.2-Client-Handshake (1 Zertifikatsprüfung + RSA-Verschlüsselung + PRF + GCM-Schlüssel) | 34,3 s | **21,1 s** |
+| Noise-XX-Client-Handshake (3 X25519 + HKDF + 6 GCM-Schlüsselaufbauten) | – | 25,3 s |
+
+Einordnung: Verbindungsaufbau (TLS 21 s + Noise 25 s + Pairing-Signaturen) liegt jetzt bei ≈ 50 s. Größter Einzelposten bleibt X25519 (8,1 s je Operation, 3 im Noise-Handshake). Für RSA bliebe Karatsuba über den 128 Limbs (≈ −25 %) und das Entrollen der Comba-Innenschleife; beides zurückgestellt, weil der Zertifikatsweg nur einmal je Verbindung läuft und das Serverzertifikat zwischengespeichert werden kann (Fingerabdruck-Vergleich statt erneuter Verifikation: 19,5 s → Millisekunden bei unverändertem Zertifikat).
