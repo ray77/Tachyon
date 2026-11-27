@@ -516,6 +516,20 @@ void sc_reduce(uint8_t r[32], const uint8_t x[64])
     modL(r, t);
 }
 
+void sc_muladd(uint8_t s[32], const uint8_t a[32], const uint8_t b[32], const uint8_t c[32])
+{
+    uint32_t col[64], carry = 0; uint8_t x[64]; int i, j;
+    for (i = 0; i < 64; i++) col[i] = 0;
+    for (i = 0; i < 32; i++) {
+        uint32_t ai = a[i];
+        for (j = 0; j < 32; j++) col[i + j] += ai * (uint32_t)b[j];   /* <= 32 * 255^2 per column, far below 2^32 */
+        if ((i & 7) == 7) CRYPTO_YIELD();
+    }
+    for (i = 0; i < 32; i++) col[i] += c[i];
+    for (i = 0; i < 64; i++) { col[i] += carry; x[i] = (uint8_t)col[i]; carry = col[i] >> 8; }   /* a*b + c < 2^512: no final carry */
+    sc_reduce(s, x);
+}
+
 int sc_is_canonical(const uint8_t s[32])
 {
     int i;
@@ -576,4 +590,44 @@ int xeddsa_verify(const uint8_t sig[64], const uint8_t *msg, uint32_t len, const
     for (i = 0; i < 64; i++) sig2[i] = sig[i];
     sig2[63] &= 0x7f;
     return verify_core(sig2, msg, len, a_ed);
+}
+
+void xeddsa_sign(uint8_t sig[64], const uint8_t *msg, uint32_t len, const uint8_t priv[32], const uint8_t random[64])
+{
+    static const uint8_t diversifier[32] = { 0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                                             0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+    ge_p3 A, R;
+    sha512_ctx c;
+    uint8_t a[32], a_bytes[32], hash[64], r[32], h[32];
+    int i;
+
+    for (i = 0; i < 32; i++) a[i] = priv[i];
+    a[0] &= 248; a[31] &= 127; a[31] |= 64;             /* clamp (SetBytesWithClamping; a no-op on a stored key) */
+
+    ge_scalarmult_base_ct(&A, a);                        /* A = [a]B, Edwards encoding with its natural sign bit */
+    ge_tobytes(a_bytes, &A);
+
+    sha512_init(&c);                                     /* r = H(0xFE 0xFF^31 || a || msg || random) mod L */
+    sha512_update(&c, diversifier, 32);
+    sha512_update(&c, a, 32);
+    sha512_update(&c, msg, len);
+    sha512_update(&c, random, 64);
+    sha512_final(&c, hash);
+    sc_reduce(r, hash);
+
+    ge_scalarmult_base_ct(&R, r);                        /* R = [r]B */
+    ge_tobytes(sig, &R);
+
+    sha512_init(&c);                                     /* h = H(R || A || msg) mod L */
+    sha512_update(&c, sig, 32);
+    sha512_update(&c, a_bytes, 32);
+    sha512_update(&c, msg, len);
+    sha512_final(&c, hash);
+    sc_reduce(h, hash);
+
+    sc_muladd(sig + 32, h, a, r);                        /* S = h * a + r mod L (S < L, so bit 255 is free) */
+    sig[63] |= a_bytes[31] & 0x80;                      /* sign of A: the verifier has only the Montgomery u */
+
+    for (i = 0; i < 32; i++) { a[i] = 0; r[i] = 0; }     /* scrub the secret scalars */
+    for (i = 0; i < 64; i++) hash[i] = 0;
 }

@@ -158,6 +158,18 @@ wabinary-test: build/wabinary_test
 wabinary-vectors:
 	go run ./tools/wabvectors > tests/vectors/wabinary_ref.bin
 
+# companion identity + ClientPayload (proto/identity.c, proto/clientpayload.c): byte comparison with whatsmeow's own
+# proto.Marshal for the fixed test identity (tools/pairvectors), identity self-check, 64-bit decimal parsing
+PROTO_PAIR_SRC := proto/identity.c proto/clientpayload.c
+build/clientpayload_test: tests/clientpayload_test.c $(PROTO_PAIR_SRC) proto/identity.h proto/clientpayload.h proto/pb.h $(CRYPTO_SRC)
+	@mkdir -p build
+	$(HOSTCC) $(HOST_CFLAGS) -Iproto tests/clientpayload_test.c $(PROTO_PAIR_SRC) $(CRYPTO_SRC) -o $@
+
+.PHONY: clientpayload-test
+clientpayload-test: build/clientpayload_test
+	go run ./tools/pairvectors -mode clientpayload > build/clientpayload_ref.bin
+	./build/clientpayload_test build/clientpayload_ref.bin
+
 host-test: build/x25519_test build/ed25519_test build/sha256_test build/aes_test build/drbg_test build/noise_test build/rsa_test build/x509_test build/blitaes_test build/blitgcm_test
 	./build/x25519_test tests/vectors/x25519_random.txt
 	./build/ed25519_test tests/vectors
@@ -175,6 +187,7 @@ vectors:
 	go run ./tools/genvectors -mode x25519 -n 256 > tests/vectors/x25519_random.txt
 	go run ./tools/genvectors -mode ed25519 -n 64 > tests/vectors/ed25519_random.txt
 	go run ./tools/genvectors -mode xeddsa -n 64 > tests/vectors/xeddsa_random.txt
+	go run ./tools/genvectors -mode xeddsa-sign -n 64 > tests/vectors/xeddsa_sign.txt
 	go run ./tools/genvectors -mode sha512 -n 32 > tests/vectors/sha512_random.txt
 	go run ./tools/genvectors -mode aesgcm -n 64 > tests/vectors/aesgcm_random.txt
 	go run ./tools/genvectors -mode rsapss -n 24 > tests/vectors/rsa_pss.txt

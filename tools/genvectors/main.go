@@ -10,6 +10,7 @@
 //	x25519:  <scalar> <u> <out>
 //	ed25519: <pk> <msg> <sig> <valid 1/0>      (every 4th line has a corrupted signature)
 //	xeddsa:  <curve25519 pk> <msg> <sig> <valid 1/0>
+//	xeddsa-sign: <clamped priv> <random 64> <msg|-> <sig>   (deterministic, tools/genvectors/xeddsa.go)
 //	sha512:  <msg> <digest>
 package main
 
@@ -55,7 +56,7 @@ func corrupt(sig []byte, i int) {
 }
 
 func main() {
-	mode := flag.String("mode", "x25519", "x25519 | ed25519 | xeddsa | sha512 | aesgcm | noise | rsa | rsapss")
+	mode := flag.String("mode", "x25519", "x25519 | ed25519 | xeddsa | xeddsa-sign | sha512 | aesgcm | noise | rsa | rsapss")
 	n := flag.Int("n", 64, "number of vectors")
 	flag.Parse()
 
@@ -111,6 +112,8 @@ func main() {
 			}
 			fmt.Printf("%x %x %x %d\n", pk[:], msg, sig[:], valid)
 		}
+	case "xeddsa-sign":
+		xeddsaSignVectors(*n)
 	case "aesgcm":
 		// <keybits> <key> <iv> <aad|-> <pt|-> <ct> <tag>
 		for i := 0; i < *n; i++ {

@@ -166,6 +166,31 @@ static void test_sig_file(const char *path, int (*verify)(const uint8_t *, const
     printf("%s %s random vectors: %d checked (%d valid, %d invalid), %d mismatches\n", bad ? "FAIL" : "PASS", name, n, valid, n - valid, bad);
 }
 
+/* xeddsa_sign against deterministic libsignal-algorithm vectors (tools/genvectors -mode xeddsa-sign):
+ * byte-exact signature, verifies with xeddsa_verify under the Curve25519 public key, fails on a changed message */
+static void test_xeddsa_sign_file(const char *path)
+{
+    FILE *f = fopen(path, "r"); char line[4096]; int n = 0, bad = 0;
+    if (!f) { printf("SKIP %s\n", path); return; }
+    while (fgets(line, sizeof line, f)) {
+        uint8_t priv[32], rnd[64], msg[512], want[64], sig[64], pk[32]; int mlen;
+        char *f1 = strchr(line, ' '), *f2, *f3;
+        if (!f1) continue; *f1++ = 0;
+        f2 = strchr(f1, ' '); if (!f2) continue; *f2++ = 0;
+        f3 = strchr(f2, ' '); if (!f3) continue; *f3++ = 0;
+        unhex(priv, line, 32); unhex(rnd, f1, 64); mlen = f2[0] == '-' ? 0 : unhex(msg, f2, 512); unhex(want, f3, 64);
+        xeddsa_sign(sig, msg, (uint32_t)mlen, priv, rnd);
+        x25519_base_comb(pk, priv);
+        n++;
+        if (memcmp(sig, want, 64) != 0) { bad++; if (bad < 3) { printf("FAIL xeddsa_sign vector %d (msg len %d)\n", n, mlen); dump("got", sig, 64); dump("want", want, 64); } continue; }
+        if (!xeddsa_verify(sig, msg, (uint32_t)mlen, pk)) { bad++; printf("FAIL xeddsa_sign vector %d: own verify rejects\n", n); continue; }
+        msg[0] ^= 1; if (mlen == 0) mlen = 1;
+        if (xeddsa_verify(sig, msg, (uint32_t)mlen, pk)) { bad++; printf("FAIL xeddsa_sign vector %d: verify accepts a changed message\n", n); }
+    }
+    fclose(f); if (bad) failures++;
+    printf("%s xeddsa_sign vectors: %d checked (byte exact, verified, tamper rejected), %d mismatches\n", bad ? "FAIL" : "PASS", n, bad);
+}
+
 /* comb-based X25519 public keys must equal the Montgomery ladder reference */
 static void test_base_comb(void)
 {
@@ -201,6 +226,7 @@ int main(int argc, char **argv)
     snprintf(path, sizeof path, "%s/sha512_random.txt", dir); test_sha512_file(path);
     snprintf(path, sizeof path, "%s/ed25519_random.txt", dir); test_sig_file(path, ed25519_verify, "ed25519");
     snprintf(path, sizeof path, "%s/xeddsa_random.txt", dir); test_sig_file(path, xeddsa_verify, "xeddsa");
+    snprintf(path, sizeof path, "%s/xeddsa_sign.txt", dir); test_xeddsa_sign_file(path);
     printf(failures ? "\n%d FAILURE(S)\n" : "\nALL PASSED\n", failures);
     return failures ? 1 : 0;
 }
