@@ -493,3 +493,22 @@ Tagesbilanz der Login-Verbindung des A500: **76,0 s → 43,1 s** (−10,4 s TLS-
 Der Startweg des A500 bis zum Login: mittags 122 s (Prekeys 33 s + Schlüssel 7 s + Verbindung 76 s), jetzt **47 s**, davon 43 s die Verbindung selbst. Vor dem Connect rechnet der 68000 nichts mehr; alles Vorab-Rechenbare läuft in der vorigen Sitzung, während der Server ohnehin Ereignisse schickt (Herzschlag hält den WebSocket). Die 43 s der Verbindung bestehen aus drei Leitern mit frischem Server-Ephemeral (23 s), RSA-PSS CertificateVerify (≈ 5 s), HKDF/AES-GCM (≈ 5 s), Netz und Parsen; ohne Protokollwechsel bleibt das so. Die Prekey-Erzeugung (3,3 s je Schlüssel) gehört in dieselbe Leerlaufphase, sobald der Client länger online bleibt. Live-Verbindungen für diesen Schritt: 2.
 
 Nachtrag (20:05): die Prekey-Erzeugung liegt jetzt ebenfalls in der Leerlaufphase nach `<active/>` (PROTOCOL.md Abschnitt 6, „Prekeys ebenfalls im Leerlauf“): vor dem Connect rechnet `wa_probe_prepare` gar nichts mehr. Offline im Simulator geprüft (136 Prüfungen); live nicht eigens gemessen, weil Server (6) und Charge (10 anstehend) an diesem Abend nichts zu erzeugen ließen – 3,3 s je Schlüssel, online mit Herzschlag wie die Schlüssel für den nächsten Start.
+
+## 2026-11-27 – Schritt 24: Signal live – X3DH, erste Nachricht vom A500, Server-Ack
+
+Vierter Live-Chat-Versuch (SIGNAL.md 6, `make run-chat … FAST=2048`, FS-UAE zyklengenau, A500 mit 2 MiB Fast): der Text des Nutzers an die eigene Nummer, gesendet vor `<active/>` (passiver Zustand), bestätigt vom Server. Zeiten seit dem TCP-Connect.
+
+| Phase | Versuch 4 |
+|---|---:|
+| Programmstart → `<success>` | 60,4 s (Verbindung 42,5 s) |
+| Bundle-Anfrage → Bundle des Telefons | 0,9 s |
+| **X3DH als Initiator** (XEdDSA der Prekey-Signatur, 4 Leitern, 2 Schlüsselpaare, Ratchet-Leiter) | **64,16 s** (15 Pongs) |
+| Sitzungsdatensatz schreiben (2×, SYS:) | 0,6 s + 0,6 s |
+| Nachricht verschlüsseln (118 Byte Klartext → 265 Byte PreKeySignalMessage) | 0,28 s |
+| `<message>` gesendet → `<ack class=message>` | **0,52 s** |
+| Programmstart → Server-Ack | 129,3 s |
+| Schlüssel für den nächsten Start (online) | 17,1 s (3 Pongs) |
+
+### Einordnung
+
+Der erste Text eines Amiga 500 an WhatsApp: 129 s nach dem Programmstart liegt die Server-Bestätigung vor, davon 64 s X3DH auf dem 68000 (Erwartung aus dem Vektor-Runner war ~54 s; live kommt die XEdDSA-Prüfung der Prekey-Signatur dazu, 9,4 s). Beim zweiten Text an dasselbe Gerät entfällt X3DH (Sitzung im Datensatz): Verschlüsseln 0,3 s, Ack ~0,5 s. Die Antwort des Telefons kam nicht mehr an – die Verbindung stand nach `<active/>` mitten im 166-KB-History-Frame still (SIGNAL.md 6, Versuch 4); Schritt 25 ist der Empfang. Signal-Zeiten des Vektor-Runners unter FS-UAE (`make run`) stehen noch aus; unter vamos (nicht zyklengenau) laufen alle Vektoren durch.

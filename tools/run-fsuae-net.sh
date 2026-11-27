@@ -26,9 +26,9 @@ WORK=${TACHYON_NET_WORK:-"$ROOT/build/fsuae-net"}
 DH0="$WORK/dh0"
 NET_DHCP=${NET_DHCP:-0}
 NET_FAST=${NET_FAST:-1024}    # Fast RAM in KiB: 1024 = benchmark machine, 2048 = the client's minimum (docs/NETWORK.md 6)
-NET_RXBUF=${NET_RXBUF:-8192}   # socket_rx_buffer and tcp_window: TheWire13's TCP pool is max_tcp (12) x this; the default 40000 costs
-                               # 480 KiB. 8 KiB since the live chat attempts: less data in flight through FS-UAE's A2065 emulation, which
-                               # died three times shortly after the server's 170 KB offline burst (docs/SIGNAL.md 6)
+NET_RXBUF=${NET_RXBUF:-16384}  # socket_rx_buffer and tcp_window: TheWire13's TCP pool is max_tcp (12) x this; the default 40000 costs
+                               # 480 KiB. 16 KiB: the only live run that received the server's 170 KB offline burst whole (chat attempt
+                               # 1) ran with it; attempt 4 with 8 KiB stalled inside the 166 KB stanza (docs/SIGNAL.md 6)
 NET_LOG=${NET_LOG:-0}          # log_enabled in thewire13.conf
 NET_WAIT=${NET_WAIT:-8}        # seconds between starting the stack and the program
 NET_STACK=${NET_STACK:-50000}  # CLI stack for the stack task (Kickstart 1.3 default is 4000 bytes)

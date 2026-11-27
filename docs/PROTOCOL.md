@@ -354,3 +354,5 @@ Beobachtungen:
 ## 12. Nachrichten: Signal-Sessions, `<message>`, Quittungen (2026-11-27, `proto/signal.c`)
 
 Eigenes Dokument: **[SIGNAL.md](SIGNAL.md)** – X3DH in beiden Rollen, Double Ratchet und Nachrichtenformate bitgenau zu libsignal (Go-Orakel `tools/signalvectors`), die WhatsApp-Schicht (`waE2E.Message`, Padding, `<message>`/`<enc>`, `DeviceSentMessage`, Geräteidentität, Quittungen wie whatsmeow), Byte-Layout des Sitzungsdatensatzes, Offline-Tests (`make signal-test`, `make pair-sim` Szenario E), der Interim-Chat auf Host und A500 und die Live-Ergebnisse. Die Taktregel aus Abschnitt 11 gilt unverändert; Nachrichten, die nicht entschlüsselt werden können, werden nur bestätigt, nie mit einer Retry-Quittung neu angefordert.
+
+Stand (SIGNAL.md 6): im vierten Live-Versuch hat der emulierte A500 den ersten Text an die eigene Nummer gesendet (X3DH als Initiator 64 s, PreKeySignalMessage + Geräteidentität) und der Server ihn 0,5 s später bestätigt; der Empfang der Antwort steht aus (Versuch 5).

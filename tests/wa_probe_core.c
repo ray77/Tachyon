@@ -27,24 +27,24 @@ static const uint8_t wa_cert_pub[32] = { 0x14, 0x23, 0x75, 0x57, 0x4d, 0x0a, 0x5
 static wa_probe_io *io;
 static tls13 t;
 static ws_client w;
-/* the big receive buffers: WebSocket message, pending TLS plaintext, decrypted frame (two), inflated node, node arena.
- * WA_PROBE_ALLOC (the Amiga unity build): handed out by io->alloc, so they live in Chip RAM and leave Fast RAM to the
- * code, the TCP/IP stack and the session store; otherwise static */
+/* the big receive buffers: WebSocket message (176 KiB, frames are decrypted in place), pending TLS plaintext, inflated
+ * node, node arena, the heartbeat's staging buffer. WA_PROBE_ALLOC (the Amiga unity build): the message buffer, the
+ * arena and the staging buffer are handed out by io->alloc, so they live in Chip RAM (~260 KB free on the A500 after the
+ * screen); the two 16 KiB buffers stay static (Fast RAM, ~115 KB free). Otherwise everything is static. */
 #define WA_PROBE_ARENA 12288
-#define WA_PROBE_STAGE 16384
+#define WA_PROBE_STAGE 8192
 #ifdef WA_PROBE_ALLOC
-static uint8_t *msgbuf, *pend, *rx_plain, *hs_plain, *inflated, *arena_mem, *stage;
+static uint8_t *msgbuf, *arena_mem, *stage;
+static uint8_t pend[WA_PROBE_MSG_MAX], inflated[WA_PROBE_MSG_MAX];
 static int big_buffers(wa_probe_io *pio)
 {
     if (msgbuf) return 1;
     if (!pio->alloc) return 0;
-    msgbuf = pio->alloc(pio->ctx, WA_PROBE_MSG_MAX); pend = pio->alloc(pio->ctx, WA_PROBE_MSG_MAX); rx_plain = pio->alloc(pio->ctx, WA_PROBE_MSG_MAX);
-    hs_plain = pio->alloc(pio->ctx, WA_PROBE_MSG_MAX); inflated = pio->alloc(pio->ctx, WA_PROBE_MSG_MAX); arena_mem = pio->alloc(pio->ctx, WA_PROBE_ARENA);
-    stage = pio->alloc(pio->ctx, WA_PROBE_STAGE);
-    return msgbuf && pend && rx_plain && hs_plain && inflated && arena_mem && stage;
+    msgbuf = pio->alloc(pio->ctx, WA_PROBE_MSGBUF); arena_mem = pio->alloc(pio->ctx, WA_PROBE_ARENA); stage = pio->alloc(pio->ctx, WA_PROBE_STAGE);
+    return msgbuf && arena_mem && stage;
 }
 #else
-static uint8_t msgbuf[WA_PROBE_MSG_MAX], pend[WA_PROBE_MSG_MAX], rx_plain[WA_PROBE_MSG_MAX], hs_plain[WA_PROBE_MSG_MAX], inflated[WA_PROBE_MSG_MAX], arena_mem[WA_PROBE_ARENA], stage[WA_PROBE_STAGE];
+static uint8_t msgbuf[WA_PROBE_MSGBUF], pend[WA_PROBE_MSG_MAX], inflated[WA_PROBE_MSG_MAX], arena_mem[WA_PROBE_ARENA], stage[WA_PROBE_STAGE];
 static int big_buffers(wa_probe_io *pio) { (void)pio; return 1; }
 #endif
 static uint32_t pend_len;
@@ -57,7 +57,7 @@ static void drain_poll(void *hio)
     int32_t r; (void)hio;
     if (in_pump || !io || stage_len >= WA_PROBE_STAGE) return;
     r = io->recv(io->ctx, stage + stage_len, WA_PROBE_STAGE - stage_len, 0);
-    if (r > 0) stage_len += (uint32_t)r;
+    if (r > 0) { stage_len += (uint32_t)r; io->rx_bytes += (uint32_t)r; }
 }
 static uint8_t rdbuf[8192];
 static uint32_t t_start;
@@ -195,7 +195,7 @@ static int pump_inner(int want_tls_state, int want_msg, uint32_t timeout_ms)
                 ol = 0;
                 { uint32_t d = w.dropped;
                   if (!ws_input(&w, pend, pend_len, out, &ol, sizeof out)) { wa_fmt(line, sizeof line, "ws error, state %d", w.state); logl(line); return 0; }
-                  if (w.dropped != d) { wa_fmt(line, sizeof line, "ws: a %u-byte message was dropped (larger than the %u-byte buffer)", w.dropped_len, (uint32_t)WA_PROBE_MSG_MAX); logl(line); } }
+                  if (w.dropped != d) { wa_fmt(line, sizeof line, "ws: a %u-byte message was dropped (larger than the %u-byte buffer)", w.dropped_len, (uint32_t)WA_PROBE_MSGBUF); logl(line); } }
                 if (ol && !app_send(out, ol)) return 0;
                 c = w.consumed > pend_len ? pend_len : w.consumed;
                 if (!c) break;
@@ -207,7 +207,7 @@ static int pump_inner(int want_tls_state, int want_msg, uint32_t timeout_ms)
         now = ms();
         if (now > deadline) { if (!pump_quiet) logl("timeout"); return 0; }
         if (stage_len) { uint32_t i, c = stage_len < sizeof rdbuf ? stage_len : (uint32_t)sizeof rdbuf; cp(rdbuf, stage, c); stage_len -= c; for (i = 0; i < stage_len; i++) stage[i] = stage[i + c]; r = (int32_t)c; }
-        else r = io->recv(io->ctx, rdbuf, sizeof rdbuf, deadline - now);
+        else { r = io->recv(io->ctx, rdbuf, sizeof rdbuf, deadline - now); if (r > 0) io->rx_bytes += (uint32_t)r; }
         if (r == 0) { if (!pump_quiet) logl("timeout"); return 0; }
         if (r < 0) { logl("socket closed by server"); return 0; }
         if (io->tunnel) {
@@ -356,13 +356,13 @@ int wa_probe_prepare(wa_probe_io *pio)
     return 1;
 }
 
-static int recv_frame(uint32_t timeout_ms, uint8_t *plain, uint32_t *plen);
+static int recv_frame(uint32_t timeout_ms, uint8_t **plain, uint32_t *plen);
 static void frames_reset(void);
 static uint32_t dec_value(const wab_value *v);
 
 /* TCP is connected: TLS -> WebSocket -> Noise XX with `payload` as the ClientPayload; the first decrypted server
- * frame lands in plain[0..*plain_len). Shared by the probe, the pairing connection and the login connection. */
-static int handshake(const uint8_t *payload, uint32_t payload_len, uint8_t *plain, uint32_t *plain_len)
+ * frame is *plain[0..*plain_len) inside the message buffer. Shared by the probe, the pairing connection and the login connection. */
+static int handshake(const uint8_t *payload, uint32_t payload_len, uint8_t **plain, uint32_t *plain_len)
 {
     static uint8_t out[4096];
     static uint8_t server_eph[32], server_static[32], server_static_ct[64], cert_ct[4096], cert_pt[4096];
@@ -422,7 +422,7 @@ static int handshake(const uint8_t *payload, uint32_t payload_len, uint8_t *plai
     }
 
     /* WebSocket upgrade */
-    n = ws_client_start(&w, io->host, "/ws/chat", "https://web.whatsapp.com", msgbuf, WA_PROBE_MSG_MAX, &rng, out, sizeof out);
+    n = ws_client_start(&w, io->host, "/ws/chat", "https://web.whatsapp.com", msgbuf, WA_PROBE_MSGBUF, &rng, out, sizeof out);
     w.stream = 1;                                   /* long messages (the offline batch after login) arrive frame by frame */
     if (!n || !app_send(out, n)) return fail("RESULT: WebSocket request failed", 0, 0);
     if (!pump(-1, 2, 20000)) { wa_fmt(io->result, sizeof io->result, "RESULT: WebSocket upgrade failed (state %u)", (uint32_t)w.state); return 0; }
@@ -535,7 +535,7 @@ static int handshake(const uint8_t *payload, uint32_t payload_len, uint8_t *plai
         if (r == 0) { wa_fmt(io->result, sizeof io->result, "RESULT: handshake REJECTED (no encrypted frame after ClientFinish, gap %T s)", io->gap_ms); return 0; }
         if (r < 0) return fail("RESULT: first server frame rejected (see log)", 0, 0);
         wa_fmt(line, sizeof line, "noise: first encrypted server frame: %u bytes ciphertext -> %u bytes plaintext, first bytes %02x %02x %02x %02x (binary node)",
-               *plain_len + 16, *plain_len, (uint32_t)plain[0], (uint32_t)plain[1], (uint32_t)plain[2], (uint32_t)plain[3]); logl(line);
+               *plain_len + 16, *plain_len, (uint32_t)(*plain)[0], (uint32_t)(*plain)[1], (uint32_t)(*plain)[2], (uint32_t)(*plain)[3]); logl(line);
     }
     io->t_accepted = ms();
     return 1;
@@ -575,32 +575,57 @@ static int send_node(const wab_node *n, const char *what)
  * layer hands the message over in pieces (ws.stream), complete frames are taken from the front, the remainder is moved
  * down and more is read. A single frame longer than the buffer cannot be decrypted and is skipped, the Noise read
  * counter advanced by one so the frames after it still decrypt. 1 = frame, 0 = timeout, -1 = connection gone or bad frame. */
-static void frames_reset(void) { msg_off = 0; msg_have = 0; skip_left = 0; w.msg_len = 0; w.msg_ready = 0; w.msg_partial = 0; stage_len = 0; }
-static int recv_frame(uint32_t timeout_ms, uint8_t *plain, uint32_t *plen)
+/* a long frame (longer than a TLS record) in flight: progress every 32 KB, a note when the line falls silent (the live
+ * chat attempts stalled inside the 166 KB history stanza; whether the bytes stopped at the server, in FS-UAE's A2065
+ * emulation or in the stack is what these lines are for) */
+static uint32_t long_total, long_next, long_t0, long_note_at, skip_total, skip_done;
+static void long_progress(uint32_t have)
+{
+    if (long_total && have >= long_next) { wa_fmt(line, sizeof line, "ws: %u of %u bytes of the long frame here after %T s", have, long_total, ms() - long_t0); logl(line); long_next = (have / 32768 + 1) * 32768; }
+}
+static void long_note(uint32_t have)
+{
+    if (!long_total || ms() - long_note_at < 10000) return;
+    long_note_at = ms();
+    wa_fmt(line, sizeof line, "ws: the line is quiet with %u of %u bytes of the long frame here (%T s since its start, %u bytes received in this run)", have, long_total, ms() - long_t0, io->rx_bytes); logl(line);
+}
+static void long_begin(uint32_t total, uint32_t have)
+{
+    long_total = total; long_t0 = ms(); long_next = 32768; long_note_at = ms() - 10000;
+    wa_fmt(line, sizeof line, "ws: a %u-byte frame begins (%u bytes of it here, %u bytes received in this run so far)", total, have, io->rx_bytes); logl(line);
+}
+static void frames_reset(void) { msg_off = 0; msg_have = 0; skip_left = 0; w.msg_len = 0; w.msg_ready = 0; w.msg_partial = 0; stage_len = 0; long_total = 0; skip_total = skip_done = 0; }
+static int recv_frame(uint32_t timeout_ms, uint8_t **plain, uint32_t *plen)
 {
     uint32_t flen, avail, deadline = ms() + timeout_ms;
     for (;;) {
         avail = w.msg_len - msg_off;
         if (skip_left) {                                 /* discarding an oversize frame */
             uint32_t d = avail < skip_left ? avail : skip_left;
-            msg_off += d; skip_left -= d; avail -= d;
-            if (!skip_left) { logl("ws: oversize frame skipped, Noise read counter advanced"); tr.read_counter++; }
+            msg_off += d; skip_left -= d; avail -= d; skip_done += d;
+            long_progress(skip_done);
+            if (!skip_left) { wa_fmt(line, sizeof line, "ws: oversize frame skipped (%u bytes in %T s), Noise read counter advanced", skip_total, ms() - long_t0); logl(line); tr.read_counter++; long_total = 0; }
         }
         if (!skip_left && avail >= 3) {
             flen = ((uint32_t)w.msg[msg_off] << 16) | ((uint32_t)w.msg[msg_off + 1] << 8) | w.msg[msg_off + 2];
             if (flen < 16) { wa_fmt(line, sizeof line, "wab: bad encrypted frame (length %u at %u)", flen, msg_off); logl(line); frames_reset(); return -1; }
-            if (3 + flen > WA_PROBE_MSG_MAX) {
-                wa_fmt(line, sizeof line, "ws: a %u-byte frame is longer than the %u-byte buffer: skipping it (an app-state or history stanza, not needed)", flen, (uint32_t)WA_PROBE_MSG_MAX); logl(line);
-                skip_left = 3 + flen; continue;
+            if (3 + flen > WA_PROBE_MSGBUF) {
+                wa_fmt(line, sizeof line, "ws: a %u-byte frame is longer than the %u-byte buffer: skipping it (it cannot be acknowledged, the server will send it again)", flen, (uint32_t)WA_PROBE_MSGBUF); logl(line);
+                skip_left = 3 + flen; skip_total = 3 + flen; skip_done = 0; long_begin(3 + flen, avail); continue;
             }
             if (avail >= 3 + flen) {
-                if (!noise_transport_decrypt(&tr, w.msg + msg_off + 3, flen, plain)) { logl("wab: frame does not decrypt"); frames_reset(); return -1; }
-                *plen = flen - 16;
+                uint8_t *ct = w.msg + msg_off + 3;
+                /* in place: the GCM tag is checked over the whole ciphertext first, then the counter stream is applied
+                 * byte by byte (crypto/ref/aes.c gcm_ctr reads each byte before writing it) */
+                if (!noise_transport_decrypt(&tr, ct, flen, ct)) { logl("wab: frame does not decrypt"); frames_reset(); return -1; }
+                if (long_total) { wa_fmt(line, sizeof line, "ws: the %u-byte frame is complete after %T s", 3 + flen, ms() - long_t0); logl(line); long_total = 0; }
+                *plain = ct; *plen = flen - 16;
                 msg_off += 3 + flen;
                 if (msg_off >= w.msg_len) { msg_off = 0; w.msg_len = 0; if (w.msg_ready) { w.msg_ready = 0; msg_have = 0; } }
                 else if (io->debug) { wa_fmt(line, sizeof line, "ws: %u more bytes of frames in this message", w.msg_len - msg_off); logl(line); }
                 return 1;
             }
+            if (3 + flen > 16384) { if (long_total != 3 + flen) long_begin(3 + flen, avail); long_progress(avail); }
         }
         /* more bytes needed: a complete message must not end inside a frame */
         if (w.msg_ready) {
@@ -611,9 +636,9 @@ static int recv_frame(uint32_t timeout_ms, uint8_t *plain, uint32_t *plen)
         w.msg_partial = 0; msg_have = 1;
         {
             uint32_t now = ms();
-            if (now >= deadline) return 0;
+            if (now >= deadline) { long_note(skip_left ? skip_done : avail); return 0; }
             pump_quiet = 1;
-            if (!pump(-1, 1, deadline - now)) { pump_quiet = 0; return w.state == WS_CLOSED || w.state == WS_ERROR || t.error ? -1 : 0; }
+            if (!pump(-1, 1, deadline - now)) { pump_quiet = 0; if (w.state == WS_CLOSED || w.state == WS_ERROR || t.error) return -1; long_note(skip_left ? skip_done : avail); return 0; }
             pump_quiet = 0;
         }
     }
@@ -647,7 +672,7 @@ static const wab_node *decode(const uint8_t *plain, uint32_t plen)
         /* whatsmeow message.go: flags bit 1 = the node is a zlib stream (proto/inflate.c) */
         uint32_t ilen = 0, t0 = ms();
         e = wa_inflate(plain + 1, plen - 1, inflated, WA_PROBE_MSG_MAX, &ilen);
-        if (e != WA_INFLATE_OK) { wa_fmt(line, sizeof line, "wab: compressed frame: %s (%u bytes in, %u out)", wa_inflate_errstr(e), plen - 1, ilen); logl(line); return 0; }
+        if (e != WA_INFLATE_OK) { wa_fmt(line, sizeof line, "wab: compressed frame: %s (%u bytes in, %u out, the inflate buffer holds %u): not decoded, not acknowledged", wa_inflate_errstr(e), plen - 1, ilen, (uint32_t)WA_PROBE_MSG_MAX); logl(line); return 0; }
         wa_fmt(line, sizeof line, "wab: inflated %u -> %u bytes in %T s", plen - 1, ilen, ms() - t0); logl(line);
         e = wab_decode_node(inflated, ilen, &arena, &n);
     } else e = wab_decode_frame(plain, plen, &arena, &n);
@@ -724,12 +749,12 @@ static int send_ack(const wab_node *n)
 /* one decoded node from the server; 0 = nothing within timeout_ms (or a malformed frame, logged) or *gone = 1 */
 static const wab_node *recv_node(uint32_t timeout_ms, int *gone)
 {
-    uint32_t plen; int r = recv_frame(timeout_ms, rx_plain, &plen);
+    uint32_t plen; uint8_t *plain; int r = recv_frame(timeout_ms, &plain, &plen);
     *gone = 0;
     if (r < 0) { *gone = 1; return 0; }
     if (r == 0) return 0;
     io->frames_after_login++;
-    return decode(rx_plain, plen);
+    return decode(plain, plen);
 }
 
 static int handle_message(const wab_node *n);
@@ -996,21 +1021,19 @@ static int handle_message(const wab_node *n)
     elen = enc->val.str.len;
     /* the ciphertext as hex (200 bytes per line): an offline replay of exactly this message against the stored
        credentials and prekeys (host, vamos) is worth more than any guess when the 68000 stops here */
-    for (i = 0; i < elen; i += 100) { char pfx[40]; wa_fmt(pfx, sizeof pfx, "enc %s %u/%u: ", is_pk ? "pkmsg" : "msg", i, elen); log_hex(pfx, enc->val.str.p + i, elen - i < 100 ? elen - i : 100); }   /* 100 bytes: the A500 log line holds 300 chars */
-    if (wab_get_attr(n, "offline")) {
-        /* interim: a message that waited on the server while we were offline (the phone's app-state keys, other
-           devices' first messages) is acknowledged without decrypting it - the second live attempt stopped inside the
-           responder X3DH of exactly such a message and the bytes above allow the offline replay; live messages, which
-           the chat is about, are decrypted below */
-        wa_fmt(line, sizeof line, "msg: offline message %s from %s:%u (%s, %u bytes): acknowledged, NOT decrypted in this build (bytes logged for the offline replay)",
-               attr_cstr(n, "id", idb, sizeof idb), user, (uint32_t)from->jid.device, is_pk ? "pkmsg" : "msg", elen); logl(line);
+    for (i = 0; i < elen && i < 4000; i += 100) { char pfx[40]; wa_fmt(pfx, sizeof pfx, "enc %s %u/%u: ", is_pk ? "pkmsg" : "msg", i, elen); log_hex(pfx, enc->val.str.p + i, elen - i < 100 ? elen - i : 100); }   /* 100 bytes: the A500 log line holds 300 chars; 4 KB at most */
+    if (elen > SIG_BODY_MAX + 160) {
+        /* longer than this build decrypts (SIG_BODY_MAX inner bytes; a prekey message adds ~140): the phone's inline
+           history bootstrap is such a message (166 KB live). Acknowledged so the server stops re-sending it, lost. */
+        wa_fmt(line, sizeof line, "msg: message %s from %s:%u (%s, %u bytes%s) is longer than this build decrypts (%u): acknowledged, lost",
+               attr_cstr(n, "id", idb, sizeof idb), user, (uint32_t)from->jid.device, is_pk ? "pkmsg" : "msg", elen, wab_get_attr(n, "offline") ? ", offline" : "", (uint32_t)SIG_BODY_MAX); logl(line);
         io->msgs_deferred++;
         return send_ack(n);
     }
     s = sig_store_get(io->sessions, user, from->jid.device, lid, is_pk);
     if (!s) { wa_fmt(line, sizeof line, "msg: message %s from %s:%u is a plain msg but we have no session with that device: acknowledged, lost", attr_cstr(n, "id", idb, sizeof idb), user, (uint32_t)from->jid.device); logl(line); io->msgs_failed++; return send_ack(n); }
-    wa_fmt(line, sizeof line, "msg: message %s from %s:%u@%s, <enc type=%s v=%s> %u bytes%s", attr_cstr(n, "id", idb, sizeof idb), user, (uint32_t)from->jid.device, lid ? "lid" : WA_SERVER_JID,
-           is_pk ? "pkmsg" : "msg", attr_cstr(enc, "v", ty, sizeof ty), elen, sig_session_has_state(s) ? "" : " (new session: X3DH as responder)"); logl(line);
+    wa_fmt(line, sizeof line, "msg: message %s from %s:%u@%s, <enc type=%s v=%s> %u bytes%s%s", attr_cstr(n, "id", idb, sizeof idb), user, (uint32_t)from->jid.device, lid ? "lid" : WA_SERVER_JID,
+           is_pk ? "pkmsg" : "msg", attr_cstr(enc, "v", ty, sizeof ty), elen, wab_get_attr(n, "offline") ? " (waited on the server while we were offline)" : "", sig_session_has_state(s) ? "" : " (new session: X3DH as responder)"); logl(line);
     t0 = ms();
     heartbeat_init(&hb, &w, io->now_ms, 4000, hb_send, 0); hb.poll = drain_poll;
     heartbeat_arm(&hb);
@@ -1223,9 +1246,9 @@ static int post_login(void)
 
 static const char *post_summary(void)
 {
-    static char s[200];
-    wa_fmt(s, sizeof s, "; server prekeys %u + %u uploaded, %s, %u stanzas, %u acks, %u texts sent, %u received, %u undecryptable, %u offline deferred%s", io->server_prekeys, io->prekeys_uploaded,
-           io->active_set ? "active" : "not active", io->frames_after_login, io->acks_sent, io->msgs_sent, io->msgs_received, io->msgs_failed, io->msgs_deferred, io->messages_seen && !io->sessions ? ", messages waiting" : "");
+    static char s[256];
+    wa_fmt(s, sizeof s, "; server prekeys %u + %u uploaded, %s, %u stanzas, %u acks, %u texts sent, %u received, %u undecryptable, %u too long, %u KB received%s", io->server_prekeys, io->prekeys_uploaded,
+           io->active_set ? "active" : "not active", io->frames_after_login, io->acks_sent, io->msgs_sent, io->msgs_received, io->msgs_failed, io->msgs_deferred, io->rx_bytes / 1024, io->messages_seen && !io->sessions ? ", messages waiting" : "");
     return s;
 }
 
@@ -1280,7 +1303,7 @@ static int pair_session(uint8_t *plain, uint32_t plen)
     if (!n) return fail("RESULT: first frame undecodable", 0, 0);
     while (!take_refs(n)) {
         logl("pair: not a pair-device IQ, waiting for one");
-        r = recv_frame(20000, plain, &plen);
+        r = recv_frame(20000, &plain, &plen);
         if (r <= 0) return fail(r ? "RESULT: connection lost before pair-device" : "RESULT: no pair-device IQ within 20 s", 0, 0);
         n = decode(plain, plen);
         if (!n) return fail("RESULT: frame undecodable", 0, 0);
@@ -1302,7 +1325,7 @@ static int pair_session(uint8_t *plain, uint32_t plen)
             uint32_t now = ms(), slice;
             if (now - shown >= valid) break;
             slice = valid - (now - shown); if (slice > 1000) slice = 1000;
-            r = recv_frame(slice, plain, &plen);
+            r = recv_frame(slice, &plain, &plen);
             if (r < 0) { if (io->qr_hide) io->qr_hide(io->ctx, "connection lost"); return fail("RESULT: connection lost while showing code %u", 0, idx + 1); }
             if (r == 0) {
                 now = ms();
@@ -1378,7 +1401,7 @@ next_code: ;
 
     /* 4. the server answers with stream:error 515 and closes */
     for (;;) {
-        r = recv_frame(30000, plain, &plen);
+        r = recv_frame(30000, &plain, &plen);
         if (r == 0) { logl("pair: no stream:error within 30 s of pair-device-sign, closing ourselves"); break; }
         if (r < 0) { logl("pair: server closed the connection (expected after pair-device-sign)"); break; }
         n = decode(plain, plen);
@@ -1393,7 +1416,7 @@ next_code: ;
     logl("login: TCP connected again, handshake with the login ClientPayload");
     {   static uint8_t payload[WA_CLIENTPAYLOAD_MAX]; uint32_t pl = wa_clientpayload_login(payload, sizeof payload, io->creds->jid_user, io->creds->jid_device);
         if (!pl) return fail("RESULT: login payload failed", 0, 0);
-        if (!handshake(payload, pl, plain, &plen)) return 0; }
+        if (!handshake(payload, pl, &plain, &plen)) return 0; }
     r = expect_success(plain, plen);
     if (r) r = post_login(); else close_ws();
     if (r) wa_fmt(io->result, sizeof io->result, "RESULT: PAIRED and LOGGED IN as %s:%u (scan -> sign %T s, login connection %T s)%s", io->creds->jid_user, io->creds->jid_device,
@@ -1403,12 +1426,12 @@ next_code: ;
 
 int wa_probe_run(wa_probe_io *pio)
 {
-    static uint8_t payload[WA_CLIENTPAYLOAD_MAX]; uint8_t *plain = hs_plain;
+    static uint8_t payload[WA_CLIENTPAYLOAD_MAX]; uint8_t *plain = 0;
     const uint8_t *pp = wa_client_payload; uint32_t pl = sizeof wa_client_payload, plen = 0;
 
     if (!prepared || io != pio) { if (!wa_probe_prepare(pio)) return 0; }
     prepared = 0;                               /* key pairs are used once */
-    io = pio; t_start = io->now_ms(); pend_len = 0;
+    io = pio; t_start = io->now_ms(); pend_len = 0; io->rx_bytes = 0;
     io->t_tls = io->t_ws = io->t_hello = io->t_finish = io->t_accepted = 0; io->pongs = io->ladders = 0; io->result[0] = 0;
     io->paired_now = io->logged_in = 0; io->t_qr_shown = io->t_pair_success = io->d_verify = io->d_sign = io->t_sign_sent = io->t_515 = io->t_login_connect = io->t_login_accepted = 0; io->qr_shown = 0;
     io->server_prekeys = io->prekeys_uploaded = io->t_active = io->frames_after_login = io->acks_sent = io->messages_seen = 0; io->have_server_prekeys = io->active_set = 0;
@@ -1425,7 +1448,7 @@ int wa_probe_run(wa_probe_io *pio)
         pp = payload;
         wa_fmt(line, sizeof line, "payload: %s ClientPayload, %u bytes", io->creds->paired ? "login" : "registration", pl); logl(line);
     }
-    if (!handshake(pp, pl, plain, &plen)) return 0;
+    if (!handshake(pp, pl, &plain, &plen)) return 0;
     if (!io->tunnel && t.tickets) { io->tls_tickets = t.tickets; wa_fmt(line, sizeof line, "tls: %u NewSessionTicket(s) received - PSK resumption would skip the certificate chain and CertificateVerify (not implemented)", t.tickets); logl(line); }
     if (io->mode != WA_MODE_PAIR) {
         close_ws();
@@ -1459,20 +1482,21 @@ static void sim_open(wa_probe_io *pio)
     io->t_msg_sent = io->t_msg_ack = io->t_msg_receipt = io->t_msg_received = 0; last_msg_id[0] = 0;
     if (io->sessions && !io->sessions_loaded) { sig_store_init(io->sessions); io->sessions_loaded = 1; }
     if (io->mode == WA_MODE_PAIR && io->creds) local_init();
-    ws_client_start(&w, io->host, "/ws/chat", "https://web.whatsapp.com", msgbuf, WA_PROBE_MSG_MAX, &rng, out, sizeof out);
-    w.state = WS_OPEN; w.stream = 1;
+    ws_client_start(&w, io->host, "/ws/chat", "https://web.whatsapp.com", msgbuf, WA_PROBE_MSGBUF, &rng, out, sizeof out);
+    w.state = WS_OPEN; w.stream = 1; io->rx_bytes = 0;
     for (i = 0; i < sizeof tr; i++) ((uint8_t *)&tr)[i] = 0;
 }
+static uint8_t sim_first[WA_PROBE_MSG_MAX];
 int wa_probe_sim_pair(wa_probe_io *pio, const uint8_t *first_frame, uint32_t len)
 {
-    uint8_t *plain = hs_plain;
+    uint8_t *plain = sim_first;
     sim_open(pio);
     cp(plain, first_frame, len);
     return pair_session(plain, len);
 }
 int wa_probe_sim_login(wa_probe_io *pio, const uint8_t *first_frame, uint32_t len)
 {
-    uint8_t *plain = hs_plain;
+    uint8_t *plain = sim_first;
     int r;
     sim_open(pio);
     if (!rng.instantiated) drbg_instantiate(&rng, io->seed, io->seed_len);

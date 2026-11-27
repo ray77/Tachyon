@@ -15,9 +15,9 @@ Der emulierte A500 (FS-UAE, zyklengenau, 68000 bei 7,09 MHz, 2 MiB Fast) ist **a
 | **Programmstart → eingeloggt** | **47 s** (mittags noch 122 s): vor dem Connect wird nichts mehr gerechnet, die Verbindung selbst dauert 43 s (TLS 20 s, Noise 20 s) – drei X25519-Leitern mit frischem Server-Ephemeral, RSA-PSS, HKDF/GCM | BENCHMARKS.md 21–23 |
 | Serverlimits | TLS-Flight 60 s, WebSocket-Leerlauf 10 s, per Pong-Herzschlag beliebig verlängerbar; keine TLS-Tickets vom Server | PROTOCOL.md 8 |
 | Speicher | Stack + Client brauchen 2 MiB Fast; die großen Puffer der Probe (Empfang, Sitzungen: ≈ 140 KB) liegen im Chip-RAM, das BSS im Fast-RAM ist 221 KB; 1 MiB bleibt die Benchmark-Maschine | NETWORK.md 6, SIGNAL.md 2.5 |
-| Offline-Tests | 25 Host-Testprogramme (ASan/UBSan), Pairing-/Chat-Simulator (297 Prüfungen, libsignal entschlüsselt unsere Nachricht, 170-KB-Offline-Stapel nachgestellt), alle Vektoren unter vamos und FS-UAE; Live-Versuche nach der Taktregel in PROTOCOL.md 11 | `make host-test`, `make pair-sim`, `make vamos` |
+| Offline-Tests | 25 Host-Testprogramme (ASan/UBSan), Pairing-/Chat-Simulator (361 Prüfungen, libsignal entschlüsselt unsere Nachricht, 170-KB-Offline-Stapel mit 40-KB- und 200-KB-Frame nachgestellt), alle Vektoren unter vamos und FS-UAE; Live-Versuche nach der Taktregel in PROTOCOL.md 11 | `make host-test`, `make pair-sim`, `make vamos` |
 
-Noch nicht: Live-Nachricht vom A500 (Phase 5 ist offline fertig, der erste angekündigte Selbst-Chat-Versuch steht aus, SIGNAL.md 6), Gruppen (Sender Keys), Medien, GUI (Phase 6; vorhanden ist der Hires-Schirm mit QR-Code und Konsolenfenster), echte Hardware (FS-UAE ist zyklengenau, eine Bestätigung auf dem A500 steht aus).
+Erreicht (SIGNAL.md 6, Versuch 4): **der erste Text vom emulierten A500 ist gesendet und vom WhatsApp-Server bestätigt** (X3DH 64 s, Ack 0,5 s nach dem Senden). Noch nicht: eine Antwort des Telefons empfangen (die Verbindung stand nach `<active/>` im 166-KB-History-Frame still; Versuch 5 steht aus), Gruppen (Sender Keys), Medien, GUI (Phase 6; vorhanden ist der Hires-Schirm mit QR-Code und Konsolenfenster), echte Hardware (FS-UAE ist zyklengenau, eine Bestätigung auf dem A500 steht aus).
 
 ## Ziel und verbindliche Hardware
 
@@ -197,7 +197,7 @@ Zusätzlich Taktzyklen, Chip-/Fast-RAM-Spitzen, Stack, Blitter-Auslastung, Kopie
 2. **Kryptografie:** portable Referenz, X25519-Benchmark, 68000-Optimierung, AES/SHA/GHASH, Blitter/Copper-Experimente, Testvektoren. ✅ (BENCHMARKS.md, CUSTOM-CHIPS.md)
 3. **Netzwerk:** TCP/IP, DNS, TLS, Zertifikatsprüfung, WebSocket, Speicher- und Laufzeitmessung. ✅ (NETWORK.md)
 4. **WhatsApp-Verbindung:** binäres Protokoll, Noise, QR-Pairing, Identität, persistente Sitzung, Wiederverbindung. ✅ Pairing und Login laufen (PROTOCOL.md 11); Wiederverbindung im Fehlerfall ist noch Sache des Clients.
-5. **E2EE:** Signal-Sitzungen, Schlüsselverwaltung, Double Ratchet, erste echte gesendete und empfangene Textnachricht. ⬅ nächster Block (Prekey-Bundles, X3DH, `<message>` entschlüsseln)
+5. **E2EE:** Signal-Sitzungen, Schlüsselverwaltung, Double Ratchet, erste echte gesendete und empfangene Textnachricht. ⬅ läuft: gesendet und vom Server bestätigt (SIGNAL.md 6), Empfang der Antwort steht aus
 6. **GUI:** Intuition, Kontakte, Chats, Gruppen, Verlauf, Benachrichtigungen.
 7. **Optimierung:** Speicher, Handshake-Laufzeit, CPU-Auslastung, Backend-Auswahl, Dauerbetrieb, Absturzsicherheit und Schlüsselablage.
 

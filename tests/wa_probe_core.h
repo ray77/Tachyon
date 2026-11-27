@@ -31,7 +31,10 @@ struct wa_creds; struct wa_prekeys; struct wa_nextkeys; struct sig_store;
                                515 restart and the login connection; creds with a JID -> login only. Done = <success>. */
 #define WA_QR_REFS_MAX 8
 
-#define WA_PROBE_MSG_MAX 16384      /* reassembled WebSocket message / decrypted frame (handshake frames are < 1 KiB) */
+#define WA_PROBE_MSG_MAX 16384      /* pending TLS plaintext, inflated node (handshake frames are < 1 KiB) */
+#define WA_PROBE_MSGBUF  180224     /* the WebSocket message buffer: one WA frame must fit whole (the offline batch's
+                                       history/app-state stanza was 166 584 bytes in the live chat attempts); frames are
+                                       decrypted in place, so no second buffer of this size is needed. Chip RAM on the A500 */
 
 typedef struct wa_probe_io {
     void *ctx;
@@ -101,7 +104,8 @@ typedef struct wa_probe_io {
     const char *chat_send;          /* text to send once after <active/>, or 0 */
     int (*chat_input)(void *ctx, char *line, uint32_t cap);      /* optional: 1 = a typed line is ready (no newline) */
     void (*chat_recv)(void *ctx, const char *from, const char *text);   /* optional: a decrypted text (also logged) */
-    uint32_t msgs_sent, msgs_received, msgs_failed, msgs_deferred, receipts_sent, sessions_started;
+    uint32_t msgs_sent, msgs_received, msgs_failed, msgs_deferred, receipts_sent, sessions_started;   /* deferred = too long for this build, acknowledged */
+    uint32_t rx_bytes;              /* raw bytes taken from the socket (TLS records) in this run: a stall diagnostic */
     uint32_t d_session, d_encrypt, d_decrypt;   /* durations: last X3DH, last encrypt, last decrypt */
     uint32_t t_msg_sent, t_msg_ack, t_msg_receipt, t_msg_received;   /* our last message out, the server's ack, the peer's receipt; the last text in */
 

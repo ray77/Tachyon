@@ -270,7 +270,8 @@ int main(int argc, char **argv)
     check(!sig_store_read(&store2, rec, n - 1) && !sig_store_read(&store2, rec, 0) && !sig_store_read(&store2, rec, n + 1), "store: wrong sizes rejected");
     check(sig_store_write(rec, n - 1, &store) == 0, "store: too small a buffer refused");
     for (i = 0; i < SIG_STORE_MAX + 2; i++) { char u[24]; sprintf(u, "49%010u", i); sig_store_get(&store, u, 3, 0, 1); }
-    check(store.n == SIG_STORE_MAX && sig_store_get(&store, "4917612345678", 0, 0, 0) == 0 && sig_store_get(&store, "490000000007", 3, 0, 0) != 0, "store: full -> least recently used evicted");
+    {   char last[24]; sprintf(last, "49%010u", (unsigned)(SIG_STORE_MAX + 1));
+        check(store.n == SIG_STORE_MAX && sig_store_get(&store, "4917612345678", 0, 0, 0) == 0 && sig_store_get(&store, last, 3, 0, 0) != 0, "store: full -> least recently used evicted"); }
     {   /* a session read back from the record keeps working */
         sig_store_read(&store2, rec, n);
         push(&rb, "s2_bob2_ratchet_priv");  /* not consumed: same-direction message */
