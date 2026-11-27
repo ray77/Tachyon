@@ -219,6 +219,7 @@ int main(void)
             enum { NRUNS = 6 };
             static const int run_disp[NRUNS] = { 0, 1, 1, 1, 1, 1 }, run_kind[NRUNS] = { WORK_FE16, WORK_FE16, WORK_FE16, WORK_FE16, WORK_AES, WORK_GHASH };
             ULONG r_ticks[NRUNS], r_work[NRUNS], idle_rate[3], tt0, tt1; int r_bad[NRUNS], run; UWORD r_dma[NRUNS];
+            ULONG ctr_t_lanes = 0, ctr_t_chain = 0, ctr_t_xor = 0, ctr_work = 0; int ctr_bad = 0;
             UWORD *old_lof, *old_shf, olddma;
             static aes_gcm_key gk;
             aes_gcm_set_key(&gk, key, 256);
@@ -269,6 +270,44 @@ int main(void)
                 }
                 if (cop_timeouts) r_bad[run] = -1;
             }
+            /* CTR batch: counter lanes written by the CPU straight into the transposed layout (no copy in,
+               no whitening blit, no TIN), Copper chain from SBOX, then keystream XOR plaintext as one blit */
+            {
+                static const uint8_t j0[12] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
+                uint32_t ctr0 = 0xfffffff5u, v; uint8_t blk[16];
+                ULONG q0, q1;
+                cop_work_count = 0; cop_timeouts = 0;
+                olddma = CUSTOM->dmaconr;
+                CUSTOM->dmacon = DMAF_RASTER | DMAF_SPRITE;
+                q0 = ticks_now(); ba_ctr_lanes(&k, arena, j0, ctr0); q1 = ticks_now(); ctr_t_lanes = q1 - q0;
+                CUSTOM->copcon = 2;
+                t0 = ticks_now();
+                for (rnd = 1; rnd < k.rounds; rnd++) {
+                    cop_run(lst_sbox, WORK_AES);
+                    cop_patch_keys(lst_mix, arena, ba_prog + BA_SEC_MIX, BA_NMIX, rnd);
+                    cop_run(lst_mix, WORK_AES);
+                }
+                cop_run(lst_sbox, WORK_AES);
+                cop_run(lst_fin, WORK_AES);
+                cop_run(lst_tout, WORK_AES);
+                t1 = ticks_now(); ctr_t_chain = t1 - t0; ctr_work = cop_work_count;
+                cop_park();
+                CUSTOM->copcon = 0;
+                /* ciphertext = keystream XOR plaintext: one 3-channel blit over 8192 words (plaintext `in` must be in Chip RAM: use SOUT as stand-in) */
+                for (i = 0; i < (int)sizeof in; i++) arena[BA_SOUT + i] = in[i];
+                { ba_blit x; x.con0 = 0x0d3c; x.con1 = 0; x.a = BA_STATE; x.b = BA_SOUT; x.c = 0; x.d = BA_SOUT; x.amod = x.bmod = x.cmod = x.dmod = 0; x.size = (128 << 6) | 0; x.flags = 0;   /* 128 rows x 64 words */
+                  q0 = ticks_now(); ba_exec_asm(arena, &x, 1, 0); q1 = ticks_now(); ctr_t_xor = q1 - q0; }
+                CUSTOM->dmacon = DMAF_SETCLR | (olddma & (DMAF_RASTER | DMAF_SPRITE));
+                ctr_bad = 0;
+                for (i = 0; i < BA_BLOCKS; i++) {
+                    int j;
+                    for (j = 0; j < 12; j++) blk[j] = j0[j];
+                    v = ctr0 + (uint32_t)i; blk[12] = (uint8_t)(v >> 24); blk[13] = (uint8_t)(v >> 16); blk[14] = (uint8_t)(v >> 8); blk[15] = (uint8_t)v;
+                    aes_encrypt_block(&k, blk, want);
+                    for (j = 0; j < 16; j++) if ((uint8_t)(want[j] ^ in[16 * i + j]) != arena[BA_SOUT + 16 * i + j]) { ctr_bad++; break; }
+                }
+                if (cop_timeouts) ctr_bad = -1;
+            }
             GfxBase->LOFlist = old_lof; GfxBase->SHFlist = old_shf;             /* VBL server restores the system list */
             WaitTOF(); WaitTOF();
             DisownBlitter();
@@ -286,6 +325,14 @@ int main(void)
                 out("; DMACONR before 0x"); out_hex(r_dma[run]); out("\n");
                 ok &= r_bad[run] == 0;
             }
+            out("--- CTR batch: CPU writes counter lanes, Copper chain from SBOX, XOR blit ---\n");
+            out(ctr_bad ? "FAIL " : "PASS "); if (ctr_bad > 0) { out_dec(ctr_bad); out(" bad blocks "); } if (ctr_bad < 0) out("TIMEOUT ");
+            out("CTR ciphertext == reference\n");
+            out("counter lanes (CPU, C): "); out_dec(ctr_t_lanes * 20); out(" ms; chain without TIN: "); out_dec(ctr_t_chain * 20); out(" ms; XOR blit 16 KiB: "); out_dec(ctr_t_xor * 20); out(" ms\n");
+            { ULONG tot = ctr_t_lanes + ctr_t_chain + ctr_t_xor; ULONG idle_units = ctr_t_chain * idle_rate[WORK_AES] / 1000;
+              out("CTR batch total "); out_dec(tot * 20); out(" ms = "); out_dec(16384UL * 50 / (tot ? tot : 1)); out(" B/s blitter keystream; CPU encrypted "); out_dec(ctr_work); out(" own blocks meanwhile (");
+              out_dec(ctr_work * 100 / (idle_units ? idle_units : 1)); out(" % free) -> combined "); out_dec((16384UL + 16UL * ctr_work) * 50 / (tot ? tot : 1)); out(" B/s\n"); }
+            ok &= ctr_bad == 0;
         } else out("no Chip RAM for Copper lists\n");
         if (cop_idle) FreeMem(cop_idle, 8); if (lst_tout) FreeMem(lst_tout, sz_tout); if (lst_tin) FreeMem(lst_tin, sz_tin);
         if (lst_sbox) FreeMem(lst_sbox, sz_sbox); if (lst_mix) FreeMem(lst_mix, sz_mix); if (lst_fin) FreeMem(lst_fin, sz_fin);

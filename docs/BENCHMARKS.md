@@ -212,6 +212,7 @@ Details in docs/CUSTOM-CHIPS.md Abschnitte 2 und 2b. A500/FS-UAE, 16 KiB AES-256
 | Blitter, CPU-Executor in asm (250 Takte je Blit) | 3,70 s | 4,43 KB/s | 100 % belegt |
 | Blitter, Copper-Kette (0 CPU je Blit), Bitplane-DMA aus | **2,28 s** | **7,2 KB/s** | **90 % frei** |
 | Blitter + CPU gleichzeitig (Copper-Kette + T-Tabellen) | 2,28 s für 31,5 KiB | **14,2 KB/s** | – |
+| CTR-Batch: Zählerlanes von der CPU (C, 180 ms), Kette ab SBOX, XOR-Blit (20 ms) | 2,44 s | 6,7 KB/s (13,1 mit CPU) | 86 % frei |
 
 Hypothese bestätigt und übertroffen: Die erste Rechnung (Abschnitt 2a in CUSTOM-CHIPS.md) sagte 1,5–2,2 KB/s für den Blitter voraus und riet ab; mit Blitter-seitiger Transposition, 113-Gatter-S-Box und Copper-Steuerung liefert der Blitter so viel wie die CPU, und beide zusammen das Doppelte. Preis: ≈ 100 KiB Chip-RAM (Arena) + 50 KiB Copper-Listen, Display-DMA aus während des Batches, zwei AES-Implementierungen.
 
