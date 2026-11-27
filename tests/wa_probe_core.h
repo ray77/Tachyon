@@ -33,7 +33,7 @@ struct wa_creds; struct wa_prekeys; struct wa_nextkeys; struct sig_store;
 
 #define WA_PROBE_MSG_MAX 16384      /* pending TLS plaintext, inflated node (handshake frames are < 1 KiB) */
 #define WA_PROBE_MSGBUF  180224     /* the WebSocket message buffer: one WA frame must fit whole (the offline batch's
-                                       history/app-state stanza was 166 584 bytes in the live chat attempts); frames are
+                                       history/app-state stanza was 166 587 bytes in the live chat attempts); frames are
                                        decrypted in place, so no second buffer of this size is needed. Chip RAM on the A500 */
 
 typedef struct wa_probe_io {
@@ -81,6 +81,7 @@ typedef struct wa_probe_io {
     uint32_t prekeys_wanted;        /* pending batch size (whatsmeow 50; the A500 takes 10) */
     void (*save_prekeys)(void *ctx);                     /* optional: the batch changed (generated / uploaded) */
     uint32_t linger_ms;             /* how long to stay online after <active/> (0 = close right away) */
+    uint32_t drain_quiet_ms;        /* 0 = the defaults (8 s before an offline_preview, 45 s after one); the simulator shortens it */
 
     /* key material for the next connection (proto/nextkeys.h): a stored record is consumed at the start - the
        caller's consume_nextkeys deletes it BEFORE the keys are used, single use - and after <active/>, while online,

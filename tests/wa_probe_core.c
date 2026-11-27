@@ -28,20 +28,20 @@ static wa_probe_io *io;
 static tls13 t;
 static ws_client w;
 /* the big receive buffers: WebSocket message (176 KiB, frames are decrypted in place), pending TLS plaintext, inflated
- * node, node arena, the heartbeat's staging buffer. WA_PROBE_ALLOC (the Amiga unity build): the message buffer, the
- * arena and the staging buffer are handed out by io->alloc, so they live in Chip RAM (~260 KB free on the A500 after the
- * screen); the two 16 KiB buffers stay static (Fast RAM, ~115 KB free). Otherwise everything is static. */
+ * node, node arena, the heartbeat's staging buffer: 228 KB. WA_PROBE_ALLOC (the Amiga unity build): all handed out by
+ * io->alloc, so they live in Chip RAM (~410 KB free on the A500 after the screen; Fast RAM is the scarce one: the stack's
+ * TCP pool and the code). Otherwise static. */
 #define WA_PROBE_ARENA 12288
 #define WA_PROBE_STAGE 8192
 #ifdef WA_PROBE_ALLOC
-static uint8_t *msgbuf, *arena_mem, *stage;
-static uint8_t pend[WA_PROBE_MSG_MAX], inflated[WA_PROBE_MSG_MAX];
+static uint8_t *msgbuf, *pend, *inflated, *arena_mem, *stage;
 static int big_buffers(wa_probe_io *pio)
 {
     if (msgbuf) return 1;
     if (!pio->alloc) return 0;
-    msgbuf = pio->alloc(pio->ctx, WA_PROBE_MSGBUF); arena_mem = pio->alloc(pio->ctx, WA_PROBE_ARENA); stage = pio->alloc(pio->ctx, WA_PROBE_STAGE);
-    return msgbuf && arena_mem && stage;
+    msgbuf = pio->alloc(pio->ctx, WA_PROBE_MSGBUF); pend = pio->alloc(pio->ctx, WA_PROBE_MSG_MAX); inflated = pio->alloc(pio->ctx, WA_PROBE_MSG_MAX);
+    arena_mem = pio->alloc(pio->ctx, WA_PROBE_ARENA); stage = pio->alloc(pio->ctx, WA_PROBE_STAGE);
+    return msgbuf && pend && inflated && arena_mem && stage;
 }
 #else
 static uint8_t msgbuf[WA_PROBE_MSGBUF], pend[WA_PROBE_MSG_MAX], inflated[WA_PROBE_MSG_MAX], arena_mem[WA_PROBE_ARENA], stage[WA_PROBE_STAGE];
@@ -578,7 +578,7 @@ static int send_node(const wab_node *n, const char *what)
 /* a long frame (longer than a TLS record) in flight: progress every 32 KB, a note when the line falls silent (the live
  * chat attempts stalled inside the 166 KB history stanza; whether the bytes stopped at the server, in FS-UAE's A2065
  * emulation or in the stack is what these lines are for) */
-static uint32_t long_total, long_next, long_t0, long_note_at, skip_total, skip_done;
+static uint32_t long_total, long_next, long_t0, long_note_at, long_note_rx, skip_total, skip_done;
 static void long_progress(uint32_t have)
 {
     if (long_total && have >= long_next) { wa_fmt(line, sizeof line, "ws: %u of %u bytes of the long frame here after %T s", have, long_total, ms() - long_t0); logl(line); long_next = (have / 32768 + 1) * 32768; }
@@ -587,11 +587,12 @@ static void long_note(uint32_t have)
 {
     if (!long_total || ms() - long_note_at < 10000) return;
     long_note_at = ms();
+    if (io->rx_bytes != long_note_rx) { long_note_rx = io->rx_bytes; return; }      /* still arriving: the 32 KB progress lines say so */
     wa_fmt(line, sizeof line, "ws: the line is quiet with %u of %u bytes of the long frame here (%T s since its start, %u bytes received in this run)", have, long_total, ms() - long_t0, io->rx_bytes); logl(line);
 }
 static void long_begin(uint32_t total, uint32_t have)
 {
-    long_total = total; long_t0 = ms(); long_next = 32768; long_note_at = ms() - 10000;
+    long_total = total; long_t0 = ms(); long_next = 32768; long_note_at = ms(); long_note_rx = io->rx_bytes;
     wa_fmt(line, sizeof line, "ws: a %u-byte frame begins (%u bytes of it here, %u bytes received in this run so far)", total, have, io->rx_bytes); logl(line);
 }
 static void frames_reset(void) { msg_off = 0; msg_have = 0; skip_left = 0; w.msg_len = 0; w.msg_ready = 0; w.msg_partial = 0; stage_len = 0; long_total = 0; skip_total = skip_done = 0; }
@@ -1194,12 +1195,15 @@ static int post_login(void)
           attempt), ending with <ib><offline count/></ib>. Each stanza is handled as it arrives (acknowledged, messages
           decrypted when we have sessions); nothing else goes out until the batch is done or the line has been quiet. */
     {
-        uint32_t t0 = ms(), last = ms(), before = io->frames_after_login, quiet; offline_done = 0; offline_preview = 0;
+        uint32_t t0 = ms(), last = ms(), before = io->frames_after_login, quiet, rx_seen = io->rx_bytes; offline_done = 0; offline_preview = 0;
         for (;;) {
             const wab_node *n;
-            /* until the preview: 8 s of silence ends the wait; after a preview announcing stanzas: 45 s between frames
-             * (a 16 KiB TLS record takes the 68000 about 3 s to decrypt and parse), 15 minutes in all */
-            quiet = offline_preview ? 45000 : 8000;
+            /* until the preview: 8 s of silence ends the wait; after a preview announcing stanzas: 45 s of silence, 15
+             * minutes in all. Silence means no BYTES: the 166 KB history frame takes the 68000 ~50 s to receive (TLS
+             * decryption at ~3 KB/s), and live attempts 4 and 5 ended because this loop gave up after 45 s without a
+             * complete stanza, then computed keys while the frame was still streaming in. */
+            quiet = io->drain_quiet_ms ? io->drain_quiet_ms : offline_preview ? 45000 : 8000;
+            if (io->rx_bytes != rx_seen) { rx_seen = io->rx_bytes; last = ms(); }
             if (offline_done || ms() - last >= quiet || ms() - t0 > 900000) break;
             n = recv_node(1000, &gone);
             if (gone) { logl("login: connection closed by the server during the offline batch"); close_ws(); return 1; }

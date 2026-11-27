@@ -50,6 +50,7 @@ static int fat_batch; static uint32_t fat_first;                                
 static uint32_t fat_size; static int fat_real;                                    /* the fat frame: a real 40 KB stanza (F, decoded and acknowledged) or garbage longer than the core's buffer (G, skipped) */
 static uint8_t fatbuf[65536]; static uint32_t fat_len;                            /* F: the encoded fat stanza */
 static uint8_t big[262144]; static uint32_t big_len, big_off, rx_total;           /* the WebSocket message being served in chunks */
+static uint32_t slow_chunk, slow_ms;                                              /* F: the message trickles in (chunk bytes every slow_ms), as the 68000's TLS layer delivers it */
 static int closed_by_server, closed_after_queue, stage, codes_shown, ticks, pongs, keepalives, acks, signs, errors, closes;
 static int counts, uploads, actives, stanza_acks, upload_keys, bad_upload, fat_acked; static uint32_t rx_before_batch; static char ack_class[2][16], ack_id[2][16], ack_to[2][40];
 static wa_prekeys prekeys; static int prekeys_saved; static void save_prekeys(void *ctx) { (void)ctx; prekeys_saved++; }
@@ -186,6 +187,7 @@ static int32_t io_recv(void *ctx, uint8_t *p, uint32_t cap, uint32_t timeout_ms)
     }
     {   /* served in chunks no larger than the caller's buffer (the TCP stack hands over what has arrived) */
         uint32_t c = big_len - big_off; if (c > cap) c = cap;
+        if (slow_chunk) { if (c > slow_chunk) c = slow_chunk; usleep(slow_ms * 1000); }
         memcpy(p, big + big_off, c); big_off += c; rx_total += c;
         return (int32_t)c;
     }
@@ -372,7 +374,7 @@ static int saved; static void save_creds(void *ctx) { (void)ctx; saved++; }
 
 static void reset(wa_probe_io *io, wa_creds *creds)
 {
-    qhead = qtail = 0; closed_by_server = 0; closed_after_queue = 0; coalesce = 0; coalesce_n = 2; fat_frame = 0; fat_batch = 0; fat_first = 0xffffffffu; fat_size = 0; fat_real = 0; fat_len = 0; fat_acked = 0; big_len = big_off = 0; rx_total = 0; rx_before_batch = 0; stage = 1; codes_shown = ticks = pongs = keepalives = acks = signs = errors = closes = 0; sign_len = 0; saved = 0;
+    qhead = qtail = 0; closed_by_server = 0; closed_after_queue = 0; coalesce = 0; coalesce_n = 2; fat_frame = 0; fat_batch = 0; fat_first = 0xffffffffu; fat_size = 0; fat_real = 0; fat_len = 0; fat_acked = 0; big_len = big_off = 0; rx_total = 0; rx_before_batch = 0; slow_chunk = slow_ms = 0; io->drain_quiet_ms = 0; stage = 1; codes_shown = ticks = pongs = keepalives = acks = signs = errors = closes = 0; sign_len = 0; saved = 0;
     err_code[0] = err_text[0] = 0;
     memset(creds, 0, sizeof *creds); test_identity(&creds->id);
     io->creds = creds; io->creds_loaded = 1; io->paired_now = 0;
@@ -503,9 +505,10 @@ int main(int argc, char **argv)
     /* ---- F: the offline batch as one long WebSocket message: a 40 KB stanza (longer than a TLS record, far shorter
      * than the 176 KiB message buffer) is collected, decrypted in place, decoded and acknowledged, the six 3 KB stanzas
      * behind it are acknowledged one by one as they stream in, the <offline> marker ends the drain before the chat ---- */
-    printf("--- F: 58 KB WebSocket message in 8 KiB pieces: 40 KB stanza + 6 stanzas decoded and acknowledged ---\n");
+    printf("--- F: 58 KB WebSocket message trickling in 1 KB pieces (9 s, quiet timer 2 s): 40 KB stanza + 6 stanzas decoded and acknowledged ---\n");
     {   wab_node n; wab_attr a[2]; uint8_t b[256]; uint32_t l;
         reset(&io, &creds); creds.paired = 1; strcpy(creds.jid_user, "4917612345678"); creds.jid_device = 7; counts = 1; fat_batch = 1; fat_real = 1;
+        slow_chunk = 1024; slow_ms = 150; io.drain_quiet_ms = 2000;             /* ~57 pieces, 8.5 s: bytes arriving must count as activity (live attempts 4 and 5) */
         io.sessions = 0; io.chat_user = 0; io.chat_send = 0; io.chat_input = 0; io.linger_ms = 1500;
         wab_node_init(&n, "success"); a[0].key = wab_s("t"); a[0].val = wab_text("1764300000"); a[1].key = wab_s("lid"); a[1].val = wab_jid_value("123456789012345", "lid", 7); n.attrs = a; n.n_attrs = 2;
         CHECK(wab_encode_frame(&n, b, sizeof b, &l) == WAB_OK);
