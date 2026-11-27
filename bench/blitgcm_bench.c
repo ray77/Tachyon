@@ -41,7 +41,10 @@ static void stats(const char *name, ULONG bytes, ULONG ticks)
     out(name); out(": "); ms(ticks); out(" = "); rate(bytes, ticks);
     out("; batches "); out_dec(ctx.batches); out(" (partial "); out_dec(ctx.partial); out("), CPU-own blocks "); out_dec(ctx.cpu_own);
     out(", GHASH under chain "); out_dec(ctx.ghash_overlap); out(", XOR blits "); out_dec(ctx.blit_xor); out(", timeouts "); out_dec(ctx.timeouts);
-    out("\n    lanes "); ms(ctx.t_lanes); out(", chain "); ms(ctx.t_chain); out(", xor "); ms(ctx.t_xor); out(", tail "); ms(ctx.t_tail); out("\n");
+    out("\n    lanes "); ms(ctx.t_lanes); out(", chain "); ms(ctx.t_chain); out(", xor "); ms(ctx.t_xor); out(", tail "); ms(ctx.t_tail);
+    out("; idle polls "); out_dec(ctx.idle_polls); out("; CPU-own per batch:");
+    { ULONG b; for (b = 0; b < ctx.batches && b < 16; b++) { out(" "); out_dec(ctx.cpu_own_batch[b]); } }
+    out("\n");
 }
 
 int main(void)
@@ -86,6 +89,22 @@ int main(void)
         for (i = 0; i < 16384; i++) if (arena[i] != lanes_c[i]) { same = 0; break; }
         out(same ? "PASS " : "FAIL "); out("counter lanes asm == C (16 KiB state, counter wraps inside the batch)\n");
         ok &= same;
+    }
+
+    {   /* where do CPU data live? (hunk BSS, stack, GHASH tables, code) */
+        ULONG here = 0;
+        out("memory: pt 0x"); out_dec((ULONG)TypeOfMem(pt)); out(" gk "); out_dec((ULONG)TypeOfMem(&gk)); out(" stack "); out_dec((ULONG)TypeOfMem(&here));
+        out(" code "); out_dec((ULONG)TypeOfMem((APTR)main)); out("  (MEMF_CHIP=2, MEMF_FAST=4, +1 public)\n");
+    }
+
+    /* 1b. CPU work units idle: AES block (T-tables asm), CTR block via bg_ctr_blocks, GHASH block */
+    {
+        static uint8_t y[16];
+        ULONG ta, tc, tg;
+        t0 = ticks_now(); for (i = 0; i < 500; i++) aes_encrypt_block(&gk.k, pt + 16 * i, ct + 16 * i); t1 = ticks_now(); ta = t1 - t0;
+        t0 = ticks_now(); for (i = 0; i < 500; i++) bg_ctr_blocks(gk.k.rk, iv, pt + 16 * i, ct + 16 * i, (uint32_t)i + 2, 1, gk.k.rounds); t1 = ticks_now(); tc = t1 - t0;
+        t0 = ticks_now(); for (i = 0; i < 2000; i++) ghash_mul_tab(y, pt + 16 * (i & 1023), &gk.m[0][0]); t1 = ticks_now(); tg = t1 - t0;
+        out("CPU units idle (us): AES block "); out_dec(ta * 40); out(", CTR block asm "); out_dec(tc * 40); out(", GHASH block "); out_dec(tg * 10); out("\n");
     }
 
     /* 2. correctness on 40000 bytes + 20 bytes AAD against the CPU implementation */
@@ -134,6 +153,31 @@ int main(void)
         out("\n--- 64 KiB, buffers in Chip RAM (ciphertext by XOR blit) ---\n");
         out(okC ? "PASS " : "FAIL "); stats("Blitter chain + GHASH + CPU-own blocks, XOR blit", BIG, tC); ok &= okC;
     } else out("\n(no Chip RAM for 2 x 64 KiB buffers: XOR-blit variant skipped)\n");
+    /* 4. steady state: 192 KiB (12 batches) in place, against the CPU, then decrypted in place */
+    {
+        ULONG big = 196608UL, tref, tbig, tdec2;
+        uint8_t *bp = (uint8_t *)AllocMem(big, MEMF_FAST), *bc = (uint8_t *)AllocMem(big, MEMF_FAST);
+        if (bp && bc) {
+            uint16_t seed = rnd_state;
+            int same = 1;
+            for (i = 0; i < (int)big; i++) bp[i] = (uint8_t)rnd16();
+            t0 = ticks_now(); aes_gcm_encrypt(&gk, iv, aad, 20, bp, big, bc, rtag); t1 = ticks_now(); tref = t1 - t0;
+            ctx.cpu_blocks = 1;
+            t0 = ticks_now(); blitgcm_encrypt(&ctx, iv, aad, 20, bp, big, bp, tag); t1 = ticks_now(); tbig = t1 - t0;
+            for (i = 0; i < (int)big; i++) if (bp[i] != bc[i]) { same = 0; break; }
+            for (i = 0; i < 16; i++) if (tag[i] != rtag[i]) same = 0;
+            out("\n--- 192 KiB in place (steady state, 12 batches) ---\n");
+            out("CPU aes_gcm_encrypt: "); ms(tref); out(" = "); rate(big, tref); out("\n");
+            out(same ? "PASS " : "FAIL "); stats("blitgcm_encrypt in place == CPU", big, tbig); ok &= same;
+            t0 = ticks_now(); r = blitgcm_decrypt(&ctx, iv, aad, 20, bp, big, tag, bp); t1 = ticks_now(); tdec2 = t1 - t0;
+            rnd_state = seed; same = r == 1;
+            for (i = 0; i < (int)big; i++) if (bp[i] != (uint8_t)rnd16()) { same = 0; break; }
+            out(same ? "PASS " : "FAIL "); stats("blitgcm_decrypt in place == original", big, tdec2); ok &= same;
+            out("steady state 192 KiB: CPU "); rate(big, tref); out("; encrypt "); rate(big, tbig); out("; decrypt "); rate(big, tdec2); out("\n");
+        } else out("\n(no Fast RAM for 2 x 192 KiB: steady-state run skipped)\n");
+        if (bp) FreeMem(bp, big); if (bc) FreeMem(bc, big);
+    }
+
     out("\nsummary 64 KiB: CPU "); rate(BIG, t_cpu_big); out("; Blitter+GHASH "); rate(BIG, tB); out("; Blitter+GHASH+CPU blocks "); rate(BIG, tA);
     if (okC >= 0) { out("; same with XOR blit "); rate(BIG, tC); }
     out("\n");

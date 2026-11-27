@@ -172,3 +172,79 @@ _bg_xor_asm:
 .xdone:
 	movem.l	(sp)+,d2-d6
 	rts
+
+; void bg_ctr_blocks(a0 = round keys, a1 = j0 (12 nonce bytes), a2 = in, a3 = out,
+;                    d0 = counter of the first block, d1 = number of blocks, d2 = rounds)
+; out = in ^ AES(nonce || BE32(counter + i)) for i = 0..n-1; in/out may alias, any alignment.
+; Replaces the C per-block path under the chain (vbcc byte loops and stack frames cost ~0.4 ms per block).
+	xdef	_bg_ctr_blocks
+_bg_ctr_blocks:
+	movem.l	d2-d7/a2-a6,-(sp)
+	lea	-32(sp),sp		; 0(sp): counter block, 16(sp): keystream
+	move.l	a0,a4			; rk
+	move.l	a2,a5			; in
+	move.l	a3,a6			; out
+	move.l	d0,d3			; counter
+	move.l	d1,d4			; n
+	move.l	d2,d5			; rounds
+	move.b	(a1)+,0(sp)
+	move.b	(a1)+,1(sp)
+	move.b	(a1)+,2(sp)
+	move.b	(a1)+,3(sp)
+	move.b	(a1)+,4(sp)
+	move.b	(a1)+,5(sp)
+	move.b	(a1)+,6(sp)
+	move.b	(a1)+,7(sp)
+	move.b	(a1)+,8(sp)
+	move.b	(a1)+,9(sp)
+	move.b	(a1)+,10(sp)
+	move.b	(a1)+,11(sp)
+	move.l	a5,d6
+	move.l	a6,d7
+	or.l	d7,d6
+	and.w	#1,d6			; d6 = 1: an odd address -> byte path
+	tst.l	d4
+	beq.s	.cdone
+.cloop:
+	move.l	d3,12(sp)
+	move.l	a4,a0
+	move.l	sp,a1
+	lea	16(sp),a2
+	move.l	d5,d0
+	jsr	_aes_enc_block		; clobbers d0/d1/a0/a1 only
+	lea	16(sp),a0
+	tst.w	d6
+	bne.s	.cbytes
+	move.l	(a0)+,d0
+	move.l	(a5)+,d2
+	eor.l	d2,d0
+	move.l	d0,(a6)+
+	move.l	(a0)+,d0
+	move.l	(a5)+,d2
+	eor.l	d2,d0
+	move.l	d0,(a6)+
+	move.l	(a0)+,d0
+	move.l	(a5)+,d2
+	eor.l	d2,d0
+	move.l	d0,(a6)+
+	move.l	(a0)+,d0
+	move.l	(a5)+,d2
+	eor.l	d2,d0
+	move.l	d0,(a6)+
+	bra.s	.cnext
+.cbytes:
+	moveq	#15,d0
+.cb:
+	move.b	(a5)+,d1
+	move.b	(a0)+,d2
+	eor.b	d2,d1
+	move.b	d1,(a6)+
+	dbf	d0,.cb
+.cnext:
+	addq.l	#1,d3
+	subq.l	#1,d4
+	bne.s	.cloop
+.cdone:
+	lea	32(sp),sp
+	movem.l	(sp)+,d2-d7/a2-a6
+	rts

@@ -212,10 +212,12 @@ static int bg_chain_poll(blitgcm_ctx *c)
     int rounds = c->g->k.rounds;
     if (c->rnd < 0) return 1;
     if (!(CUSTOM->intreqr & INTF_AUD3)) {
-        uint32_t v = bg_vpos();
-        if (v + 100 < c->lastv) c->frame++;
-        c->lastv = v;
-        if (c->frame > 150) { c->timeouts++; c->rnd = -1; bg_cop_park(c); WaitBlit(); return 1; }
+        if ((++c->polls & 3) == 0) {                            /* beam position every 4th poll (units are < 5 ms) */
+            uint32_t v = bg_vpos();
+            if (v + 100 < c->lastv) c->frame++;
+            c->lastv = v;
+            if (c->frame > 150) { c->timeouts++; c->rnd = -1; bg_cop_park(c); WaitBlit(); return 1; }
+        }
         return 0;
     }
     c->frame = 0;
@@ -226,7 +228,7 @@ static int bg_chain_poll(blitgcm_ctx *c)
     return 1;
 }
 static int bg_chain_failed(const blitgcm_ctx *c) { return c->rnd < 0; }
-static void bg_idle(blitgcm_ctx *c) { (void)c; }
+static void bg_idle(blitgcm_ctx *c) { c->idle_polls++; }
 
 static int bg_in_chip(const blitgcm_ctx *c, const void *p, uint32_t n)
 {
@@ -271,7 +273,7 @@ static void bg_chain_start(blitgcm_ctx *c)
 }
 static int bg_chain_poll(blitgcm_ctx *c) { if (c->rnd > 0) { c->rnd--; return 0; } return 1; }
 static int bg_chain_failed(const blitgcm_ctx *c) { (void)c; return 0; }
-static void bg_idle(blitgcm_ctx *c) { (void)c; }
+static void bg_idle(blitgcm_ctx *c) { c->idle_polls++; }
 
 static void bg_xor(blitgcm_ctx *c, uint8_t *out, const uint8_t *in, uint32_t nb)
 {
@@ -317,15 +319,21 @@ static void bg_ghash_to(bg_job *j, uint32_t limit)
     while (j->G < limit) { bg_ghash(j->c->g, j->y, j->ctp + 16 * j->G); j->G++; }
 }
 
-/* CTR block i (counter i + 2) on the CPU: out = in ^ E(ctr). No GHASH. */
-static void bg_ctr_block(bg_job *j, uint32_t i)
+/* CTR blocks [i, i + n) (counter i + 2) on the CPU: out = in ^ E(ctr). No GHASH. */
+static void bg_ctr_run(bg_job *j, uint32_t i, uint32_t n)
 {
+#ifdef BLITGCM_HW
+    bg_ctr_blocks(j->c->g->k.rk, j->j0, j->in + 16 * i, j->out + 16 * i, i + 2, n, j->c->g->k.rounds);
+#else
     uint8_t blk[16], ks[16];
     int b;
     for (b = 0; b < 12; b++) blk[b] = j->j0[b];
-    put32(blk + 12, i + 2);
-    aes_encrypt_block(&j->c->g->k, blk, ks);
-    for (b = 0; b < 16; b++) j->out[16 * i + b] = (uint8_t)(j->in[16 * i + b] ^ ks[b]);
+    for (; n; n--, i++) {
+        put32(blk + 12, i + 2);
+        aes_encrypt_block(&j->c->g->k, blk, ks);
+        for (b = 0; b < 16; b++) j->out[16 * i + b] = (uint8_t)(j->in[16 * i + b] ^ ks[b]);
+    }
+#endif
 }
 
 /* one unit of CPU work while the chain runs; 0 when there is nothing to do */
@@ -333,11 +341,16 @@ static int bg_work(bg_job *j)
 {
     blitgcm_ctx *c = j->c;
     if (bg_aad_step(j)) return 1;
-    if (j->G < j->glimit) { bg_ghash(c->g, j->y, j->ctp + 16 * j->G); j->G++; c->ghash_overlap++; return 1; }
+    if (j->G < j->glimit) {                                 /* two blocks per poll: halves the poll overhead, latency stays ~1.2 ms */
+        bg_ghash(c->g, j->y, j->ctp + 16 * j->G); j->G++; c->ghash_overlap++;
+        if (j->G < j->glimit) { bg_ghash(c->g, j->y, j->ctp + 16 * j->G); j->G++; c->ghash_overlap++; }
+        return 1;
+    }
     if (c->cpu_blocks && j->next_cpu < j->cpu_limit) {
         if (j->dec) { bg_ghash(c->g, j->y, j->in + 16 * j->next_cpu); j->G++; }      /* G == next_cpu here */
-        bg_ctr_block(j, j->next_cpu);
+        bg_ctr_run(j, j->next_cpu, 1);
         j->next_cpu++; c->cpu_own++;
+        if (c->batches <= 16) c->cpu_own_batch[c->batches - 1]++;
         return 1;
     }
     return 0;
@@ -354,8 +367,9 @@ static void bg_run(bg_job *j, uint8_t tag[16])
     uint32_t P = 0, t, t0 = NOW(c), i, tail;
     uint8_t lens[16] = { 0 }, ej0[16];
     int b;
-    c->batches = c->partial = c->cpu_own = c->ghash_overlap = c->timeouts = c->blit_xor = 0;
+    c->batches = c->partial = c->cpu_own = c->ghash_overlap = c->timeouts = c->blit_xor = c->idle_polls = 0;
     c->t_lanes = c->t_chain = c->t_xor = c->t_tail = 0;
+    for (b = 0; b < 16; b++) c->cpu_own_batch[b] = 0;
     for (;;) {
         uint32_t R = j->nfull - P, nb;
         bg_ctr_params prm;
@@ -376,7 +390,7 @@ static void bg_run(bg_job *j, uint8_t tag[16])
         c->t_chain += NOW(c) - t;
         t = NOW(c);
         if (j->dec) bg_ghash_to(j, P + nb);                 /* ciphertext must be hashed before it is overwritten (aliasing) */
-        if (bg_chain_failed(c)) { for (i = P; i < P + nb; i++) bg_ctr_block(j, i); }
+        if (bg_chain_failed(c)) bg_ctr_run(j, P, nb);
         else bg_xor(c, j->out + 16 * P, j->in + 16 * P, nb);
         c->t_xor += NOW(c) - t;
         P = j->next_cpu;
@@ -389,7 +403,7 @@ static void bg_run(bg_job *j, uint8_t tag[16])
         bg_ghash_to(j, j->nfull);
         if (tail) bg_ghash_padded(j, j->ctp + 16 * j->nfull, tail);
     }
-    for (i = P; i < j->nfull; i++) bg_ctr_block(j, i);
+    if (j->nfull > P) bg_ctr_run(j, P, j->nfull - P);
     if (tail) {
         uint8_t blk[16], ks[16];
         for (b = 0; b < 12; b++) blk[b] = j->j0[b];

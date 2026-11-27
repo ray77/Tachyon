@@ -236,16 +236,20 @@ Einordnung: Verbindungsaufbau (TLS 21 s + Noise 25 s + Pairing-Signaturen) liegt
 
 ## 2026-11-27 – Schritt 12: AES-GCM-Bibliothek mit Keystream auf dem Blitter (`crypto/blit/blitgcm.c`)
 
-Details in docs/CUSTOM-CHIPS.md Abschnitt 2c. A500/FS-UAE, AES-256-GCM, Puffer in Fast RAM, bitgenau gegen `aes_gcm_encrypt/decrypt` (Host: 168 Fälle inkl. Längen 0/15/16/16383/16384/16385/40000, mit/ohne AAD, in place, AES-128; FS-UAE: 40000 B + AAD und 64 KiB in drei Varianten, Tag-Manipulation abgewiesen).
+Details in docs/CUSTOM-CHIPS.md Abschnitt 2c. A500/FS-UAE, AES-256-GCM, Puffer in Fast RAM, bitgenau gegen `aes_gcm_encrypt/decrypt` (Host: 168 Fälle inkl. Längen 0/15/16/16383/16384/16385/40000, mit/ohne AAD, in place, AES-128; FS-UAE: 40000 B + AAD, 64 KiB in drei Varianten, 192 KiB in place; Tag-Manipulation abgewiesen). Drei Läufe, alle PASS.
 
-| Variante (64 KiB) | Zeit | Durchsatz |
+| Variante | Zeit | Durchsatz |
 |---|---:|---:|
-| CPU `aes_gcm_encrypt` (T-Tabellen + GHASH asm), Referenz | 11,78 s | 5,56 KB/s |
-| Blitter-Kette + GHASH auf der CPU, keine CPU-Blöcke | 9,36 s | 7,0 KB/s |
-| **Blitter-Kette + GHASH + CPU-Eigenblöcke (dynamische Aufteilung)** | **7,22 s** | **9,1 KB/s** |
-| dito, Puffer im Chip-RAM (Chiffretext per XOR-Blit) | 7,18 s | 9,1 KB/s |
-| Entschlüsseln 40000 B (GHASH läuft dem Blitter voraus, kein serieller Schluss) | 4,38 s | 9,1 KB/s |
-| Zählerlanes je Batch: C 140 ms → Assembler | | **20 ms** |
+| CPU `aes_gcm_encrypt` (T-Tabellen + GHASH asm), Referenz | 192 KiB: 35,4 s | 5,56 KB/s |
+| 64 KiB: Blitter-Kette + GHASH auf der CPU, keine CPU-Blöcke | 9,36 s | 7,0 KB/s |
+| 64 KiB: Kette + GHASH + CPU-Eigenblöcke (dynamische Aufteilung) | 7,08 s | 9,3 KB/s |
+| 64 KiB dito, Puffer im Chip-RAM (Chiffretext per XOR-Blit) | 7,06 s | 9,3 KB/s |
+| **192 KiB verschlüsseln, in place (8 Ketten + 3807 CPU-Blöcke)** | **19,1 s** | **10,3 KB/s** |
+| **192 KiB entschlüsseln, in place** | **18,8 s** | **10,4 KB/s** |
+| Zählerlanes je Batch: C 120–140 ms → Assembler | | **20 ms** |
+| CTR-Block auf der CPU: vbcc-Schleifen 2,8 ms → `bg_ctr_blocks` asm | | **2,12 ms** (AES-Block allein 2,04) |
 | Copper-Kette je 16 KiB: 29 → 14 CPU-Neustarts (SBOX springt per COPJMP1 nach MIX) | 2,24 → **2,10 s** | |
 
-Hypothese war 9–10 KB/s (Abschnitt 2b): bestätigt am unteren Rand. Die Kette (2,1 s je 16 KiB) ist die Untergrenze, die CPU ist darunter voll ausgelastet (GHASH ≈ 1000 Blöcke + ≈ 340 eigene AES-Blöcke je Kette). Beim Verschlüsseln bleibt der GHASH des letzten Batches seriell (0,6 s = 8 %). Preis: 173 KiB Chip-RAM (Arena + Copper-Listen), Anzeige während eines Aufrufs aus. Erster FS-UAE-Lauf fehlerfrei; der Host-Test mit simulierter Kettenlatenz (`ctx.soft_polls`) hatte vorher den einzigen Fehler gefunden (Tabellen-Shift der Zählerbits 6..31 um n statt n−6, sichtbar ab Block 62).
+Hypothese war 9–10 KB/s (Abschnitt 2b): bestätigt und im Dauerbetrieb leicht übertroffen. Die Kette (2,1 s je 16 KiB) ist die Untergrenze, die CPU ist darunter voll ausgelastet (GHASH ≈ 1460 Blöcke + ≈ 435 eigene AES-Blöcke je Kette, keine Leerläufe). Unter laufender Kette läuft CPU-Code aus Fast RAM ≈ 20 % langsamer als im Leerlauf (AES 2,04 → 2,42 ms, GHASH 0,58 → 0,72 ms) – in FS-UAE gemessen, auf Hardware offen. Kurze Nachrichten verlieren am Datenende (64 KiB: 9,3 KB/s; beim Verschlüsseln bleibt der GHASH des letzten Batches seriell). Preis: 173 KiB Chip-RAM (Arena + Copper-Listen), Anzeige während eines Aufrufs aus.
+
+Fehler auf dem Weg: Tabellen-Shift der Zählerbits 6..31 um n statt n−6 (Host-Test mit simulierter Kettenlatenz `ctx.soft_polls`, sichtbar ab Block 62, vor dem ersten FS-UAE-Lauf gefunden); CTR-Block in C kostete 0,7 ms Overhead je Block (vbcc-Byte-Schleifen, Stack-Frames) – erst der Harness-Vergleich AES-Block gegen CTR-Block zeigte es, danach Assembler.

@@ -48,8 +48,9 @@ typedef struct {
     int soft_polls;             /* host model only: number of polls the simulated chain stays busy */
     uint32_t (*now)(void);      /* optional tick source for the statistics below (NULL: off) */
     /* statistics of the last call */
-    uint32_t batches, partial, cpu_own, ghash_overlap, timeouts, blit_xor;
+    uint32_t batches, partial, cpu_own, ghash_overlap, timeouts, blit_xor, idle_polls;
     uint32_t t_lanes, t_chain, t_xor, t_tail, t_total;
+    uint16_t cpu_own_batch[16];     /* CPU-own blocks per batch (first 16 batches) */
     /* internal */
     int rnd;
     uint32_t mixkey_base[BLITGCM_MIXKEYS];
@@ -57,7 +58,7 @@ typedef struct {
     uint16_t *cop_idle, *cop_sbox, *cop_mix, *cop_fin, *cop_tout;
     uint16_t *old_lof, *old_shf;
     uint16_t olddma;
-    uint32_t frame, lastv;
+    uint32_t frame, lastv, polls;
     int hw_active;
 } blitgcm_ctx;
 
@@ -78,6 +79,9 @@ void blitgcm_ctr_fill_c(uint8_t *arena, const bg_ctr_params *p);
 #ifdef BLITGCM_HW
 void bg_ctr_fill_asm(__reg("a0") uint8_t *arena, __reg("a1") const bg_ctr_params *p);
 void bg_xor_asm(__reg("a0") uint8_t *dst, __reg("a1") const uint8_t *ks, __reg("a2") const uint8_t *src, __reg("d0") uint32_t nlongs);
+/* out = in ^ AES(j0 || BE32(ctr + i)), n blocks; in/out may alias, any alignment */
+void bg_ctr_blocks(__reg("a0") const uint8_t *rk, __reg("a1") const uint8_t *j0, __reg("a2") const uint8_t *in, __reg("a3") uint8_t *out,
+                   __reg("d0") uint32_t ctr, __reg("d1") uint32_t n, __reg("d2") int rounds);
 #endif
 
 #endif
