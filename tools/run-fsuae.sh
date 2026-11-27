@@ -19,6 +19,10 @@ DH0="$WORK/dh0"
 rm -rf "$WORK"; mkdir -p "$DH0/S"
 cp "$EXE" "$DH0/test"
 printf 'test\nendcli\n' > "$DH0/S/Startup-Sequence"
+# SIGPIPE ignored, inherited by fs-uae across exec: three live runs ended with fs-uae killed hard on a transmit right
+# after a long inbound stall (log cut mid-line, no crash report) - the pattern of slirp writing to a host socket the
+# server had already closed; ignored, send() returns EPIPE and the emulator lives on
+trap '' PIPE
 "$FSUAE" "$HERE/fsuae/a500-1mb-fast.fs-uae" \
     --floppy_drive_0= \
     --hard_drive_0="$DH0" --hard_drive_0_label=DH0 --hard_drive_0_priority=6 \

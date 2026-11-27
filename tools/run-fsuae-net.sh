@@ -115,6 +115,10 @@ elif [ "$NET_ORDER" = probe-first ]; then
   printf "stack %s\necho \"Tachyon: Probe startet (eigenes Fenster), danach der TCP/IP-Stack TheWire13 - bitte warten\"\n${HOLD_LINE}run >NIL: test\nwait 2\nrun >NIL: C:TheWire13 >SYS:stack.log\nwait %s\navail >SYS:avail.txt\n" "$NET_STACK" "$NET_WAIT" > "$DH0/S/Startup-Sequence"
 else printf "stack %s\necho \"Tachyon: TCP/IP-Stack TheWire13 startet, die Probe folgt in %s s - bitte warten\"\n${HOLD_LINE}run >NIL: C:TheWire13 >SYS:stack.log\nwait %s\navail >SYS:avail.txt\ntest\navail >SYS:avail2.txt\n" "$NET_STACK" "$NET_WAIT" "$NET_WAIT" > "$DH0/S/Startup-Sequence"; fi
 
+# SIGPIPE ignored, inherited by fs-uae across exec: three live runs ended with fs-uae killed hard on a transmit right
+# after a long inbound stall (log cut mid-line, no crash report) - the pattern of slirp writing to a host socket the
+# server had already closed; ignored, send() returns EPIPE and the emulator lives on
+trap '' PIPE
 "$FSUAE" "$HERE/fsuae/a500-1mb-fast-net.fs-uae" \
     --floppy_drive_0= \
     --hard_drive_0="$DH0" --hard_drive_0_label=DH0 --hard_drive_0_priority=6 \
