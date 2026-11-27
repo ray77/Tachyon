@@ -101,7 +101,7 @@ typedef struct wa_probe_io {
     const char *chat_send;          /* text to send once after <active/>, or 0 */
     int (*chat_input)(void *ctx, char *line, uint32_t cap);      /* optional: 1 = a typed line is ready (no newline) */
     void (*chat_recv)(void *ctx, const char *from, const char *text);   /* optional: a decrypted text (also logged) */
-    uint32_t msgs_sent, msgs_received, msgs_failed, receipts_sent, sessions_started;
+    uint32_t msgs_sent, msgs_received, msgs_failed, msgs_deferred, receipts_sent, sessions_started;
     uint32_t d_session, d_encrypt, d_decrypt;   /* durations: last X3DH, last encrypt, last decrypt */
     uint32_t t_msg_sent, t_msg_ack, t_msg_receipt, t_msg_received;   /* our last message out, the server's ack, the peer's receipt; the last text in */
 

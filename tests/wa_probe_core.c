@@ -978,6 +978,19 @@ static int handle_message(const wab_node *n)
     is_pk = wab_str_eq(&enc_type->str, "pkmsg");
     if (enc->val.kind != WAB_BYTES && enc->val.kind != WAB_STR) { logl("msg: <enc> without content, acknowledged"); return send_ack(n); }
     elen = enc->val.str.len;
+    /* the ciphertext as hex (200 bytes per line): an offline replay of exactly this message against the stored
+       credentials and prekeys (host, vamos) is worth more than any guess when the 68000 stops here */
+    for (i = 0; i < elen; i += 200) { char pfx[40]; wa_fmt(pfx, sizeof pfx, "enc %s %u/%u: ", is_pk ? "pkmsg" : "msg", i, elen); log_hex(pfx, enc->val.str.p + i, elen - i < 200 ? elen - i : 200); }
+    if (wab_get_attr(n, "offline")) {
+        /* interim: a message that waited on the server while we were offline (the phone's app-state keys, other
+           devices' first messages) is acknowledged without decrypting it - the second live attempt stopped inside the
+           responder X3DH of exactly such a message and the bytes above allow the offline replay; live messages, which
+           the chat is about, are decrypted below */
+        wa_fmt(line, sizeof line, "msg: offline message %s from %s:%u (%s, %u bytes): acknowledged, NOT decrypted in this build (bytes logged for the offline replay)",
+               attr_cstr(n, "id", idb, sizeof idb), user, (uint32_t)from->jid.device, is_pk ? "pkmsg" : "msg", elen); logl(line);
+        io->msgs_deferred++;
+        return send_ack(n);
+    }
     s = sig_store_get(io->sessions, user, from->jid.device, lid, is_pk);
     if (!s) { wa_fmt(line, sizeof line, "msg: message %s from %s:%u is a plain msg but we have no session with that device: acknowledged, lost", attr_cstr(n, "id", idb, sizeof idb), user, (uint32_t)from->jid.device); logl(line); io->msgs_failed++; return send_ack(n); }
     wa_fmt(line, sizeof line, "msg: message %s from %s:%u@%s, <enc type=%s v=%s> %u bytes%s", attr_cstr(n, "id", idb, sizeof idb), user, (uint32_t)from->jid.device, lid ? "lid" : WA_SERVER_JID,
@@ -1179,9 +1192,9 @@ static int post_login(void)
 
 static const char *post_summary(void)
 {
-    static char s[160];
-    wa_fmt(s, sizeof s, "; server prekeys %u + %u uploaded, %s, %u stanzas, %u acks, %u texts sent, %u received, %u undecryptable%s", io->server_prekeys, io->prekeys_uploaded,
-           io->active_set ? "active" : "not active", io->frames_after_login, io->acks_sent, io->msgs_sent, io->msgs_received, io->msgs_failed, io->messages_seen && !io->sessions ? ", messages waiting" : "");
+    static char s[200];
+    wa_fmt(s, sizeof s, "; server prekeys %u + %u uploaded, %s, %u stanzas, %u acks, %u texts sent, %u received, %u undecryptable, %u offline deferred%s", io->server_prekeys, io->prekeys_uploaded,
+           io->active_set ? "active" : "not active", io->frames_after_login, io->acks_sent, io->msgs_sent, io->msgs_received, io->msgs_failed, io->msgs_deferred, io->messages_seen && !io->sessions ? ", messages waiting" : "");
     return s;
 }
 
@@ -1369,7 +1382,7 @@ int wa_probe_run(wa_probe_io *pio)
     io->paired_now = io->logged_in = 0; io->t_qr_shown = io->t_pair_success = io->d_verify = io->d_sign = io->t_sign_sent = io->t_515 = io->t_login_connect = io->t_login_accepted = 0; io->qr_shown = 0;
     io->server_prekeys = io->prekeys_uploaded = io->t_active = io->frames_after_login = io->acks_sent = io->messages_seen = 0; io->have_server_prekeys = io->active_set = 0;
     iq_counter = 0; iq_prefix[0] = 0;
-    io->msgs_sent = io->msgs_received = io->msgs_failed = io->receipts_sent = io->sessions_started = 0; io->d_session = io->d_encrypt = io->d_decrypt = 0;
+    io->msgs_sent = io->msgs_received = io->msgs_failed = io->msgs_deferred = io->receipts_sent = io->sessions_started = 0; io->d_session = io->d_encrypt = io->d_decrypt = 0;
     io->t_msg_sent = io->t_msg_ack = io->t_msg_receipt = io->t_msg_received = 0; last_msg_id[0] = 0;
     if (io->sessions && !io->sessions_loaded) { sig_store_init(io->sessions); io->sessions_loaded = 1; }
     if (io->mode == WA_MODE_PAIR && io->creds) local_init();
@@ -1411,7 +1424,7 @@ static void sim_open(wa_probe_io *pio)
     io->server_prekeys = io->prekeys_uploaded = io->t_active = io->frames_after_login = io->acks_sent = io->messages_seen = 0; io->have_server_prekeys = io->active_set = 0;
     iq_counter = 0; iq_prefix[0] = 0;
     if (!rng.instantiated) drbg_instantiate(&rng, io->seed, io->seed_len);
-    io->msgs_sent = io->msgs_received = io->msgs_failed = io->receipts_sent = io->sessions_started = 0; io->d_session = io->d_encrypt = io->d_decrypt = 0;
+    io->msgs_sent = io->msgs_received = io->msgs_failed = io->msgs_deferred = io->receipts_sent = io->sessions_started = 0; io->d_session = io->d_encrypt = io->d_decrypt = 0;
     io->t_msg_sent = io->t_msg_ack = io->t_msg_receipt = io->t_msg_received = 0; last_msg_id[0] = 0;
     if (io->sessions && !io->sessions_loaded) { sig_store_init(io->sessions); io->sessions_loaded = 1; }
     if (io->mode == WA_MODE_PAIR && io->creds) local_init();
