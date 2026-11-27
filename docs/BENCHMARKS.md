@@ -302,3 +302,16 @@ A500/FS-UAE, dieselbe aufgezeichnete Session wie in Schritt 14, zweimal abgespie
 | Ersparnis `rsa_pub_set` 1,9 s − `rsa_pub_check` 0,45 s | −1,5 s |
 
 Hochrechnung Live-Kette (2 Prüfungen und der Blattschlüssel gespart): 37 s → **≈ 16,5 s** (X25519 8,1 s + Schlüsselprüfung 0,45 s + RSA-PSS 7,7 s + ≈ 0,3 s Rest); mit dem 60-s-Fenster (Abschnitt 8) bleiben 43 s Reserve. Übrig als RSA-Posten nur noch die eine PSS-Prüfung (7,7 s, Karatsuba/Entrollen ≈ −25 %). Der Verbindungsaufbau mit warmem Cache liegt damit bei ≈ 16,5 s TLS + 25 s Noise. Der Cache ist ≈ 1,1 KiB (Fingerabdruck 32 Byte + `rsa_pub`); ein beschädigter Eintrag (`rsa_pub_check` schlägt fehl) zählt als Fehltreffer und wird nach der vollen Prüfung überschrieben – Hosttest mit verfälschtem R², kein Aussperren.
+
+## 2026-11-27 – Schritt 16: Zwischenzertifikat mitgepinnt (`x509_verify_chain_pins`)
+
+A500/FS-UAE, die echte zweistufige Kette von web.whatsapp.com (`tests/certs/`), einmal gegen den G2-Wurzelschlüssel allein, einmal gegen die Pin-Menge {CA1-Zwischenzertifikat, G2-Wurzel} (PROTOCOL.md Abschnitt 7). Alle Vektoren bestanden.
+
+| Operation | Zeit |
+|---|---:|
+| Kette Blatt → CA1 → gepinnte G2-Wurzel (2 RSA-2048-Prüfungen) | 19,5 s |
+| **Kette gegen Pin-Menge {CA1, G2}: vollständig am Zwischenzertifikat (1 Prüfung)** | **9,8 s** |
+
+Hochrechnung TLS-1.3-Handshake auf der Live-Kette, kalt (kein Zertifikatscache): 37 s → **≈ 27,5 s** (X25519 8,1 s + Kette 9,8 s + Blattschlüssel 1,9 s + RSA-PSS 7,7 s); mit warmem Cache bleibt es bei ≈ 16,5 s (Schritt 15), der Pin greift nur beim ersten Kontakt und nach einer Blattrotation. Fällt DigiCert auf ein anderes Zwischenzertifikat zurück, läuft die Prüfung über die Wurzel (19,5 s) weiter, ohne Codeänderung.
+
+Stand der TLS-Zeiten damit: kalt 27,5 s, warm 16,5 s, Fenster des Servers 60 s. Verbindungsaufbau gesamt (TLS + Noise mit ≈ 35–45 s) ≈ 50–70 s; größter Posten bleibt X25519 (8,1 s je Operation, 1 in TLS, 3 in Noise).
