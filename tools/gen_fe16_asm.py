@@ -17,6 +17,9 @@ d0/d1/a0/a1 scratch, all other registers preserved):
 
 All routines mirror the C functions in crypto/ref/x25519_ref.c step by step
 (same carry handling, same two fold passes), so results are bit-for-bit comparable.
+The second fold pass only touches limb 0 (fold_last): when pass 1 carried out of
+2^256, the value left is < 1482 (< 2^23 for mul121665), so adding 38 cannot carry
+further - the C version's full chain adds zeros there. 24 instead of 376 cycles.
 
 Both compute the exact 512-bit product with a 48-bit column accumulator
 (d0 = low 32 bits, d1 = carries, d3 = constant zero for addx), then reduce
@@ -73,11 +76,11 @@ def reduce_and_fold():
         emit("\tmove.w\td1,(a2)+")
         emit("\tclr.w\td1")
         emit("\tswap\td1")
-    emit("; d1 = carry (< 39): 38*carry < 1482 fits a word, so both fold passes are X-flag chains")
+    emit("; d1 = carry (< 39): 38*carry < 1482 fits a word, so fold pass 1 is an X-flag chain")
     emit("; fold pass 1")
     fold_cheap()
-    emit("; fold pass 2")
-    fold_cheap()
+    emit("; fold pass 2: if pass 1 carried out, h < 1482 now, so only limb 0 changes")
+    fold_last(1)
 
 
 def prologue(name, has_g):
@@ -310,6 +313,24 @@ def fold_cheap():
     emit("\taddx.w\td1,d1\t\t\t; d1 = carry out")
 
 
+def fold_last(limbs=1):
+    """second fold pass: h += 38*d1 with d1 in {0,1}. Needs the bound proven at the call
+    site: whenever d1 == 1 the limbs above `limbs`-1 are zero and the chain cannot carry
+    out of limb `limbs`-1, so only `limbs` limbs are touched (constant time, no branch).
+    Needs d3 = 0 (limbs > 1) and a5 = h."""
+    emit("\tneg.w\td1\t\t\t; 0 or $FFFF")
+    emit("\tand.w\t#38,d1\t\t\t; 0 or 38")
+    if limbs == 1:
+        emit("\tadd.w\td1,(a5)\t\t\t; limb 0 (h < 1482 whenever d1 was 1: no carry)")
+    else:
+        emit("\tmove.l\ta5,a0")
+        emit("\tadd.w\td1,(a0)+")
+        for _ in range(limbs - 1):
+            emit("\tmove.w\t(a0),d2")
+            emit("\taddx.w\td3,d2")
+            emit("\tmove.w\td2,(a0)+")
+
+
 def gen_add():
     emit("\txdef\t_fe16_add")
     emit("_fe16_add:")
@@ -326,10 +347,10 @@ def gen_add():
     emit("\tmoveq\t#0,d1")
     emit("\taddx.w\td1,d1\t\t\t; d1 = carry (0/1)")
     emit("\tmoveq\t#0,d3")
-    emit("; fold pass 1")
+    emit("; fold pass 1 (carry 0/1 -> + 38, X-flag chain)")
     fold_cheap()
-    emit("; fold pass 2")
-    fold_cheap()
+    emit("; fold pass 2: if pass 1 carried out, h < 38 now, so only limb 0 changes")
+    fold_last(1)
     emit("\tmovem.l\t(sp)+,d2-d3/a2/a5")
     emit("\trts")
     emit("")
@@ -366,10 +387,10 @@ def gen_sub():
     emit("\tsub.w\td1,d2")
     emit("\tmove.w\td2,d1\t\t\t; d1 = c + 1 - b  (0, 1 or 2 multiples of 2^256)")
     emit("\tmoveq\t#0,d3")
-    emit("; fold pass 1")
+    emit("; fold pass 1 (d1 <= 2 -> + 38*d1 <= 76, X-flag chain)")
     fold_cheap()
-    emit("; fold pass 2")
-    fold_cheap()
+    emit("; fold pass 2: if pass 1 carried out, h < 76 now, so only limb 0 changes")
+    fold_last(1)
     emit("\tmovem.l\t(sp)+,d2-d4/a2/a5")
     emit("\trts")
     emit("")
@@ -412,8 +433,9 @@ def gen_mul121665():
         emit("\tswap\td1")
     emit("; d1 = carry (0/1)")
     emit("\tmoveq\t#0,d3")
-    emit("; fold pass 2")
-    fold_cheap()
+    emit("; fold pass 2: if pass 1 carried out, h < 38*2^17 < 2^23 now (limbs 2..15 zero,")
+    emit("; limb 1 < 77), so + 38 reaches limb 1 at most")
+    fold_last(2)
     emit("\tmovem.l\t(sp)+,d2-d5/a5")
     emit("\trts")
     emit("")

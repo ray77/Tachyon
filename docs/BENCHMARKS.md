@@ -409,3 +409,28 @@ Dieselbe Maschine wie Schritt 18 mit 2 MiB Fast-RAM (`make run-pair FAST=2048`),
 - **Identität 18,3 s** vor dem Connect: drei Festbasis-Multiplikationen plus XEdDSA-Sign des Prekeys. Einmalig; bei gespeicherten Zugangsdaten entfällt sie, und der Lauf beginnt beim Login (76 s).
 - **Speicher:** mit 2 MiB Fast nach Stack und Probe 177 KiB Fast + 437 KiB Chip frei (`avail.txt`); der QR-Schirm (4 Planes 640 × 256, 80 KiB Chip) und die Decoder-Arenen (2 × 6 KiB) passen.
 - **Plattformtyp:** dieses Binary war 37 s vor der Umstellung auf `WA_PLATFORM_TYPE` FIREFOX gebaut (Header fehlte in den Make-Abhängigkeiten, behoben), das Pairing lief daher wie das Host-Pairing mit UNKNOWN; das Telefon zeigt „Anderes Gerät". Ein dritter Lauf mit FIREFOX (Gerät :9) brachte dieselben Zahlen plus ≈ 5 % für die Fortschrittspunkte (Prüfung 12,04 s, Signatur 8,14 s, Login-Verbindung 79,9 s, gesamt 234 s; PROTOCOL.md 11). Ein vierter Lauf (Login mit den Zugangsdaten von Gerät :9, PROTOCOL.md 11 „Nach `<success>`“): 10 Einmal-Prekeys in **32,9 s** vor dem Connect (3,3 s je X25519-Paar), Login-Verbindung 76,0 s, Prekey-Zählung 1,0 s, Upload von 10 Prekeys angenommen nach 1,3 s, `<active/>` angenommen 3,6 s nach `<success>`; Programmstart → aktiv 122 s. Live-Verbindungen für diesen Schritt: Host 2 (Pairing, Login), FS-UAE 3 (Pairing UNKNOWN, Pairing FIREFOX, Login mit Prekey-Upload).
+
+## 2026-11-27 – Schritt 20: zweite Faltung auf Limb 0, Leitertausch als Index-Flip
+
+Zwei Mikro-Schritte an der Feldarithmetik, beide bitidentisch zur C-Referenz (Vergleichstests auf je 1000 Inputs, RFC 7748, 256 Go-Zufallsvektoren auf dem Host, alle Vektoren unter vamos und in FS-UAE).
+
+1. **Zweiter Faltungsdurchlauf nur noch auf Limb 0** (`tools/gen_fe16_asm.py`, `fold_last`). Nach der Reduktion gilt h < 2^256 und der Übertrag c < 39; Durchlauf 1 addiert 38·c ≤ 1444. Trägt er aus 2^256 hinaus, bleibt h < 1444 zurück, und die +38 des zweiten Durchlaufs kann Limb 0 nicht mehr verlassen. Dieselbe Schranke gilt für Add (h < 38), Sub (h < 76) und mit zwei Limbs für Mul121665 (h < 2^23). Aus 376 Takten (`mulu` + 15 × `addx`-Kette) werden 24 (`neg.w`, `and.w #38`, `add.w`), ohne Verzweigung, in allen fünf Routinen. Die C-Referenz behält ihre volle Kette (sie addiert dort Nullen).
+2. **Konditionaler Tausch in der Montgomery-Leiter als Index-Flip** (`crypto/ref/x25519_ref.c`): (x2,z2) und (x3,z3) liegen in `pt[4]`, der Tausch kippt einen Index zwischen 0 und 2 per Maske statt zweimal 16 Limbs zu XOR-tauschen (≈ 1,6 k Takte je Schritt). Verzweigungsfrei; die Adresse hängt vom geheimen Bit ab, was auf dem 68000 ohne Cache keinen messbaren Unterschied macht.
+
+| Operation | vorher | jetzt | Δ |
+|---|---:|---:|---:|
+| `fe16_mul` (Karatsuba) | 3,40 ms | **3,34 ms** | −2 % |
+| `fe16_sqr` | 2,38 ms | **2,26 ms** | −5 % |
+| `fe16_add` | 0,203 ms | **0,151 ms** | −26 % |
+| `fe16_sub` | 0,258 ms | **0,206 ms** | −20 % |
+| `fe16_mul121665` | 0,432 ms | **0,383 ms** | −11 % |
+| X25519, nur Faltung | 8,08 s | 7,82 s | −3,2 % |
+| **X25519, beides** | 8,08 s | **7,71 s** | **−4,6 %** |
+| `ed25519_verify` | 9,10 s | **8,84 s** | −3 % |
+| `xeddsa_verify` | 9,72 s | **9,44 s** | −3 % |
+| Noise-XX-Client (3 X25519 + HKDF + GCM) | 25,3 s | **24,3 s** | −4 % |
+| TLS-1.3-Handshake, Zertifikat im Cache | 18,1 s | 18,0 s | – |
+
+### Einordnung
+
+Die Leiter steht damit bei 7,7 s gegen die in Schritt 3 genannte Untergrenze von ≈ 7,5 s. Was übrig ist: 192 Produkte à ≈ 84 Takte (`move.w (a0)+` 8, `mulu.w -(a1)` 48 + 2·Einsen, `add.l` 8, `addx.w` 4) sind 16 k der 23,7 k Takte einer Multiplikation; Spaltenwechsel, Karatsuba-Buchhaltung, Reduktion und erste Faltung teilen sich den Rest, jeder Posten für sich schon knapp. Karatsuba für die Quadrierung (136 → 108 Produkte) kostet in der Buchhaltung, was es an Produkten spart; eine zweite Karatsuba-Ebene ebenso. Die vier Online-Leitern der Login-Verbindung kosten jetzt 30,8 s statt 32,3 s. Deutlich mehr bringt nur, Leitern aus dem Fenster zu nehmen: Noise `es` = DH(e_c, s_s) mit dem gecachten Server-Static vor dem Connect rechnen (−7,7 s, Gleichheitsprüfung nach dem ServerHello) und, falls der Server Tickets schickt und `psk_ke` erlaubt, TLS-Resumption ohne DH (−7,7 s).

@@ -238,8 +238,14 @@ void fe16_invert(fe16 h, const fe16 z)
 void x25519_ref(uint8_t out[32], const uint8_t scalar[32], const uint8_t point[32])
 {
     uint8_t k[32];
-    fe16 x1, x2, z2, x3, z3, a, aa, b, bb, e, c, d, da, cb, t;
-    uint16_t swap = 0;
+    /* pt[s], pt[s+1] = (x2, z2) and pt[s^2], pt[(s^2)+1] = (x3, z3): the ladder's conditional
+     * swap flips the index s between 0 and 2 instead of swapping 64 limbs (two fe16_cswap calls
+     * cost ~1.6 k cycles per step on the 68000, the index flip a handful). Branch-free; the
+     * address depends on the secret bit, which costs nothing observable on a cacheless 68000. */
+    fe16 pt[4];
+    fe16 x1, a, aa, b, bb, e, c, d, da, cb, t;
+    uint16_t *x2, *z2, *x3, *z3;
+    uint16_t swap = 0, s = 0;
     int i, bit;
 
     for (i = 0; i < 32; i++)
@@ -250,19 +256,19 @@ void x25519_ref(uint8_t out[32], const uint8_t scalar[32], const uint8_t point[3
 
     fe16_frombytes(x1, point);
     for (i = 0; i < 16; i++) {
-        x2[i] = 0; z2[i] = 0; z3[i] = 0;
-        x3[i] = x1[i];
+        pt[0][i] = 0; pt[1][i] = 0; pt[3][i] = 0;
+        pt[2][i] = x1[i];
     }
-    x2[0] = 1;
-    z3[0] = 1;
+    pt[0][0] = 1;
+    pt[3][0] = 1;
 
     for (bit = 254; bit >= 0; bit--) {
         uint16_t kt = (uint16_t)((k[bit >> 3] >> (bit & 7)) & 1);
         CRYPTO_YIELD();
         swap ^= kt;
-        fe16_cswap(x2, x3, swap);
-        fe16_cswap(z2, z3, swap);
+        s ^= (uint16_t)((0u - swap) & 2u);     /* conditional swap of (x2,z2) and (x3,z3) */
         swap = kt;
+        x2 = pt[s]; z2 = pt[s + 1]; x3 = pt[s ^ 2]; z3 = pt[(s ^ 2) + 1];
 
         fe16_add(a, x2, z2);            /* A  = x2 + z2 */
         fe16_sqr(aa, a);                /* AA = A^2 */
@@ -283,8 +289,8 @@ void x25519_ref(uint8_t out[32], const uint8_t scalar[32], const uint8_t point[3
         fe16_add(t, aa, t);
         fe16_mul(z2, e, t);             /* z2 = E * (AA + a24 * E) */
     }
-    fe16_cswap(x2, x3, swap);
-    fe16_cswap(z2, z3, swap);
+    s ^= (uint16_t)((0u - swap) & 2u);
+    x2 = pt[s]; z2 = pt[s + 1];
 
     fe16_invert(z2, z2);
     fe16_mul(x2, x2, z2);

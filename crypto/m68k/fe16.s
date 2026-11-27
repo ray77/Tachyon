@@ -1464,7 +1464,7 @@ _fe16_mul_comba:
 	move.w	d1,(a2)+
 	clr.w	d1
 	swap	d1
-; d1 = carry (< 39): 38*carry < 1482 fits a word, so both fold passes are X-flag chains
+; d1 = carry (< 39): 38*carry < 1482 fits a word, so fold pass 1 is an X-flag chain
 ; fold pass 1
 	mulu.w	#38,d1
 	move.l	a5,a0
@@ -1516,57 +1516,10 @@ _fe16_mul_comba:
 	move.w	d2,(a0)+
 	moveq	#0,d1
 	addx.w	d1,d1			; d1 = carry out
-; fold pass 2
-	mulu.w	#38,d1
-	move.l	a5,a0
-	add.w	d1,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	moveq	#0,d1
-	addx.w	d1,d1			; d1 = carry out
+; fold pass 2: if pass 1 carried out, h < 1482 now, so only limb 0 changes
+	neg.w	d1			; 0 or $FFFF
+	and.w	#38,d1			; 0 or 38
+	add.w	d1,(a5)			; limb 0 (h < 1482 whenever d1 was 1: no carry)
 	lea	64(sp),sp
 	movem.l	(sp)+,d2-d4/a2-a5
 	rts
@@ -3304,7 +3257,7 @@ _fe16_mul_kara:
 	move.w	d1,(a2)+
 	clr.w	d1
 	swap	d1
-; d1 = carry (< 39): 38*carry < 1482 fits a word, so both fold passes are X-flag chains
+; d1 = carry (< 39): 38*carry < 1482 fits a word, so fold pass 1 is an X-flag chain
 ; fold pass 1
 	mulu.w	#38,d1
 	move.l	a5,a0
@@ -3356,57 +3309,10 @@ _fe16_mul_kara:
 	move.w	d2,(a0)+
 	moveq	#0,d1
 	addx.w	d1,d1			; d1 = carry out
-; fold pass 2
-	mulu.w	#38,d1
-	move.l	a5,a0
-	add.w	d1,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	moveq	#0,d1
-	addx.w	d1,d1			; d1 = carry out
+; fold pass 2: if pass 1 carried out, h < 1482 now, so only limb 0 changes
+	neg.w	d1			; 0 or $FFFF
+	and.w	#38,d1			; 0 or 38
+	add.w	d1,(a5)			; limb 0 (h < 1482 whenever d1 was 1: no carry)
 	lea	132(sp),sp
 	movem.l	(sp)+,d2-d7/a2-a5
 	rts
@@ -4572,7 +4478,7 @@ _fe16_sqr:
 	move.w	d1,(a2)+
 	clr.w	d1
 	swap	d1
-; d1 = carry (< 39): 38*carry < 1482 fits a word, so both fold passes are X-flag chains
+; d1 = carry (< 39): 38*carry < 1482 fits a word, so fold pass 1 is an X-flag chain
 ; fold pass 1
 	mulu.w	#38,d1
 	move.l	a5,a0
@@ -4624,57 +4530,10 @@ _fe16_sqr:
 	move.w	d2,(a0)+
 	moveq	#0,d1
 	addx.w	d1,d1			; d1 = carry out
-; fold pass 2
-	mulu.w	#38,d1
-	move.l	a5,a0
-	add.w	d1,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	moveq	#0,d1
-	addx.w	d1,d1			; d1 = carry out
+; fold pass 2: if pass 1 carried out, h < 1482 now, so only limb 0 changes
+	neg.w	d1			; 0 or $FFFF
+	and.w	#38,d1			; 0 or 38
+	add.w	d1,(a5)			; limb 0 (h < 1482 whenever d1 was 1: no carry)
 	lea	64(sp),sp
 	movem.l	(sp)+,d2-d4/a2-a5
 	rts
@@ -4749,7 +4608,7 @@ _fe16_add:
 	moveq	#0,d1
 	addx.w	d1,d1			; d1 = carry (0/1)
 	moveq	#0,d3
-; fold pass 1
+; fold pass 1 (carry 0/1 -> + 38, X-flag chain)
 	mulu.w	#38,d1
 	move.l	a5,a0
 	add.w	d1,(a0)+
@@ -4800,57 +4659,10 @@ _fe16_add:
 	move.w	d2,(a0)+
 	moveq	#0,d1
 	addx.w	d1,d1			; d1 = carry out
-; fold pass 2
-	mulu.w	#38,d1
-	move.l	a5,a0
-	add.w	d1,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	moveq	#0,d1
-	addx.w	d1,d1			; d1 = carry out
+; fold pass 2: if pass 1 carried out, h < 38 now, so only limb 0 changes
+	neg.w	d1			; 0 or $FFFF
+	and.w	#38,d1			; 0 or 38
+	add.w	d1,(a5)			; limb 0 (h < 1482 whenever d1 was 1: no carry)
 	movem.l	(sp)+,d2-d3/a2/a5
 	rts
 
@@ -4980,7 +4792,7 @@ _fe16_sub:
 	sub.w	d1,d2
 	move.w	d2,d1			; d1 = c + 1 - b  (0, 1 or 2 multiples of 2^256)
 	moveq	#0,d3
-; fold pass 1
+; fold pass 1 (d1 <= 2 -> + 38*d1 <= 76, X-flag chain)
 	mulu.w	#38,d1
 	move.l	a5,a0
 	add.w	d1,(a0)+
@@ -5031,57 +4843,10 @@ _fe16_sub:
 	move.w	d2,(a0)+
 	moveq	#0,d1
 	addx.w	d1,d1			; d1 = carry out
-; fold pass 2
-	mulu.w	#38,d1
-	move.l	a5,a0
-	add.w	d1,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	moveq	#0,d1
-	addx.w	d1,d1			; d1 = carry out
+; fold pass 2: if pass 1 carried out, h < 76 now, so only limb 0 changes
+	neg.w	d1			; 0 or $FFFF
+	and.w	#38,d1			; 0 or 38
+	add.w	d1,(a5)			; limb 0 (h < 1482 whenever d1 was 1: no carry)
 	movem.l	(sp)+,d2-d4/a2/a5
 	rts
 
@@ -5359,57 +5124,15 @@ _fe16_mul121665:
 	swap	d1
 ; d1 = carry (0/1)
 	moveq	#0,d3
-; fold pass 2
-	mulu.w	#38,d1
+; fold pass 2: if pass 1 carried out, h < 38*2^17 < 2^23 now (limbs 2..15 zero,
+; limb 1 < 77), so + 38 reaches limb 1 at most
+	neg.w	d1			; 0 or $FFFF
+	and.w	#38,d1			; 0 or 38
 	move.l	a5,a0
 	add.w	d1,(a0)+
 	move.w	(a0),d2
 	addx.w	d3,d2
 	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	move.w	(a0),d2
-	addx.w	d3,d2
-	move.w	d2,(a0)+
-	moveq	#0,d1
-	addx.w	d1,d1			; d1 = carry out
 	movem.l	(sp)+,d2-d5/a5
 	rts
 
