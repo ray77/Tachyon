@@ -434,3 +434,24 @@ Zwei Mikro-Schritte an der Feldarithmetik, beide bitidentisch zur C-Referenz (Ve
 ### Einordnung
 
 Die Leiter steht damit bei 7,7 s gegen die in Schritt 3 genannte Untergrenze von ≈ 7,5 s. Was übrig ist: 192 Produkte à ≈ 84 Takte (`move.w (a0)+` 8, `mulu.w -(a1)` 48 + 2·Einsen, `add.l` 8, `addx.w` 4) sind 16 k der 23,7 k Takte einer Multiplikation; Spaltenwechsel, Karatsuba-Buchhaltung, Reduktion und erste Faltung teilen sich den Rest, jeder Posten für sich schon knapp. Karatsuba für die Quadrierung (136 → 108 Produkte) kostet in der Buchhaltung, was es an Produkten spart; eine zweite Karatsuba-Ebene ebenso. Die vier Online-Leitern der Login-Verbindung kosten jetzt 30,8 s statt 32,3 s. Deutlich mehr bringt nur, Leitern aus dem Fenster zu nehmen: Noise `es` = DH(e_c, s_s) mit dem gecachten Server-Static vor dem Connect rechnen (−7,7 s, Gleichheitsprüfung nach dem ServerHello) und, falls der Server Tickets schickt und `psk_ke` erlaubt, TLS-Resumption ohne DH (−7,7 s).
+
+## 2026-11-27 – Schritt 21: Login-Verbindung des A500 mit TLS- und Noise-Cache aus der Datei
+
+Zwei Logins mit den Zugangsdaten von Gerät :9 (`make run-pair FAST=2048`, FS-UAE, 2 MiB Fast, Binary aus 426499e + Ticket-Log), fünf Minuten Abstand. Lauf 1 füllt `SYS:tlscache.bin` (585 Byte, `x509_cache_write`) und die zweite Hälfte von `SYS:noisecache.bin` (Blattzertifikat), Lauf 2 trifft beide. Zeiten ab TCP-Connect.
+
+| Phase | Lauf 4 (Schritt 19, 16:30) | Lauf 1 (19:11, Caches füllen) | **Lauf 2 (19:19, Treffer)** |
+|---|---:|---:|---:|
+| Prekeys vor dem Connect | 32,9 s (10 neu) | 32,4 s (10 neu) | **0 s** (Batch lag vor) |
+| drei X25519-Schlüsselpaare vor dem Connect | 6,6 s | 6,4 s | 6,6 s |
+| TLS 1.3 | 32,0 s | 31,7 s | **20,3 s** (Cache HIT: Kette + `rsa_pub_set` gespart) |
+| WebSocket-Upgrade + ClientHello → ServerHello | 1,7 s | 1,7 s | 1,6 s |
+| Noise ServerHello → ClientFinish | 41,3 s | 39,4 s (Leiter 7,7 s) | **28,5 s** (Blatt-XEdDSA gespart) |
+| **Login-Verbindung bis `<success>`** | **76,0 s** | **74,4 s** | **52,0 s** |
+| Programmstart → `<success>` | 122 s | 117 s | **62 s** |
+| Pongs in Noise | 9 | 9 | 6 |
+
+Dazu: `<active/>` angenommen 2,0 s (Lauf 1) bzw. 5,7 s (Lauf 2) nach `<success>`; die 170-KB-Nachricht des Servers wird verworfen, die Verbindung bleibt; `tls: 0 NewSessionTicket(s)`.
+
+### Einordnung
+
+Von 76,0 s auf 52,0 s: −10,4 s TLS-Cache (eine RSA-2048-Prüfung + Schlüsselvorbereitung), −10,9 s Noise-Blatt-Cache (eine XEdDSA-Prüfung), −1,6 s schnellere Leiter. Der Startweg bis zum Login ist mit 62 s halbiert, weil der Prekey-Batch jetzt zwischen den Läufen gespeichert wird. Was bleibt (52 s): vier X25519-Leitern 30,8 s, RSA-PSS CertificateVerify ≈ 5 s, HKDF und zehn AES-GCM-Schlüsselaufbauten ≈ 5 s, Entschlüsseln/Parsen und Netz der Rest. Da der Server keine Tickets schickt, gibt es keine TLS-Resumption; der nächste Hebel ist die Vorausrechnung von Noise `es` mit dem gecachten Server-Static (−7,7 s → ≈ 44 s), danach bliebe nur noch Arithmetik an der Untergrenze. Live-Verbindungen für diesen Schritt: 2 (beide Logins, keine Fehlversuche).

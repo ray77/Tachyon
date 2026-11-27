@@ -470,7 +470,13 @@ static uint8_t refbuf[WA_QR_REFS_MAX][128]; static uint32_t reflen[WA_QR_REFS_MA
 static char qr_text[WA_PAIR_QR_MAX]; static qr qr_code; static qr_work qr_scratch;
 static uint32_t iq_counter; static char iq_prefix[16];
 
-static void close_ws(void) { uint8_t cl[16]; uint32_t n = ws_frame_close(&w, 1000, cl, sizeof cl); if (n) app_send(cl, n); }
+static void close_ws(void)
+{
+    uint8_t cl[16]; uint32_t n = ws_frame_close(&w, 1000, cl, sizeof cl);
+    if (n) app_send(cl, n);
+    /* tickets arrive after the handshake, interleaved with application data: report the final count here */
+    if (!io->tunnel) { io->tls_tickets = t.tickets; wa_fmt(line, sizeof line, "tls: %u NewSessionTicket(s) received during the connection (PSK resumption not implemented)", t.tickets); logl(line); }
+}
 
 /* one binary node, encrypted with the transport keys: 3-byte length + ciphertext */
 static int send_node(const wab_node *n, const char *what)
