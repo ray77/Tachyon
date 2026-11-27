@@ -11,12 +11,12 @@
 #define SIG_INNER_MAX (1 + 2 + 33 + 6 + 6 + 3 + SIG_BODY_MAX + SIG_MAC_LEN)
 
 /* ---- helpers --------------------------------------------------------------------------------------- */
-static void cp(uint8_t *d, const uint8_t *s, uint32_t n) { while (n--) *d++ = *s++; }
-static void zero(void *p, uint32_t n) { uint8_t *d = (uint8_t *)p; while (n--) *d++ = 0; }
+static void sig_cp(uint8_t *d, const uint8_t *s, uint32_t n) { while (n--) *d++ = *s++; }
+static void sig_zero(void *p, uint32_t n) { uint8_t *d = (uint8_t *)p; while (n--) *d++ = 0; }
 static int  ct_eq(const uint8_t *a, const uint8_t *b, uint32_t n) { uint32_t i; uint8_t d = 0; for (i = 0; i < n; i++) d |= a[i] ^ b[i]; return d == 0; }
-static void clamp(uint8_t k[32]) { k[0] &= 248; k[31] &= 127; k[31] |= 64; }
-static void be32(uint8_t *d, uint32_t v) { d[0] = (uint8_t)(v >> 24); d[1] = (uint8_t)(v >> 16); d[2] = (uint8_t)(v >> 8); d[3] = (uint8_t)v; }
-static uint32_t rd32(const uint8_t *p) { return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3]; }
+static void sig_clamp(uint8_t k[32]) { k[0] &= 248; k[31] &= 127; k[31] |= 64; }
+static void sig_be32(uint8_t *d, uint32_t v) { d[0] = (uint8_t)(v >> 24); d[1] = (uint8_t)(v >> 16); d[2] = (uint8_t)(v >> 8); d[3] = (uint8_t)v; }
+static uint32_t sig_rd32(const uint8_t *p) { return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3]; }
 
 const char *sig_errstr(int err)
 {
@@ -45,10 +45,10 @@ static void chain_message_keys(const uint8_t ck[32], uint8_t cipher[32], uint8_t
     uint8_t one = 1, seed[32], out[80];
     hmac_sha256(seed, ck, 32, &one, 1);
     hkdf_sha256(out, 80, 0, 0, seed, 32, info_mk, 18);
-    cp(cipher, out, 32); cp(mac, out + 32, 32); cp(iv, out + 64, 16);
-    zero(out, sizeof out); zero(seed, 32);
+    sig_cp(cipher, out, 32); sig_cp(mac, out + 32, 32); sig_cp(iv, out + 64, 16);
+    sig_zero(out, sizeof out); sig_zero(seed, 32);
 }
-static void chain_next(uint8_t ck[32]) { uint8_t two = 2, out[32]; hmac_sha256(out, ck, 32, &two, 1); cp(ck, out, 32); zero(out, 32); }
+static void chain_next(uint8_t ck[32]) { uint8_t two = 2, out[32]; hmac_sha256(out, ck, 32, &two, 1); sig_cp(ck, out, 32); sig_zero(out, 32); }
 
 /* root.CreateChain: root', chain = HKDF(DH(our, their), salt root, "WhisperRatchet", 64); one ladder */
 static void root_create_chain(uint8_t root[32], uint8_t chain[32], const uint8_t our_priv[32], const uint8_t their_pub[32])
@@ -56,8 +56,8 @@ static void root_create_chain(uint8_t root[32], uint8_t chain[32], const uint8_t
     uint8_t dh[32], out[64];
     x25519_ref(dh, our_priv, their_pub);
     hkdf_sha256(out, 64, root, 32, dh, 32, info_ratchet, 14);
-    cp(root, out, 32); cp(chain, out + 32, 32);
-    zero(dh, 32); zero(out, 64);
+    sig_cp(root, out, 32); sig_cp(chain, out + 32, 32);
+    sig_zero(dh, 32); sig_zero(out, 64);
 }
 
 /* X3DH master secret -> root, chain (ratchet.CalculateSenderSession / CalculateReceiverSession) */
@@ -65,17 +65,17 @@ static void x3dh_derive(uint8_t root[32], uint8_t chain[32], const uint8_t dh1[3
 {
     uint8_t master[160], out[64]; uint32_t i, n = 32;
     for (i = 0; i < 32; i++) master[i] = 0xff;           /* discontinuity bytes */
-    cp(master + n, dh1, 32); n += 32; cp(master + n, dh2, 32); n += 32; cp(master + n, dh3, 32); n += 32;
-    if (dh4) { cp(master + n, dh4, 32); n += 32; }
+    sig_cp(master + n, dh1, 32); n += 32; sig_cp(master + n, dh2, 32); n += 32; sig_cp(master + n, dh3, 32); n += 32;
+    if (dh4) { sig_cp(master + n, dh4, 32); n += 32; }
     hkdf_sha256(out, 64, 0, 0, master, n, info_text, 11);
-    cp(root, out, 32); cp(chain, out + 32, 32);
-    zero(master, sizeof master); zero(out, 64);
+    sig_cp(root, out, 32); sig_cp(chain, out + 32, 32);
+    sig_zero(master, sizeof master); sig_zero(out, 64);
 }
 
 static void keygen(const sig_local *me, uint8_t priv[32], uint8_t pub[32])
 {
     me->random(me->rctx, priv, 32);
-    clamp(priv);
+    sig_clamp(priv);
     x25519_base_comb(pub, priv);
 }
 
@@ -90,17 +90,17 @@ static int bytes_child(const wab_node *n, const char *tag, uint32_t want, uint8_
 {
     uint32_t l; const uint8_t *p = node_bytes(wab_get_child(n, tag), &l);
     if (!p || l != want) return 0;
-    cp(dst, p, want);
+    sig_cp(dst, p, want);
     return 1;
 }
 
 int sig_bundle_from_node(sig_bundle *b, const wab_node *user)
 {
     const wab_node *keys, *skey, *key; uint8_t tmp[4];
-    zero(b, sizeof *b);
+    sig_zero(b, sizeof *b);
     if (!user || wab_get_child(user, "error")) return 0;
     if (!bytes_child(user, "registration", 4, tmp)) return 0;
-    b->reg_id = rd32(tmp);
+    b->reg_id = sig_rd32(tmp);
     keys = wab_get_child(user, "keys"); if (!keys) keys = user;
     if (!bytes_child(keys, "identity", 32, b->ident)) return 0;
     skey = wab_get_child(keys, "skey");
@@ -116,20 +116,20 @@ int sig_bundle_from_node(sig_bundle *b, const wab_node *user)
 }
 
 /* ---- session setup --------------------------------------------------------------------------------- */
-void sig_session_init(sig_session *s) { zero(s, sizeof *s); }
+void sig_session_init(sig_session *s) { sig_zero(s, sizeof *s); }
 int  sig_session_has_state(const sig_session *s) { return s->cur.valid != 0; }
 
 static void archive(sig_session *s)
 {
     if (s->cur.valid) { s->prev = s->cur; s->has_prev = 1; }
-    zero(&s->cur, sizeof s->cur);
+    sig_zero(&s->cur, sizeof s->cur);
 }
 
 int sig_session_start(sig_session *s, const sig_local *me, const sig_bundle *b)
 {
     uint8_t m[33], base_priv[32], base_pub[32], r_priv[32], r_pub[32], dh1[32], dh2[32], dh3[32], dh4[32], root[32], chain[32];
     sig_state *st;
-    m[0] = 0x05; cp(m + 1, b->spk, 32);
+    m[0] = 0x05; sig_cp(m + 1, b->spk, 32);
     if (!xeddsa_verify(b->spk_sig, m, 33, b->ident)) return SIG_ERR_SIGNATURE;
     keygen(me, base_priv, base_pub);
     x25519_ref(dh1, me->ident_priv, b->spk);            /* DH(I_a, SPK_b) */
@@ -141,15 +141,15 @@ int sig_session_start(sig_session *s, const sig_local *me, const sig_bundle *b)
     archive(s);
     st = &s->cur;
     st->valid = 1;
-    cp(st->local_ident, me->ident_pub, 32); cp(st->remote_ident, b->ident, 32);
+    sig_cp(st->local_ident, me->ident_pub, 32); sig_cp(st->remote_ident, b->ident, 32);
     st->local_regid = me->reg_id; st->remote_regid = b->reg_id;
-    cp(st->recv[0].ratchet_pub, b->spk, 32); cp(st->recv[0].ck, chain, 32); st->recv[0].index = 0; st->n_recv = 1;
-    cp(st->root, root, 32);
+    sig_cp(st->recv[0].ratchet_pub, b->spk, 32); sig_cp(st->recv[0].ck, chain, 32); st->recv[0].index = 0; st->n_recv = 1;
+    sig_cp(st->root, root, 32);
     root_create_chain(st->root, st->send_ck, r_priv, b->spk);
-    cp(st->send_priv, r_priv, 32); cp(st->send_pub, r_pub, 32); st->send_index = 0; st->prev_counter = 0;
-    st->has_pending = 1; st->pend_opk_id = b->has_opk ? b->opk_id : 0; st->pend_spk_id = b->spk_id; cp(st->pend_base_pub, base_pub, 32);
-    cp(st->base_key, base_pub, 32);
-    zero(base_priv, 32); zero(r_priv, 32); zero(dh1, 32); zero(dh2, 32); zero(dh3, 32); zero(dh4, 32); zero(root, 32); zero(chain, 32);
+    sig_cp(st->send_priv, r_priv, 32); sig_cp(st->send_pub, r_pub, 32); st->send_index = 0; st->prev_counter = 0;
+    st->has_pending = 1; st->pend_opk_id = b->has_opk ? b->opk_id : 0; st->pend_spk_id = b->spk_id; sig_cp(st->pend_base_pub, base_pub, 32);
+    sig_cp(st->base_key, base_pub, 32);
+    sig_zero(base_priv, 32); sig_zero(r_priv, 32); sig_zero(dh1, 32); sig_zero(dh2, 32); sig_zero(dh3, 32); sig_zero(dh4, 32); sig_zero(root, 32); sig_zero(chain, 32);
     return SIG_OK;
 }
 
@@ -167,13 +167,13 @@ int sig_encrypt(sig_session *s, const sig_local *me, const uint8_t *pt, uint32_t
     pad = 16 - (len & 15); blen = len + pad;
     if (blen > SIG_BODY_MAX) return SIG_ERR_BUFFER;
     chain_message_keys(st->send_ck, ckey, mkey, iv);
-    cp(body_pt, pt, len); for (i = len; i < blen; i++) body_pt[i] = (uint8_t)pad;     /* PKCS#7 */
+    sig_cp(body_pt, pt, len); for (i = len; i < blen; i++) body_pt[i] = (uint8_t)pad;     /* PKCS#7 */
     aes_set_key(&ak, ckey, 256);
     aes_cbc_encrypt(&ak, iv, body_pt, blen, body_ct);
     /* SignalMessage: version byte, protobuf, 8-byte MAC */
     inner[0] = (uint8_t)((SIG_VERSION << 4) | SIG_VERSION);
     pb_w_init(&w, inner + 1, sizeof inner - 1);
-    key33[0] = 0x05; cp(key33 + 1, st->send_pub, 32);
+    key33[0] = 0x05; sig_cp(key33 + 1, st->send_pub, 32);
     pb_w_bytes(&w, 1, key33, 33);
     pb_w_uint(&w, 2, st->send_index);
     pb_w_uint(&w, 3, st->prev_counter);
@@ -184,15 +184,15 @@ int sig_encrypt(sig_session *s, const sig_local *me, const uint8_t *pt, uint32_t
     mac_update_ident(&hc, st->local_ident); mac_update_ident(&hc, st->remote_ident);
     hmac_sha256_update(&hc, inner, n);
     hmac_sha256_final(&hc, ckey);                         /* ckey reused as scratch for the full MAC */
-    cp(inner + n, ckey, SIG_MAC_LEN); n += SIG_MAC_LEN;
+    sig_cp(inner + n, ckey, SIG_MAC_LEN); n += SIG_MAC_LEN;
     if (st->has_pending) {
         /* PreKeySignalMessage around it */
         if (cap < 1) return SIG_ERR_BUFFER;
         out[0] = inner[0];
         pb_w_init(&w, out + 1, cap - 1);
         if (st->pend_opk_id) pb_w_uint(&w, 1, st->pend_opk_id);
-        key33[0] = 0x05; cp(key33 + 1, st->pend_base_pub, 32); pb_w_bytes(&w, 2, key33, 33);
-        key33[0] = 0x05; cp(key33 + 1, st->local_ident, 32);   pb_w_bytes(&w, 3, key33, 33);
+        key33[0] = 0x05; sig_cp(key33 + 1, st->pend_base_pub, 32); pb_w_bytes(&w, 2, key33, 33);
+        key33[0] = 0x05; sig_cp(key33 + 1, st->local_ident, 32);   pb_w_bytes(&w, 3, key33, 33);
         pb_w_bytes(&w, 4, inner, n);
         pb_w_uint(&w, 5, st->local_regid);
         pb_w_uint(&w, 6, st->pend_spk_id);
@@ -200,10 +200,10 @@ int sig_encrypt(sig_session *s, const sig_local *me, const uint8_t *pt, uint32_t
         *outlen = 1 + w.len; *is_pkmsg = 1;
     } else {
         if (cap < n) return SIG_ERR_BUFFER;
-        cp(out, inner, n); *outlen = n;
+        sig_cp(out, inner, n); *outlen = n;
     }
     chain_next(st->send_ck); st->send_index++;
-    zero(ckey, 32); zero(mkey, 32); zero(iv, 16); zero(body_pt, blen); zero(&ak, sizeof ak);
+    sig_zero(ckey, 32); sig_zero(mkey, 32); sig_zero(iv, 16); sig_zero(body_pt, blen); sig_zero(&ak, sizeof ak);
     return SIG_OK;
 }
 
@@ -213,7 +213,7 @@ typedef struct { const uint8_t *ratchet; uint32_t counter, prev; const uint8_t *
 static int parse_message(const uint8_t *in, uint32_t len, sig_msg *m)
 {
     const uint8_t *p, *end, *d; uint32_t f, wire, v, l;
-    zero(m, sizeof *m);
+    sig_zero(m, sizeof *m);
     if (len < 1 + SIG_MAC_LEN + 2) return SIG_ERR_FORMAT;
     if ((in[0] >> 4) != SIG_VERSION) return SIG_ERR_VERSION;
     p = in + 1; end = in + len - SIG_MAC_LEN;
@@ -249,7 +249,7 @@ static void push_skipped(sig_state *st, const uint8_t *pub, uint32_t counter, co
     sig_skipped_key *k;
     if (st->n_skipped == SIG_SKIPPED) { uint32_t j; for (j = 1; j < SIG_SKIPPED; j++) st->skipped[j - 1] = st->skipped[j]; st->n_skipped--; }
     k = &st->skipped[st->n_skipped++];
-    cp(k->ratchet_pub, pub, 32); k->counter = counter;
+    sig_cp(k->ratchet_pub, pub, 32); k->counter = counter;
     chain_message_keys(ck, k->cipher, k->mac, k->iv);
 }
 
@@ -267,17 +267,17 @@ static int decrypt_with_state(sig_state *st, const sig_local *me, const uint8_t 
         keygen(me, np, npub);
         if (st->n_recv == SIG_RECV_CHAINS) { drop_skipped_of(st, st->recv[0].ratchet_pub); for (i = 1; i < SIG_RECV_CHAINS; i++) st->recv[i - 1] = st->recv[i]; st->n_recv--; }
         ch = &st->recv[st->n_recv++];
-        cp(ch->ratchet_pub, m.ratchet, 32); cp(ch->ck, rck, 32); ch->index = 0;
+        sig_cp(ch->ratchet_pub, m.ratchet, 32); sig_cp(ch->ck, rck, 32); ch->index = 0;
         st->prev_counter = st->send_index - 1;      /* libsignal-go: max(index-1, 0) on uint32 wraps to 0xFFFFFFFF for a fresh chain */
         root_create_chain(st->root, st->send_ck, np, m.ratchet);
-        cp(st->send_priv, np, 32); cp(st->send_pub, npub, 32); st->send_index = 0;
-        zero(rck, 32); zero(np, 32);
+        sig_cp(st->send_priv, np, 32); sig_cp(st->send_pub, npub, 32); st->send_index = 0;
+        sig_zero(rck, 32); sig_zero(np, 32);
     }
     /* message keys (getOrCreateMessageKeys) */
     if (ch->index > m.counter) {
         for (i = 0; i < st->n_skipped; i++) if (st->skipped[i].counter == m.counter && ct_eq(st->skipped[i].ratchet_pub, m.ratchet, 32)) break;
         if (i == st->n_skipped) return SIG_ERR_OLD_COUNTER;
-        cp(ckey, st->skipped[i].cipher, 32); cp(mkey, st->skipped[i].mac, 32); cp(iv, st->skipped[i].iv, 16);
+        sig_cp(ckey, st->skipped[i].cipher, 32); sig_cp(mkey, st->skipped[i].mac, 32); sig_cp(iv, st->skipped[i].iv, 16);
         for (i = i + 1; i < st->n_skipped; i++) st->skipped[i - 1] = st->skipped[i];
         st->n_skipped--;
     } else {
@@ -292,15 +292,15 @@ static int decrypt_with_state(sig_state *st, const sig_local *me, const uint8_t 
     hmac_sha256_update(&hc, in, len - SIG_MAC_LEN);
     hmac_sha256_final(&hc, mac);
     r = ct_eq(mac, in + len - SIG_MAC_LEN, SIG_MAC_LEN) ? SIG_OK : SIG_ERR_MAC;
-    zero(mac, 32); zero(mkey, 32);
-    if (r != SIG_OK) { zero(ckey, 32); return r; }
-    if (m.ctlen > cap) { zero(ckey, 32); return SIG_ERR_BUFFER; }
+    sig_zero(mac, 32); sig_zero(mkey, 32);
+    if (r != SIG_OK) { sig_zero(ckey, 32); return r; }
+    if (m.ctlen > cap) { sig_zero(ckey, 32); return SIG_ERR_BUFFER; }
     aes_set_key(&ak, ckey, 256);
     aes_cbc_decrypt(&ak, iv, m.ct, m.ctlen, pt);
-    zero(ckey, 32); zero(&ak, sizeof ak);
+    sig_zero(ckey, 32); sig_zero(&ak, sizeof ak);
     pad = pt[m.ctlen - 1];
-    if (pad == 0 || pad > 16 || pad > m.ctlen) { zero(pt, m.ctlen); return SIG_ERR_PADDING; }
-    for (i = 0; i < pad; i++) if (pt[m.ctlen - 1 - i] != pad) { zero(pt, m.ctlen); return SIG_ERR_PADDING; }
+    if (pad == 0 || pad > 16 || pad > m.ctlen) { sig_zero(pt, m.ctlen); return SIG_ERR_PADDING; }
+    for (i = 0; i < pad; i++) if (pt[m.ctlen - 1 - i] != pad) { sig_zero(pt, m.ctlen); return SIG_ERR_PADDING; }
     *ptlen = m.ctlen - pad;
     st->has_pending = 0;                                    /* ClearUnackPreKeyMessage */
     return SIG_OK;
@@ -311,7 +311,7 @@ typedef struct { uint32_t opk_id, reg_id, spk_id; const uint8_t *base, *ident, *
 static int parse_pkmsg(const uint8_t *in, uint32_t len, sig_pkmsg *m)
 {
     const uint8_t *p, *end, *d; uint32_t f, wire, v, l;
-    zero(m, sizeof *m);
+    sig_zero(m, sizeof *m);
     if (len < 2) return SIG_ERR_FORMAT;
     if ((in[0] >> 4) != SIG_VERSION) return SIG_ERR_VERSION;
     p = in + 1; end = in + len;
@@ -354,13 +354,13 @@ int sig_decrypt(sig_session *s, const sig_local *me, int is_pkmsg, const uint8_t
             archive(s);
             st = &s->cur;
             st->valid = 1;
-            cp(st->local_ident, me->ident_pub, 32); cp(st->remote_ident, pk.ident, 32);
+            sig_cp(st->local_ident, me->ident_pub, 32); sig_cp(st->remote_ident, pk.ident, 32);
             st->local_regid = me->reg_id; st->remote_regid = pk.reg_id;
-            cp(st->root, root, 32);
-            cp(st->send_priv, me->spk_priv, 32); cp(st->send_pub, me->spk_pub, 32); cp(st->send_ck, chain, 32); st->send_index = 0; st->prev_counter = 0;
-            cp(st->base_key, pk.base, 32);
+            sig_cp(st->root, root, 32);
+            sig_cp(st->send_priv, me->spk_priv, 32); sig_cp(st->send_pub, me->spk_pub, 32); sig_cp(st->send_ck, chain, 32); st->send_index = 0; st->prev_counter = 0;
+            sig_cp(st->base_key, pk.base, 32);
             opk_used = pk.opk_id;
-            zero(dh1, 32); zero(dh2, 32); zero(dh3, 32); zero(dh4, 32); zero(root, 32); zero(chain, 32);
+            sig_zero(dh1, 32); sig_zero(dh2, 32); sig_zero(dh3, 32); sig_zero(dh4, 32); sig_zero(root, 32); sig_zero(chain, 32);
         }
         inner_p = pk.msg; inner_len = pk.msg_len;
     }
@@ -370,7 +370,7 @@ int sig_decrypt(sig_session *s, const sig_local *me, int is_pkmsg, const uint8_t
     if (r == SIG_OK) {
         s->cur = work;
         if (opk_used && me->prekeys) { wa_prekeys_remove(me->prekeys, opk_used); *used_opk_id = opk_used; }
-        zero(&work, sizeof work);
+        sig_zero(&work, sizeof work);
         return SIG_OK;
     }
     if (r != SIG_ERR_OLD_COUNTER && s->has_prev && s->prev.valid && !fresh) {
@@ -378,16 +378,16 @@ int sig_decrypt(sig_session *s, const sig_local *me, int is_pkmsg, const uint8_t
         int r2;
         work = s->prev;
         r2 = decrypt_with_state(&work, me, inner_p, inner_len, pt, cap, ptlen);
-        if (r2 == SIG_OK) { s->prev = s->cur; s->cur = work; zero(&work, sizeof work); return SIG_OK; }
+        if (r2 == SIG_OK) { s->prev = s->cur; s->cur = work; sig_zero(&work, sizeof work); return SIG_OK; }
         if (r2 == SIG_ERR_OLD_COUNTER) r = r2;
     }
-    if (fresh) { *s = backup; zero(&backup, sizeof backup); }   /* the new state is not kept when its first message fails */
-    zero(&work, sizeof work);
+    if (fresh) { *s = backup; sig_zero(&backup, sizeof backup); }   /* the new state is not kept when its first message fails */
+    sig_zero(&work, sizeof work);
     return r;
 }
 
 /* ---- store ------------------------------------------------------------------------------------------- */
-void sig_store_init(sig_store *st) { zero(st, sizeof *st); }
+void sig_store_init(sig_store *st) { sig_zero(st, sizeof *st); }
 
 static int user_eq(const char *a, const char *b) { uint32_t i; for (i = 0; i < SIG_USER_MAX; i++) { if (a[i] != b[i]) return 0; if (!a[i]) return 1; } return 1; }
 
@@ -398,17 +398,17 @@ sig_session *sig_store_get(sig_store *st, const char *user, uint32_t device, int
     if (!create) return 0;
     if (st->n < SIG_STORE_MAX) idx = st->n++;
     else for (i = 0; i < st->n; i++) if (st->e[i].stamp < best) { best = st->e[i].stamp; idx = i; }
-    zero(&st->e[idx], sizeof st->e[idx]);
+    sig_zero(&st->e[idx], sizeof st->e[idx]);
     for (i = 0; i < SIG_USER_MAX - 1 && user[i]; i++) st->e[idx].user[i] = user[i];
     st->e[idx].device = device; st->e[idx].lid = lid ? 1 : 0; st->e[idx].stamp = ++st->stamp;
     return &st->e[idx].s;
 }
 
-typedef struct { uint8_t *p; uint32_t o; } wcur;
-static void w8(wcur *c, uint32_t v) { c->p[c->o++] = (uint8_t)v; }
-static void w32(wcur *c, uint32_t v) { be32(c->p + c->o, v); c->o += 4; }
-static void wb(wcur *c, const uint8_t *s, uint32_t n) { cp(c->p + c->o, s, n); c->o += n; }
-static void write_state(wcur *c, const sig_state *s)
+typedef struct { uint8_t *p; uint32_t o; } sig_wcur;
+static void w8(sig_wcur *c, uint32_t v) { c->p[c->o++] = (uint8_t)v; }
+static void w32(sig_wcur *c, uint32_t v) { sig_be32(c->p + c->o, v); c->o += 4; }
+static void wb(sig_wcur *c, const uint8_t *s, uint32_t n) { sig_cp(c->p + c->o, s, n); c->o += n; }
+static void write_state(sig_wcur *c, const sig_state *s)
 {
     uint32_t i;
     w8(c, s->valid); w8(c, s->has_pending); wb(c, s->local_ident, 32); wb(c, s->remote_ident, 32); w32(c, s->local_regid); w32(c, s->remote_regid);
@@ -417,11 +417,11 @@ static void write_state(wcur *c, const sig_state *s)
     w32(c, s->n_skipped); for (i = 0; i < SIG_SKIPPED; i++) { const sig_skipped_key *k = &s->skipped[i]; wb(c, k->ratchet_pub, 32); w32(c, k->counter); wb(c, k->cipher, 32); wb(c, k->mac, 32); wb(c, k->iv, 16); }
     w32(c, s->pend_opk_id); w32(c, s->pend_spk_id); wb(c, s->pend_base_pub, 32); wb(c, s->base_key, 32);
 }
-typedef struct { const uint8_t *p; uint32_t o; } rcur;
-static uint32_t r8(rcur *c) { return c->p[c->o++]; }
-static uint32_t r32(rcur *c) { uint32_t v = rd32(c->p + c->o); c->o += 4; return v; }
-static void rb(rcur *c, uint8_t *d, uint32_t n) { cp(d, c->p + c->o, n); c->o += n; }
-static int read_state(rcur *c, sig_state *s)
+typedef struct { const uint8_t *p; uint32_t o; } sig_rcur;
+static uint32_t r8(sig_rcur *c) { return c->p[c->o++]; }
+static uint32_t r32(sig_rcur *c) { uint32_t v = sig_rd32(c->p + c->o); c->o += 4; return v; }
+static void rb(sig_rcur *c, uint8_t *d, uint32_t n) { sig_cp(d, c->p + c->o, n); c->o += n; }
+static int read_state(sig_rcur *c, sig_state *s)
 {
     uint32_t i;
     s->valid = (uint8_t)r8(c); s->has_pending = (uint8_t)r8(c); rb(c, s->local_ident, 32); rb(c, s->remote_ident, 32); s->local_regid = r32(c); s->remote_regid = r32(c);
@@ -434,7 +434,7 @@ static int read_state(rcur *c, sig_state *s)
 
 uint32_t sig_store_write(uint8_t *out, uint32_t cap, const sig_store *st)
 {
-    wcur c; uint32_t i, size = SIG_STORE_SIZE(st->n);
+    sig_wcur c; uint32_t i, size = SIG_STORE_SIZE(st->n);
     if (st->n > SIG_STORE_MAX || cap < size) return 0;
     c.p = out; c.o = 0;
     w8(&c, 1); w32(&c, st->n); w32(&c, st->stamp);
@@ -450,10 +450,10 @@ uint32_t sig_store_write(uint8_t *out, uint32_t cap, const sig_store *st)
 
 int sig_store_read(sig_store *st, const uint8_t *in, uint32_t len)
 {
-    rcur c; uint8_t h[32]; uint32_t i, n;
+    sig_rcur c; uint8_t h[32]; uint32_t i, n;
     sig_store_init(st);
     if (len < SIG_STORE_SIZE(0) || in[0] != 1) return 0;
-    n = rd32(in + 1);
+    n = sig_rd32(in + 1);
     if (n > SIG_STORE_MAX || len != SIG_STORE_SIZE(n)) return 0;
     sha256(h, in, len - 32);
     if (!ct_eq(h, in + len - 32, 32)) return 0;
