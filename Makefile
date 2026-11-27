@@ -226,7 +226,7 @@ build/amiga/wa_probe: bench/amiga/startup_probe.s build/amiga/wa_probe.s crypto/
 
 amiga-probe: build/amiga/wa_probe
 
-run-probe: build/amiga/wa_probe build/amiga/utility.library
+run-probe: build/amiga/wa_probe build/amiga/utility.library build/amiga/sana2_hold
 	GAP=$(GAP) tools/run-fsuae-net.sh $< 600
 
 # utility.library V37 for Kickstart 1.3 (tools/amiga/utility13.*): 2.0-era SANA-II drivers (a2065.device) need it
@@ -262,6 +262,15 @@ build/amiga/sana2_probe: bench/amiga/startup.s build/amiga/sana2_probe.s
 	$(VASM) $(VASMFLAGS) -o $@ build/amiga/startup_sana2_probe.s
 
 sana2-probe: build/amiga/sana2_probe
+
+# holder: configures the interface with its ROM address and keeps the device open (NET_HOLD=1 in the run script)
+build/amiga/sana2_hold.s: tools/amiga/sana2_hold.c
+	@mkdir -p build/amiga
+	$(VC) $(VCFLAGS) $< -o=$@
+
+build/amiga/sana2_hold: bench/amiga/startup.s build/amiga/sana2_hold.s
+	sed 's#build/amiga/x25519bench.s#build/amiga/sana2_hold.s#' bench/amiga/startup.s > build/amiga/startup_sana2_hold.s
+	$(VASM) $(VASMFLAGS) -o $@ build/amiga/startup_sana2_hold.s
 
 run-sana2: build/amiga/sana2_probe build/amiga/utility.library
 	NET_NOSTACK=1 tools/run-fsuae-net.sh $< 120

@@ -42,6 +42,9 @@ cp "$WIRE/c/TheWire13" "$WIRE/c/mini_ping" "$WIRE/c/mini_ntp" "$WIRE/c/mini_nslo
 cp "$WIRE/libs/bsdsocket.library" "$DH0/Libs/"
 # utility.library V37 for 1.3 (make utility13): the a2065.device opens it at init time
 [ -f "$ROOT/build/amiga/utility.library" ] && cp "$ROOT/build/amiga/utility.library" "$DH0/Libs/"
+[ -f "$ROOT/build/amiga/sana2_hold" ] && cp "$ROOT/build/amiga/sana2_hold" "$DH0/C/sana2hold"
+NET_HOLD=${NET_HOLD:-0}        # 1: configure the interface with its ROM address first and keep it open (sana2hold)
+HOLD_LINE=""; [ "$NET_HOLD" = 1 ] && HOLD_LINE='run >NIL: C:sana2hold\nwait 3\n'
 cp "$A2065DEV" "$DH0/Devs/Networks/a2065.device"
 # slirp: guest 10.0.2.15/24, gateway 10.0.2.2, DNS 10.0.2.3 (static; the same addresses come via DHCP with NET_DHCP=1)
 cat > "$DH0/S/thewire13.conf" <<EOF
@@ -70,7 +73,7 @@ printf '%s' "$GAP" > "$DH0/gap.txt"
 # the redirection after the command name belongs to the started program (its banner, DHCP and SANA messages),
 # the one after Run only to Run's own "[CLI 2]" line
 if [ "${NET_NOSTACK:-0}" = 1 ]; then printf 'stack %s\ntest\nendcli\n' "$NET_STACK" > "$DH0/S/Startup-Sequence"   # driver tests without the stack
-else printf 'stack %s\nrun >NIL: C:TheWire13 >SYS:stack.log\nwait %s\ntest\nendcli\n' "$NET_STACK" "$NET_WAIT" > "$DH0/S/Startup-Sequence"; fi
+else printf "stack %s\n${HOLD_LINE}run >NIL: C:TheWire13 >SYS:stack.log\nwait %s\ntest\nendcli\n" "$NET_STACK" "$NET_WAIT" > "$DH0/S/Startup-Sequence"; fi
 
 "$FSUAE" "$HERE/fsuae/a500-1mb-fast-net.fs-uae" \
     --floppy_drive_0= \
@@ -84,6 +87,7 @@ while [ $i -lt "$TIMEOUT" ]; do
   sleep 1; i=$((i+1))
 done
 kill $PID 2>/dev/null || true
+[ -f "$DH0/sana2hold.log" ] && { echo "--- SYS:sana2hold.log ---"; cat "$DH0/sana2hold.log"; }
 echo "--- SYS:stack.log ---"
 cat "$DH0/stack.log" 2>/dev/null || echo "(no stack.log)"
 echo "--- SYS:result.txt after ${i}s ---"

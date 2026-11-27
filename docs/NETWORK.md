@@ -55,6 +55,10 @@ Im Log: `set option "a2065" to "slirp"`, `A2065: 'slirp' 00:00:00:32:33:34`, `Ca
 
 Treiber: TheWire13 liefert keinen `a2065.device`. Aminet `driver/net/a2065v216a.lha` (Steve Lemieux, 1998, 5 182 Bytes, „a2065 2.16a (4.3.98)“, Commodore-Treiber v2.16 mit Ethernet-Framing-Fix) kommt nach `DEVS:Networks/a2065.device`. Beide Archive liegen entpackt unter `build/thewire13/` und `build/a2065dev/` (nicht im Repository; Freeware-Binaries Dritter, von aminet.net geladen).
 
+**utility.library für 1.3.** Der a2065.device öffnet beim Init `utility.library` (ab Kickstart 2.0 im ROM, unter 1.3 nicht vorhanden): `OpenDevice` scheiterte mit rc −1, TheWire13 meldete „SANA open failed“. `tools/amiga/utility13.c` + `utility13.s` bauen deshalb `LIBS:utility.library` 37.0 (RTF_AUTOINIT-Romtag, Open/Close/Expunge; alle öffentlichen V36/V37/V39-Funktionen: Tag-Listen, `CallHookPkt`, `Amiga2Date`/`Date2Amiga`/`CheckDate`, `SMult32`/`UMult32`/`SDivMod32`/`UDivMod32`, `Stricmp`/`Strnicmp`/`ToUpper`/`ToLower`, `ApplyTagChanges`, `SMult64`/`UMult64`, `GetUniqueID`; `PackStructureTags` und die Named-Object-Funktionen liefern 0). `make utility13-test` prüft 32 Ergebnisse unter vamos (`-O utility.library=mode:amiga`, sonst nimmt vamos seine eigene Nachbildung, deren `NextTagItem` und `UMult64` falsch rechnen). Mit der Bibliothek öffnet der Treiber (rc 0) und `S2_DEVICEQUERY` antwortet; dasselbe hilft jedem anderen 2.0-Treiber, den ein Nutzer einbinden will.
+
+Werkzeuge daneben: `tools/amiga/sana2_probe.c` (`make run-sana2`) spricht den SANA-II-Treiber ohne Stack an – `S2_DEVICEQUERY`, `S2_GETSTATIONADDRESS`, `S2_CONFIGINTERFACE` mit drei Kandidatenadressen, `S2_ONLINE`, eine ARP-Anfrage an das slirp-Gateway 10.0.2.2 und die Antwort über `CMD_READ` –, `tools/amiga/sana2_hold.c` (`NET_HOLD=1`) konfiguriert die Schnittstelle mit ihrer ROM-Adresse und hält das Gerät offen.
+
 Nicht gangbar: FS-UAEs eingebautes `uaenet.device` (im Binary vorhanden, bräuchte pcap; unter macOS/slirp nicht nutzbar), plipbox (Parallelport-Hardware, nicht emuliert), NE2000/PCMCIA (nur A600/A1200). vamos (amitools) emuliert eine `bsdsocket.library` v4 auf dem Host-Netz – kein Stack, kein SANA-II, aber ein schneller Funktionstest des Amiga-Binaries (`make vamos-probe`).
 
 Boot ohne Workbench: Kickstart 1.3 hat keine residenten `C:`-Kommandos; `tools/run-fsuae-net.sh` holt `Run` und `Wait` mit `xdftool` von der Workbench-1.3-Diskette des Nutzers und baut DH0:
@@ -96,6 +100,20 @@ Ziele: `make amiga-probe` (Binary 178 KiB), `make run-probe GAP=0` (FS-UAE, Minu
 ## 4. Ergebnisse
 
 Siehe docs/BENCHMARKS.md Schritt 17.
+
+### SANA-II-Treiber allein (FS-UAE, `make run-sana2`, 2026-11-27)
+
+```text
+sana: OpenDevice -> 0, device a2065.device version 2.16
+sana: S2_DEVICEQUERY -> 0: AddrFieldSize 48 bits, MTU 1500, BPS 10000000, HardwareType 1 (Ethernet)
+sana: S2_GETSTATIONADDRESS: current ff:ff:ff:ff:ff:ff, default (ROM) 00:80:10:32:33:34
+sana: S2_CONFIGINTERFACE (default address) -> 0; danach current 00:80:10:32:33:34
+sana: S2_ONLINE -> io_Error 3, WireError 12 (S2WERR_UNIT_ONLINE: CONFIGINTERFACE hat die Einheit schon online gebracht)
+sana: CMD_WRITE ARP request (broadcast) -> 0
+sana: CMD_READ ARP reply nach 0 ms: 50 Bytes von 52:55:0a:00:02:02 = 10.0.2.2 (slirp-Gateway)
+```
+
+Damit ist der Weg Kickstart 1.3 → a2065.device (mit unserer utility.library) → emulierte LANCE → slirp → Host-Netz bewiesen. TheWire13 scheitert an `S2_CONFIGINTERFACE` mit `S2ERR_BAD_ADDRESS`, weil es die *aktuelle* Adresse der noch unkonfigurierten Einheit (ff:ff:ff:ff:ff:ff, Broadcast) statt der Default-Adresse aus `ios2_DstAddr` einträgt; AmiTCP und Roadshow nehmen die Default-Adresse. Umgehung ohne Quelltext: `sana2hold` konfiguriert die Einheit vorher mit der ROM-Adresse und hält das Gerät offen (`NET_HOLD=1`).
 
 ### vamos (Musashi-68000, vamos' eigene bsdsocket.library v4 auf dem Host-Netz)
 
