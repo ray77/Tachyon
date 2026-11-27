@@ -102,6 +102,23 @@ Fehler auf dem Weg: Tabellen-Shift der Zählerbits 6..31 um n statt n−6 (Host-
 
 Was noch ginge (nicht umgesetzt): 96 Nonce-Lanes vom Copper füllen statt von der CPU (−10 ms je Batch), MIX-Liste frei laufen lassen mit Schlüssel-Patch im Schatten der SBOX-Liste (−14 Neustarts, Risiko bei Verdrängung der CPU), Display-DMA-Anteil je Lauf messen. Größerer Hebel bleibt die Gatterzahl der S-Box (Abschnitt 5).
 
+## 2d. S-Box: Gatter in 3-Eingangs-Minterme gefaltet – umgesetzt und gemessen (27.11., mittags)
+
+**Ergebnis: Kette 2,10 → 1,83 s je 16 KiB (−13 %), AES-GCM im Dauerbetrieb 10,3 → 11,0 KB/s (verschlüsseln) und 10,4 → 11,4 KB/s (entschlüsseln), 64 KiB 9,3 → 10,2 KB/s, Blitter allein 7,0 → 8,0 KB/s. Bitgenau (Host 168 Fälle + blitaes-Test, FS-UAE Lauf 4 alle PASS).**
+
+Hebel: Der Blitter rechnet jede Boolesche Funktion dreier Quellen (Minterm-Register) zum Preis von 4 Buszyklen je Wort, eine Zwei-Quellen-Funktion kostet 3. Im Boyar–Peralta-Netz (113 Gatter: 77 XOR, 32 AND, 4 XNOR) haben 48 Zwischenwerte Fanout 1. Ein solches Gatter wird in seinen einzigen Verbraucher gefaltet – zwei Blits à 3 Zyklen werden einer à 4 –, solange die zusammengesetzte Funktion höchstens drei verschiedene Eingänge hat (gemeinsame Eingänge würden Ketten erlauben, kommen im Netz aber nicht vor). Jeder Knoten darf nur einmal beteiligt sein (falten oder gefaltet werden), sonst entstünden vier Eingänge; das Maximum ist ein Matching im Fanout-1-Wald, das die Gierstrategie von den Blättern her (topologische Reihenfolge) exakt findet: **31 Faltungen, 113 → 82 Blit-Paare (164 statt 226 Blits je Runde), Buszyklen je Wortspalte 339 → 277 (−18 %)**, Temporärpuffer 29 → 28, Copper-Liste SBOX 20 → 14,4 KiB. Die Minterme entstehen im Generator durch Auswerten des Ausdrucksbaums über alle acht Belegungen (`tools/blitaes/gen_blitaes.py`); die Blitter-Zuordnung A/B/C folgt der Reihenfolge des ersten Auftretens.
+
+| Lauf 4 (gefaltete S-Box) | vorher (Lauf 3) | jetzt |
+|---|---:|---:|
+| Copper-Kette je 16 KiB | 2,10 s | **1,83 s** |
+| 64 KiB: Blitter + GHASH, keine CPU-Blöcke | 7,0 KB/s | 8,0 KB/s |
+| 64 KiB: Blitter + GHASH + CPU-Eigenblöcke | 9,3 KB/s | 10,2 KB/s (XOR-Blit 10,3) |
+| 192 KiB in place, verschlüsseln | 10,3 KB/s | **11,0 KB/s** |
+| 192 KiB in place, entschlüsseln | 10,4 KB/s | **11,4 KB/s** |
+| CPU-Eigenblöcke je Kette (Dauerbetrieb) | ≈ 435 | ≈ 345 (kürzere Kette) |
+
+Lesart: Gemessen −13 % Kettenzeit bei −18 % S-Box-Zyklen – die S-Box war 80 % der Kette, MIX/FINAL/TOUT sind unverändert. Je 16 KiB bleiben jetzt ≈ 14 × 98 ms S-Box + 13 × 30 ms MIX. Die CPU verliert pro kürzerer Kette Eigenblöcke, netto trotzdem +7 % Durchsatz. Grenze dieses Hebels: ohne Faltung über drei Eingänge hinaus (der Blitter hat nur drei Quellen) bleiben 82 Operationen; ein Schaltnetz, das direkt auf 3-Eingangs-Gatter optimiert ist, wäre der nächste Schritt (Literatur kennt 2-Eingangs-Netze bis ≈ 108–113 Gatter; für 3-Eingangs-Basis gibt es keine bekannte Minimalschaltung – Suchproblem).
+
 ## 2a. Erste Rechnung (vor der Umsetzung)
 
 Anordnung: ein 16-Bit-Wort trägt dasselbe Bit derselben Bytes aus 16 Blöcken; eine S-Box-Gatteroperation über alle 16 Bytepositionen ist ein Blit über 16 Wörter je 16 Blöcke. Für 1024 Blöcke (16 KiB) also 1024-Wort-Blits à 2,06 ms (1,40 ms ohne Display). Boyar-Peralta-S-Box: 113 Gatter; MixColumns + AddRoundKey mit 3-Quellen-XOR ≈ 256 Blits; ShiftRows kostenlos (Adress-Umbenennung).
@@ -128,5 +145,5 @@ X25519/Ed25519 bestehen aus 16×16-Bit-Multiplikationen (MULU, 256 je Feldmultip
 * ~~Copper-gesteuerte Blit-Kette~~ umgesetzt: 6,9 KB/s bei 87 % freier CPU (Abschnitt 2b).
 * ~~CTR-Zählerblöcke direkt als Lanes erzeugen~~ umgesetzt (Abschnitt 2b/2c): 20 ms in Assembler statt Kopie + Transposition.
 * ~~AES-GCM-Bibliothek auf der Kette~~ umgesetzt: 10,3 KB/s (Abschnitt 2c).
-* Weniger Blitter-Zugriffe statt weniger Blits: S-Box-Gatter mit drei Eingängen (A^B^C, Minterm 0x96) statt Zweier-XOR-Ketten, MixColumns-Termteilung.
+* ~~Weniger Blitter-Zugriffe statt weniger Blits: S-Box-Gatter mit drei Eingängen~~ umgesetzt als Fanout-1-Faltung (Abschnitt 2d): −18 % S-Box-Zyklen, Kette −13 %. Offen: MixColumns-Termteilung, S-Box-Netz direkt für 3-Eingangs-Gatter suchen.
 * Echte Hardware: Blitter-Timing ist in FS-UAE zyklengenau modelliert, Chip-RAM-Konflikte mit Bitplane-DMA ebenfalls; eine Bestätigung auf dem A500 steht aus.

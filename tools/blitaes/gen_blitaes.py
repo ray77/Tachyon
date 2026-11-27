@@ -8,8 +8,8 @@ holds bit position (15 - k) of chunk q (i.e. byte 2q + (k >> 3), bit 7 - (k & 7)
 j numbered as the model/pack function define). So the AES lane for (bit b, row r, col c),
 byte index y = 4c+r: k = (y & 1)*8 + (7 - b), q = y >> 1, lane = 64 words at stride 16 bytes.
 
-Sections: WHITE (STATE ^= key pattern), TIN (transpose in), SBOX (113 gates x 2 blits of 512
-contiguous words), MIX (per lane, 1-word lines with modulo 14; round key through C with modulo -2),
+Sections: WHITE (STATE ^= key pattern), TIN (transpose in), SBOX (113 gates folded into 3-input
+minterms, 2 blits of 512 contiguous words each), MIX (per lane, 1-word lines with modulo 14; round key through C with modulo -2),
 FINAL (ShiftRows + key), TOUT (transpose out). Entry: con0, con1, a, b, c, d, amod, bmod, cmod, dmod,
 size, flags (1: c is a key lane -> add round*256). For DESC blits the pointers address the last word.
 """
@@ -21,9 +21,53 @@ STATE = 0
 SOUT = STATE + 16 * ROW
 TMP = SOUT + 16 * ROW
 gates = [l.split() for l in open(__file__.rsplit('/', 1)[0] + '/sbox113.txt') if l.strip()]
+
+# ---- fold gates into 3-input Blitter minterms --------------------------------------------------
+# A 2-input blit (A, B -> D) costs 3 bus cycles per word, a 3-input blit (A, B, C -> D) 4. A gate whose
+# output has fanout 1 is folded into its consumer when the composed function still has at most three
+# distinct inputs: two blits of 3 cycles become one of 4. Greedy from the leaves (topological order),
+# which is a maximum matching on the fanout-1 forest. S outputs are always materialised.
+fan = {}
+for op, o, a, b in gates:
+    for x in (a, b): fan[x] = fan.get(x, 0) + 1
+def leaves(e):
+    if isinstance(e, str): return [e]
+    r = []
+    for x in e[1:]:
+        for l in leaves(x):
+            if l not in r: r.append(l)
+    return r
+def ev(e, env):
+    if isinstance(e, str): return env[e]
+    op, x, y = e
+    u, v = ev(x, env), ev(y, env)
+    return {'XOR': u ^ v, 'XNOR': 1 - (u ^ v), 'AND': u & v}[op]
+expr = {}                                    # materialised node -> expression over materialised inputs
+order = []                                   # materialised nodes in topological order
+for op, o, a, b in gates:
+    e = (op, a, b)
+    for x in (a, b):
+        if x[0] == 't' and fan[x] == 1 and x in expr:
+            cand = (op, expr[x] if e[1] == x else e[1], expr[x] if e[2] == x else e[2])
+            if len(leaves(cand)) <= 3:
+                e = cand
+                order.remove(x); del expr[x]
+    expr[o] = e
+    order.append(o)
+folded = []                                  # (out, [inputs], lf)
+for o in order:
+    ins = leaves(expr[o])
+    lf = 0
+    for m in range(8):
+        env = {ins[i]: (m >> (2 - i)) & 1 for i in range(len(ins))}
+        if ev(expr[o], env): lf |= 1 << m
+    folded.append((o, ins, lf))
+sys.stderr.write('sbox: %d gates -> %d blit pairs (%d with 3 inputs); bus cycles per word-column %d -> %d\n' % (
+    len(gates), len(folded), sum(1 for f in folded if len(f[1]) == 3), 3 * len(gates), sum(1 + len(f[1]) for f in folded)))
+
 last = {}
-for i, (op, o, a, b) in enumerate(gates):
-    for x in (a, b): last[x] = i
+for i, (o, ins, lf) in enumerate(folded):
+    for x in ins: last[x] = i
 slot_of, free, nslots = {}, [], 0
 def alloc(w):
     global nslots
@@ -31,16 +75,16 @@ def alloc(w):
     if s == nslots: nslots += 1
     slot_of[w] = s
     return s
-plan = []
-for i, (op, o, a, b) in enumerate(gates):
+plan = []                                    # (lf, dst, [srcs])
+for i, (o, ins, lf) in enumerate(folded):
     srcs = []
-    for x in (a, b):
+    for x in ins:
         if x[0] == 'U': srcs.append(('state', 7 - int(x[1:])))
         elif x[0] == 'S': srcs.append(('sout', 7 - int(x[1:])))
         else: srcs.append(('tmp', slot_of[x]))
     dst = ('sout', 7 - int(o[1:])) if o[0] == 'S' else ('tmp', alloc(o))
-    plan.append((op, dst, srcs[0], srcs[1]))
-    for x in (a, b):
+    plan.append((lf, dst, srcs))
+    for x in ins:
         if x[0] == 't' and last[x] == i: free.append(slot_of[x])
 MIX = TMP + nslots * 2 * ROW                 # 2 scratch lanes, each 64 words at stride 16 -> reserve 2 KiB
 KEYS = MIX + 2 * ROW
@@ -89,9 +133,9 @@ def section_transpose(buf_a, buf_b):
     assert src == buf_a
 
 def section_sbox():
-    for op, dst, s0, s1 in plan:
+    for lf, dst, srcs in plan:
         for h in range(2):
-            blit(LF[op], half_addr(s0, h), half_addr(s1, h), None, half_addr(dst, h), S512)
+            blit(lf, half_addr(srcs[0], h), half_addr(srcs[1], h), half_addr(srcs[2], h) if len(srcs) > 2 else None, half_addr(dst, h), S512)
 
 def mix_terms(b, r):
     t = []

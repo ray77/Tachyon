@@ -253,3 +253,18 @@ Details in docs/CUSTOM-CHIPS.md Abschnitt 2c. A500/FS-UAE, AES-256-GCM, Puffer i
 Hypothese war 9–10 KB/s (Abschnitt 2b): bestätigt und im Dauerbetrieb leicht übertroffen. Die Kette (2,1 s je 16 KiB) ist die Untergrenze, die CPU ist darunter voll ausgelastet (GHASH ≈ 1460 Blöcke + ≈ 435 eigene AES-Blöcke je Kette, keine Leerläufe). Unter laufender Kette läuft CPU-Code aus Fast RAM ≈ 20 % langsamer als im Leerlauf (AES 2,04 → 2,42 ms, GHASH 0,58 → 0,72 ms) – in FS-UAE gemessen, auf Hardware offen. Kurze Nachrichten verlieren am Datenende (64 KiB: 9,3 KB/s; beim Verschlüsseln bleibt der GHASH des letzten Batches seriell). Preis: 173 KiB Chip-RAM (Arena + Copper-Listen), Anzeige während eines Aufrufs aus.
 
 Fehler auf dem Weg: Tabellen-Shift der Zählerbits 6..31 um n statt n−6 (Host-Test mit simulierter Kettenlatenz `ctx.soft_polls`, sichtbar ab Block 62, vor dem ersten FS-UAE-Lauf gefunden); CTR-Block in C kostete 0,7 ms Overhead je Block (vbcc-Byte-Schleifen, Stack-Frames) – erst der Harness-Vergleich AES-Block gegen CTR-Block zeigte es, danach Assembler.
+
+## 2026-11-27 – Schritt 13: S-Box-Gatter in 3-Eingangs-Blits gefaltet
+
+Details in docs/CUSTOM-CHIPS.md Abschnitt 2d. 31 Fanout-1-Gatter des 113-Gatter-Netzes in ihre Verbraucher gefaltet (Minterm mit drei Quellen, 4 statt 2 × 3 Buszyklen je Wort): 226 → 164 Blits je S-Box-Runde, Zyklen −18 %. Host-Tests (blitaes, blitgcm) und FS-UAE Lauf 4 bitgenau.
+
+| Variante | vorher | jetzt |
+|---|---:|---:|
+| Copper-Kette je 16 KiB AES-256 | 2,10 s | **1,83 s** |
+| 64 KiB GCM, Blitter + GHASH (CPU nur GHASH) | 7,0 KB/s | 8,0 KB/s |
+| 64 KiB GCM, Blitter + GHASH + CPU-Eigenblöcke | 9,3 KB/s | 10,2 KB/s |
+| 192 KiB GCM verschlüsseln, in place | 10,3 KB/s | **11,0 KB/s** |
+| 192 KiB GCM entschlüsseln, in place | 10,4 KB/s | **11,4 KB/s** |
+| CPU `aes_gcm_encrypt` (Referenz) | 5,56 KB/s | 5,55 KB/s |
+
+Einordnung: AES-256-GCM auf dem Medienpfad liegt jetzt beim Doppelten der CPU (1 MB ≈ 90 s statt 3 min). Für den Verbindungsaufbau ist das ohne Belang – der wird von X25519 (8,1 s) und XEdDSA-Verifikation (9,7 s) bestimmt, nicht von AES.
