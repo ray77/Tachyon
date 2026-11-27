@@ -34,6 +34,8 @@ static char line[640];
 static hmac_drbg rng; static x509_cert root, inter; static tls13_keypair kp;
 static uint8_t eph_priv[32], eph_pub[32], st_priv[32], st_pub[32];
 static noise_cert_cache ncache, lcache;   /* intermediate and leaf certificate fingerprints */
+static noise_es_pre espre;                 /* es = DH(eph_priv, stored server static), computed with the ephemeral key */
+static uint8_t cached_static[32]; static int have_cached_static;   /* the server static from a stored run or a verified handshake */
 static int prepared;
 static noise_transport tr;            /* transport keys of the current connection */
 static int pump_quiet;                /* suppress the "timeout" log line (QR wait loop) */
@@ -243,6 +245,14 @@ static int connection_keys(void)
     if (io->mode == WA_MODE_PAIR) { cp(st_priv, io->creds->id.noise_priv, 32); cp(st_pub, io->creds->id.noise_pub, 32); }
     else { drbg_generate(&rng, st_priv, 32); x25519_base_comb(st_pub, st_priv); }
     io->t_noise_keys = ms() - t0;
+    /* es before the connection: one ladder off the server's clock when the server static is known (noise.h) */
+    espre.valid = 0; io->t_es_pre = 0;
+    if (have_cached_static) {
+        t0 = ms();
+        noise_es_precompute(&espre, eph_priv, cached_static);
+        io->t_es_pre = ms() - t0;
+        wa_fmt(line, sizeof line, "noise: es = DH(ephemeral, stored server static) computed in %T s, before the connection", io->t_es_pre); logl(line);
+    }
     return 1;
 }
 
@@ -257,6 +267,8 @@ int wa_probe_prepare(wa_probe_io *pio)
     /* the stored fingerprint of WhatsApp's intermediate Noise certificate, if the caller kept one */
     ncache.valid = 0; lcache.valid = 0; io->noise_leaf_cached = 0; io->noise_leaf_valid = 0; io->tls_cert_cached = 0; io->tls_cache_out_len = 0; io->tls_tickets = 0;
     if (io->noise_leaf_cache_in) { cp(lcache.fp, io->noise_leaf_cache_in, 32); lcache.valid = 1; }
+    have_cached_static = 0; io->noise_static_valid = 0; io->noise_es_precomputed = 0; espre.valid = 0;
+    if (io->noise_static_in) { cp(cached_static, io->noise_static_in, 32); have_cached_static = 1; }
     if (io->noise_cache_in) { cp(ncache.fp, io->noise_cache_in, 32); ncache.valid = 1; }
     else if (io->mode == WA_MODE_PAIR && io->creds && io->creds_loaded && io->creds->noise_cache_valid) { cp(ncache.fp, io->creds->noise_cache_fp, 32); ncache.valid = 1; logl("noise: certificate cache fingerprint taken from the credentials"); }
     if (io->mode == WA_MODE_PAIR) {
@@ -304,7 +316,7 @@ static int handshake(const uint8_t *payload, uint32_t payload_len, uint8_t *plai
     static uint8_t cstatic_ct[48], payload_ct[WA_CLIENTPAYLOAD_MAX + 16], finish[2048], inner[2048];
     static noise_hs hs; static heartbeat hb; static x509_cache cache;
     uint32_t server_static_ct_len = 0, cert_ct_len = 0, n, ladders = 0;
-    const uint8_t *p, *end, *d; uint32_t f, wire, l, v;
+    const uint8_t *p, *end, *d; uint32_t f, wire, l, v; int es_used = 0;
 
     pend_len = 0; pump_quiet = 0; msg_have = 0; msg_off = 0;
     if (payload_len + 16 > sizeof payload_ct) return fail("RESULT: ClientPayload too long", 0, 0);
@@ -402,8 +414,13 @@ static int handshake(const uint8_t *payload, uint32_t payload_len, uint8_t *plai
         spin_ladders(io->gap_ms, &ladders);
         /* the real work (the A500 does this inside the gap; here it takes milliseconds) */
         if (!noise_client_finish(&hs, eph_priv, st_priv, st_pub, server_eph, server_static_ct, 48, cert_ct, cert_ct_len,
-                                 payload, payload_len, server_static, cert_pt, cstatic_ct, payload_ct, &tr)) {
+                                 payload, payload_len, server_static, cert_pt, cstatic_ct, payload_ct, &tr, &espre, &es_used)) {
             heartbeat_disarm(); return fail("RESULT: Noise AEAD failure on ServerHello", 0, 0);
+        }
+        if (espre.valid) {
+            logl(es_used ? "noise: es taken from the precomputation (server static unchanged), 2 X25519 ladders online"
+                         : "noise: server static differs from the stored one, es computed online (3 ladders)");
+            espre.valid = 0;
         }
         {   /* certificate chain: CertChain{leaf=1, intermediate=2}, each NoiseCertificate{details=1, signature=2} */
             wa_cert leaf, interc; const uint8_t *lp = 0, *ip = 0; uint32_t ll = 0, il = 0; int ok;
@@ -433,7 +450,13 @@ static int handshake(const uint8_t *payload, uint32_t payload_len, uint8_t *plai
             ok = ok && eq(leaf.key, server_static, 32);
             wa_fmt(line, sizeof line, "noise: leaf certificate serial %u signed by the intermediate%s, key == server static: %s", leaf.serial,
                    io->noise_leaf_cached ? " (cache HIT, XEdDSA skipped)" : "", ok ? "VERIFIED" : "FAILED"); logl(line);
-            if (ok) { cp(io->noise_leaf_fp, lcache.fp, 32); io->noise_leaf_valid = 1; }
+            if (ok) {
+                cp(io->noise_leaf_fp, lcache.fp, 32); io->noise_leaf_valid = 1;
+                /* the verified server static: for the next connection (the login connection after a pairing, the next run) */
+                cp(io->noise_static_out, server_static, 32); io->noise_static_valid = 1;
+                cp(cached_static, server_static, 32); have_cached_static = 1;
+                io->noise_es_precomputed = es_used;
+            }
             if (!ok) { heartbeat_disarm(); return fail("RESULT: leaf certificate rejected", 0, 0); }
         }
         heartbeat_disarm();

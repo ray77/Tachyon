@@ -34,15 +34,29 @@ static void extract_expand(const uint8_t salt[32], const uint8_t *ikm, uint32_t 
     hkdf_sha256(out, 64, salt, 32, ikm, ikmlen, (const uint8_t *)"", 0);
 }
 
-void noise_mix_key(noise_hs *n, const uint8_t priv[32], const uint8_t pub[32])
+static void mix_key_dh(noise_hs *n, const uint8_t dh[32])
 {
-    uint8_t dh[32], okm[64];
+    uint8_t okm[64];
     int i;
-    x25519_ref(dh, priv, pub);
     extract_expand(n->ck, dh, 32, okm);
     for (i = 0; i < 32; i++) n->ck[i] = okm[i];
     aes_gcm_set_key(&n->k, okm + 32, 256);
     n->counter = 0;
+}
+
+void noise_mix_key(noise_hs *n, const uint8_t priv[32], const uint8_t pub[32])
+{
+    uint8_t dh[32];
+    x25519_ref(dh, priv, pub);
+    mix_key_dh(n, dh);
+}
+
+void noise_es_precompute(noise_es_pre *p, const uint8_t client_eph_priv[32], const uint8_t server_static[32])
+{
+    int i;
+    for (i = 0; i < 32; i++) p->server_static[i] = server_static[i];
+    x25519_ref(p->dh, client_eph_priv, server_static);
+    p->valid = 1;
 }
 
 void noise_encrypt(noise_hs *n, const uint8_t *pt, uint32_t len, uint8_t *ct)
@@ -104,13 +118,17 @@ int noise_client_finish(noise_hs *n,
                         const uint8_t *client_payload, uint32_t client_payload_len,
                         uint8_t server_static_out[32], uint8_t *cert_out,
                         uint8_t client_static_ct_out[48], uint8_t *client_payload_ct_out,
-                        noise_transport *t)
+                        noise_transport *t, const noise_es_pre *pre, int *es_used)
 {
+    uint32_t i, diff = 0;
+    if (es_used) *es_used = 0;
     if (server_static_ct_len != 48) return 0;
     noise_mix_hash(n, server_eph_pub, 32);
     noise_mix_key(n, client_eph_priv, server_eph_pub);                 /* ee */
     if (!noise_decrypt(n, server_static_ct, 48, server_static_out)) return 0;
-    noise_mix_key(n, client_eph_priv, server_static_out);              /* es */
+    if (pre && pre->valid) { for (i = 0; i < 32; i++) diff |= (uint32_t)(pre->server_static[i] ^ server_static_out[i]); }
+    if (pre && pre->valid && diff == 0) { mix_key_dh(n, pre->dh); if (es_used) *es_used = 1; }   /* es, computed before */
+    else noise_mix_key(n, client_eph_priv, server_static_out);                                    /* es */
     if (!noise_decrypt(n, cert_ct, cert_ct_len, cert_out)) return 0;
     noise_encrypt(n, client_static_pub, 32, client_static_ct_out);     /* s */
     noise_mix_key(n, client_static_priv, server_eph_pub);              /* se */

@@ -52,6 +52,8 @@ typedef struct wa_probe_io {
     const uint8_t *noise_cache_in;  /* 32-byte fingerprint of the verified Noise intermediate from an earlier run, or 0 */
     const uint8_t *noise_leaf_cache_in;     /* 32-byte fingerprint of the verified Noise leaf (under that intermediate), or 0 */
     const uint8_t *tls_cache_in; uint32_t tls_cache_in_len;   /* x509_cache file (x509_cache_write) from an earlier run, or 0 */
+    const uint8_t *noise_static_in;         /* WhatsApp's 32-byte Noise static key (== verified leaf key) from an earlier run, or 0:
+                                               es = DH(ephemeral, static) is then computed before the connection (noise_es_pre) */
 
     /* pairing / login (WA_MODE_PAIR) */
     int mode;
@@ -92,6 +94,9 @@ typedef struct wa_probe_io {
     int noise_cert_cached;              /* 1 = the intermediate's XEdDSA verification was skipped on a cache hit */
     uint8_t noise_cache_fp[32]; int noise_cache_valid;   /* the fingerprint after the run (store it for the next one) */
     uint8_t noise_leaf_fp[32]; int noise_leaf_valid, noise_leaf_cached;   /* same for the leaf certificate */
+    uint8_t noise_static_out[32]; int noise_static_valid;   /* the server static after a verified handshake (store it with the fingerprints) */
+    int noise_es_precomputed;           /* 1 = the login/probe connection used the es computed before the connection */
+    uint32_t t_es_pre;                  /* duration of that precomputation (0 = none) */
     uint8_t tls_cache_out[X509_CACHE_FILE_MAX]; uint32_t tls_cache_out_len; int tls_cert_cached;   /* TLS cache after the run */
     uint32_t tls_tickets;               /* NewSessionTicket messages the server sent (PSK resumption not implemented) */
     char result[200];           /* "RESULT: ..." */

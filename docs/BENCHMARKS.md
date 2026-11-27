@@ -455,3 +455,21 @@ Dazu: `<active/>` angenommen 2,0 s (Lauf 1) bzw. 5,7 s (Lauf 2) nach `<success>`
 ### Einordnung
 
 Von 76,0 s auf 52,0 s: −10,4 s TLS-Cache (eine RSA-2048-Prüfung + Schlüsselvorbereitung), −10,9 s Noise-Blatt-Cache (eine XEdDSA-Prüfung), −1,6 s schnellere Leiter. Der Startweg bis zum Login ist mit 62 s halbiert, weil der Prekey-Batch jetzt zwischen den Läufen gespeichert wird. Was bleibt (52 s): vier X25519-Leitern 30,8 s, RSA-PSS CertificateVerify ≈ 5 s, HKDF und zehn AES-GCM-Schlüsselaufbauten ≈ 5 s, Entschlüsseln/Parsen und Netz der Rest. Da der Server keine Tickets schickt, gibt es keine TLS-Resumption; der nächste Hebel ist die Vorausrechnung von Noise `es` mit dem gecachten Server-Static (−7,7 s → ≈ 44 s), danach bliebe nur noch Arithmetik an der Untergrenze. Live-Verbindungen für diesen Schritt: 2 (beide Logins, keine Fehlversuche).
+
+## 2026-11-27 – Schritt 22: Noise `es` vor der Verbindung gerechnet
+
+`noise_es_pre` (PROTOCOL.md Abschnitt 6): der Server-Static aus dem 96-Byte-Noise-Cache, `es` = DH(e_c, s_s) mit den Schlüsselpaaren vor dem Connect, im Handshake nur bei byteweiser Gleichheit mit dem entschlüsselten Static verwendet. Zwei Logins mit Gerät :9 (`make run-pair FAST=2048`, FS-UAE, 2 MiB Fast), Lauf A speichert den Static, Lauf B nutzt ihn.
+
+| Phase | Schritt 21 (Caches) | Lauf A (19:31) | **Lauf B (19:38, `es` vorab)** |
+|---|---:|---:|---:|
+| `es` vor dem Connect | – | – | 8,0 s |
+| drei X25519-Schlüsselpaare vor dem Connect | 6,6 s | 6,6 s | 6,6 s |
+| TLS 1.3 (Cache HIT) | 20,3 s | 20,3 s | 20,3 s |
+| Noise ServerHello → ClientFinish | 28,5 s | 28,9 s | **19,7 s** |
+| **Login-Verbindung bis `<success>`** | **52,0 s** | **52,5 s** | **43,1 s** |
+| Programmstart → `<success>` | 62 s | 62 s | 61 s |
+| Pongs in Noise | 6 | 6 | 4 |
+
+### Einordnung
+
+Tagesbilanz der Login-Verbindung des A500: **76,0 s → 43,1 s** (−10,4 s TLS-Zertifikatscache, −10,9 s Noise-Blatt-Cache, −1,6 s schnellere Leiter, −8,8 s `es` vorab). Online stehen noch drei Leitern (TLS, `ee`, `se`; 23 s), beide mit frischem Server-Ephemeral und darum nicht vorab rechenbar, RSA-PSS CertificateVerify ≈ 5 s, HKDF und AES-GCM-Schlüsselaufbauten ≈ 5 s, Entschlüsseln/Parsen und Netz. Der Server schickt keine Tickets (keine TLS-Resumption), die Leiter liegt 3 % über der Untergrenze: ohne Protokollwechsel (Noise IK spart keinen DH) bleibt die Login-Verbindung bei etwa 40–43 s. Was den Start bis zum Login noch verkürzt, läuft außerhalb der Server-Uhr: Schlüsselpaare und `es` im Leerlauf des Clients, nicht erst beim Start. Live-Verbindungen für diesen Schritt: 2.

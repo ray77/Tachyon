@@ -12,7 +12,8 @@
  * The protocol logic lives in tests/wa_probe_core.c and is shared with the Amiga build
  * (bench/wa_probe_amiga.c over bsdsocket.library); this file is the POSIX transport, clock and logging.
  *   TLS_CACHE=1: prime the certificate cache on a first connection, the real one must hit it (chain skipped).
- *   NOISE_CACHE=<file>: 32-byte fingerprint of WhatsApp's verified intermediate Noise certificate; read before
+ *   NOISE_CACHE=<file>: fingerprints of WhatsApp's verified intermediate and leaf Noise certificates (32 + 32 bytes) and
+ *                       the server's Noise static key (32 bytes, es is then computed before the connection); read before
  *   the run (hit = XEdDSA of the intermediate skipped), written after a successful one (make wa-probe uses
  *   build/wa_noise_cache.bin, which tools/run-fsuae-net.sh hands to the Amiga as SYS:noisecache.bin).
  *   TLS_HOLD=<seconds>: hold our TLS Finished that long after the server flight and report whether the server
@@ -126,7 +127,7 @@ static void qr_hide(void *ctx, const char *status) { char l[160]; (void)ctx; snp
 
 int main(int argc, char **argv)
 {
-    static wa_probe_io io; static uint8_t seed[64], ncache[64], tcache[X509_CACHE_FILE_MAX]; static char nowstr[16];
+    static wa_probe_io io; static uint8_t seed[64], ncache[96], tcache[X509_CACHE_FILE_MAX]; static char nowstr[16];
     const char *tcache_path = getenv("TLS_CACHE_FILE") && *getenv("TLS_CACHE_FILE") ? getenv("TLS_CACHE_FILE") : "build/wa_tls_cache.bin";
     const char *ncache_path = getenv("NOISE_CACHE");
     double gap = argc > 1 ? atof(argv[1]) : 30.0;
@@ -168,8 +169,8 @@ int main(int argc, char **argv)
     io.noise_cache_in = 0;
     if (ncache_path && *ncache_path) {
         FILE *cf = fopen(ncache_path, "rb");
-        if (cf) { size_t n = fread(ncache, 1, 64, cf); if (n >= 32) io.noise_cache_in = ncache; if (n == 64) io.noise_leaf_cache_in = ncache + 32; fclose(cf); }
-        { char l[160]; snprintf(l, sizeof l, "noise: certificate cache %s (%s)", io.noise_leaf_cache_in ? "loaded: intermediate + leaf" : io.noise_cache_in ? "loaded: intermediate" : "empty", ncache_path); log_line(0, l); }
+        if (cf) { size_t n = fread(ncache, 1, 96, cf); if (n >= 32) io.noise_cache_in = ncache; if (n >= 64) io.noise_leaf_cache_in = ncache + 32; if (n == 96) io.noise_static_in = ncache + 64; fclose(cf); }
+        { char l[160]; snprintf(l, sizeof l, "noise: certificate cache %s (%s)", io.noise_static_in ? "loaded: intermediate + leaf + server static" : io.noise_leaf_cache_in ? "loaded: intermediate + leaf" : io.noise_cache_in ? "loaded: intermediate" : "empty", ncache_path); log_line(0, l); }
     }
     {   /* TLS certificate cache (leaf fingerprint + prepared RSA key): skips the chain verification on a hit */
         FILE *cf = fopen(tcache_path, "rb");
@@ -213,7 +214,7 @@ int main(int argc, char **argv)
         int ok = wa_probe_run(&io);
         if (ok && io.noise_cache_valid && ncache_path && *ncache_path) {
             FILE *cf = fopen(ncache_path, "wb");
-            if (cf) { fwrite(io.noise_cache_fp, 1, 32, cf); if (io.noise_leaf_valid) fwrite(io.noise_leaf_fp, 1, 32, cf); fclose(cf); }
+            if (cf) { fwrite(io.noise_cache_fp, 1, 32, cf); if (io.noise_leaf_valid) { fwrite(io.noise_leaf_fp, 1, 32, cf); if (io.noise_static_valid) fwrite(io.noise_static_out, 1, 32, cf); } fclose(cf); }
         }
         if (io.tls_cache_out_len) {
             FILE *cf = fopen(tcache_path, "wb");

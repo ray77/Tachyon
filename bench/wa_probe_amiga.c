@@ -199,7 +199,7 @@ static void finish(void)
 
 int main(void)
 {
-    static wa_probe_io io; static uint8_t seed[64], small[64], ncache[64], tcache[X509_CACHE_FILE_MAX]; static char nowstr[16], waip[20];
+    static wa_probe_io io; static uint8_t seed[64], small[64], ncache[96], tcache[X509_CACHE_FILE_MAX]; static char nowstr[16], waip[20];
     uint32_t t_conn, t_dns, t_prep, gap_ms = 0, tries;
     LONG n;
     char addr[16];
@@ -230,9 +230,9 @@ int main(void)
     io.ctx = 0; io.send = io_send; io.recv = io_recv; io.reconnect = io_reconnect; io.now_ms = now_ms; io.log = log_line;
     io.host = "web.whatsapp.com"; io.now = nowstr[0] ? nowstr : 0; io.seed = seed; io.seed_len = 64;
     io.gap_ms = gap_ms; io.tunnel = 0; io.use_cache = 0; io.debug = 0; io.hold_ms = 0;
-    n = read_file("SYS:noisecache.bin", ncache, 64);
-    io.noise_cache_in = n >= 32 ? ncache : 0; io.noise_leaf_cache_in = n == 64 ? ncache + 32 : 0;
-    log_line(0, io.noise_leaf_cache_in ? "noise: certificate cache loaded from SYS:noisecache.bin (intermediate + leaf)" : io.noise_cache_in ? "noise: certificate cache loaded from SYS:noisecache.bin (intermediate)" : "noise: certificate cache empty (no SYS:noisecache.bin)");
+    n = read_file("SYS:noisecache.bin", ncache, 96);
+    io.noise_cache_in = n >= 32 ? ncache : 0; io.noise_leaf_cache_in = n >= 64 ? ncache + 32 : 0; io.noise_static_in = n == 96 ? ncache + 64 : 0;
+    log_line(0, io.noise_static_in ? "noise: certificate cache loaded from SYS:noisecache.bin (intermediate + leaf + server static)" : io.noise_leaf_cache_in ? "noise: certificate cache loaded from SYS:noisecache.bin (intermediate + leaf)" : io.noise_cache_in ? "noise: certificate cache loaded from SYS:noisecache.bin (intermediate)" : "noise: certificate cache empty (no SYS:noisecache.bin)");
     n = read_file("SYS:tlscache.bin", tcache, sizeof tcache);
     if (n > 0) { io.tls_cache_in = tcache; io.tls_cache_in_len = (uint32_t)n; }
     log_line(0, n > 0 ? "tls: certificate cache loaded from SYS:tlscache.bin" : "tls: certificate cache empty (no SYS:tlscache.bin)");
@@ -294,7 +294,7 @@ int main(void)
         if (!ok && net.fail) logf1("net: last failed call %s, errno %u", net.fail, (uint32_t)net.err);
         if (ok && io.noise_cache_valid) {
             BPTR cf = Open((STRPTR)"SYS:noisecache.bin", MODE_NEWFILE);
-            if (cf) { Write(cf, io.noise_cache_fp, 32); if (io.noise_leaf_valid) Write(cf, io.noise_leaf_fp, 32); Close(cf); log_line(0, io.noise_leaf_valid ? "noise: certificate cache (intermediate + leaf) written to SYS:noisecache.bin" : "noise: certificate cache fingerprint written to SYS:noisecache.bin"); }
+            if (cf) { Write(cf, io.noise_cache_fp, 32); if (io.noise_leaf_valid) { Write(cf, io.noise_leaf_fp, 32); if (io.noise_static_valid) Write(cf, io.noise_static_out, 32); } Close(cf); log_line(0, io.noise_static_valid ? "noise: certificate cache (intermediate + leaf + server static) written to SYS:noisecache.bin" : io.noise_leaf_valid ? "noise: certificate cache (intermediate + leaf) written to SYS:noisecache.bin" : "noise: certificate cache fingerprint written to SYS:noisecache.bin"); }
             if (io.tls_cache_out_len) { BPTR tf = Open((STRPTR)"SYS:tlscache.bin", MODE_NEWFILE); if (tf) { Write(tf, io.tls_cache_out, io.tls_cache_out_len); Close(tf); log_line(0, "tls: certificate cache written to SYS:tlscache.bin"); } }
         }
         wa_fmt(aline, sizeof aline, "TIMING: keys %u ms (tls %u + noise %u, before connect), dns %u ms, tcp connect %u ms, tls %u ms, ws %u ms, server hello %u ms, client finish %u ms, accepted %u ms (ms since connect, %u pongs%s)\n",

@@ -42,7 +42,18 @@ int  noise_transport_decrypt(noise_transport *t, const uint8_t *ct, uint32_t len
  *   noise_client_hello:  after this, send client_eph_pub in ClientHello
  *   noise_client_finish: given ServerHello, produces the ClientFinish ciphertexts and the transport.
  * server_static_out / cert_out receive the decrypted server static key and certificate payload
- * (the caller verifies the certificate chain; this function does not). Returns 0 on any AEAD failure. */
+ * (the caller verifies the certificate chain; this function does not). Returns 0 on any AEAD failure.
+ *
+ * es before the connection (docs/PROTOCOL.md section 6): of the client's three X25519 ladders only
+ * es = DH(client_eph_priv, server_static) has a public input that is known beforehand - the server's static key
+ * is the leaf certificate's key, verified on every connection and stable across them. The caller may compute
+ * es from a stored copy of that key with noise_es_precompute (one ladder, ~7.7 s on the 68000, off the server's
+ * clock) and pass it as `pre`: the DH result is used only if the static key decrypted from ServerHello is
+ * byte-for-byte the one it was computed from (constant-time compare); otherwise the ladder runs as usual.
+ * The decrypted key is authenticated by the ee AEAD, and the caller's leaf check (leaf key == server static)
+ * is unchanged, so a wrong stored key can only cost the precomputation. *es_used (may be 0) tells which path ran. */
+typedef struct { uint8_t server_static[32]; uint8_t dh[32]; int valid; } noise_es_pre;
+void noise_es_precompute(noise_es_pre *p, const uint8_t client_eph_priv[32], const uint8_t server_static[32]);
 void noise_client_hello(noise_hs *n, const uint8_t *header, uint32_t header_len, const uint8_t client_eph_pub[32]);
 int  noise_client_finish(noise_hs *n,
                          const uint8_t client_eph_priv[32], const uint8_t client_static_priv[32], const uint8_t client_static_pub[32],
@@ -51,7 +62,7 @@ int  noise_client_finish(noise_hs *n,
                          const uint8_t *client_payload, uint32_t client_payload_len,
                          uint8_t server_static_out[32], uint8_t *cert_out,
                          uint8_t client_static_ct_out[48], uint8_t *client_payload_ct_out,
-                         noise_transport *t);
+                         noise_transport *t, const noise_es_pre *pre, int *es_used);
 
 /* Cache for a verified NoiseCertificate (docs/PROTOCOL.md section 6, "Zertifikatscache"): WhatsApp's intermediate
  * certificate is stable (serial 3, signed by the root key), yet its XEdDSA verification costs ~11 s on the 68000.

@@ -46,7 +46,29 @@ int main(int argc, char **argv)
         x25519_ref_base(cstpub, cst);
         noise_client_hello(&hs, header, (uint32_t)hl, cephpub);
         if (!noise_client_finish(&hs, ceph, cst, cstpub, sephpub, sstct, 48, certct, (uint32_t)certctl,
-                                 cpl, (uint32_t)cpll, st_out, cert_out, cstct_out, cplct_out, &t)) { bad++; printf("  vector %d: handshake failed\n", n); n++; continue; }
+                                 cpl, (uint32_t)cpll, st_out, cert_out, cstct_out, cplct_out, &t, 0, 0)) { bad++; printf("  vector %d: handshake failed\n", n); n++; continue; }
+        {   /* es computed before the connection from the (correct / wrong / absent) stored server static: same
+             * ciphertexts and transport keys in every case, the precomputed DH used only on a match */
+            noise_es_pre pre; noise_hs hs2; noise_transport t2; int used = -1, k;
+            static uint8_t c2[48], p2[1100], s2[32], o2[1024], f2[1100];
+            noise_es_precompute(&pre, ceph, sstpub);
+            noise_client_hello(&hs2, header, (uint32_t)hl, cephpub);
+            if (!noise_client_finish(&hs2, ceph, cst, cstpub, sephpub, sstct, 48, certct, (uint32_t)certctl, cpl, (uint32_t)cpll,
+                                     s2, o2, c2, p2, &t2, &pre, &used) || used != 1) { bad++; printf("  vector %d: precomputed es not used\n", n); }
+            if (memcmp(c2, cstct, 48) || memcmp(p2, cplct, (size_t)cplctl)) { bad++; printf("  vector %d: precomputed es: ciphertexts differ\n", n); }
+            noise_transport_encrypt(&t2, frame, (uint32_t)framel, f2);
+            if (memcmp(f2, framect, (size_t)framectl)) { bad++; printf("  vector %d: precomputed es: transport differs\n", n); }
+            pre.server_static[7] ^= 1;                                   /* stored key differs: ladder runs, result identical */
+            noise_client_hello(&hs2, header, (uint32_t)hl, cephpub);
+            if (!noise_client_finish(&hs2, ceph, cst, cstpub, sephpub, sstct, 48, certct, (uint32_t)certctl, cpl, (uint32_t)cpll,
+                                     s2, o2, c2, p2, &t2, &pre, &used) || used != 0) { bad++; printf("  vector %d: stale es taken\n", n); }
+            if (memcmp(c2, cstct, 48) || memcmp(p2, cplct, (size_t)cplctl)) { bad++; printf("  vector %d: stale es fallback: ciphertexts differ\n", n); }
+            pre.valid = 0; used = -1;
+            noise_client_hello(&hs2, header, (uint32_t)hl, cephpub);
+            if (!noise_client_finish(&hs2, ceph, cst, cstpub, sephpub, sstct, 48, certct, (uint32_t)certctl, cpl, (uint32_t)cpll,
+                                     s2, o2, c2, p2, &t2, &pre, &used) || used != 0 || memcmp(p2, cplct, (size_t)cplctl)) { bad++; printf("  vector %d: invalid pre\n", n); }
+            (void)k;
+        }
         if (memcmp(st_out, sstpub, 32)) { bad++; printf("  vector %d: server static\n", n); }
         if (memcmp(cert_out, cert, (size_t)certl)) { bad++; printf("  vector %d: cert payload\n", n); }
         if (memcmp(cstct_out, cstct, 48)) { bad++; printf("  vector %d: client static ct\n", n); }
@@ -73,7 +95,7 @@ int main(int argc, char **argv)
         noise_hs hs; noise_transport t;
         memset(ct, 0, 48);
         noise_client_hello(&hs, hdr, 4, z);
-        result(noise_client_finish(&hs, z, z, z, z, ct, 48, cert, 16, z, 16, o1, o2, o3, o4, &t) == 0, "garbage ServerHello rejected");
+        result(noise_client_finish(&hs, z, z, z, z, ct, 48, cert, 16, z, 16, o1, o2, o3, o4, &t, 0, 0) == 0, "garbage ServerHello rejected");
     }
     {   /* certificate cache: a verified (root key, details, signature) triple is remembered as one fingerprint; any
          * change to one of the three is a miss, an empty cache is a miss, and a hit does not alter the entry */

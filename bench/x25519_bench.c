@@ -504,7 +504,7 @@ int main(void)
         t0 = ticks_now();
         noise_client_hello(&hs, nv_header, NV_HEADER_LEN, cephpub);
         r = noise_client_finish(&hs, nv_ceph, nv_cst, cstpub, nv_sephpub, nv_sstct, 48, nv_certct, NV_CERTCT_LEN,
-                                nv_cpl, NV_CPL_LEN, st_out, cert_out, cstct_out, cplct_out, &tr);
+                                nv_cpl, NV_CPL_LEN, st_out, cert_out, cstct_out, cplct_out, &tr, 0, 0);
         t1 = ticks_now();
         for (i = 0; i < 32; i++) if (st_out[i] != nv_sstpub[i]) r = 0;
         for (i = 0; i < NV_CERT_LEN; i++) if (cert_out[i] != nv_cert[i]) r = 0;
