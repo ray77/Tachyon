@@ -11,12 +11,13 @@ Der emulierte A500 (FS-UAE, zyklengenau, 68000 bei 7,09 MHz, 2 MiB Fast) ist **a
 | Kryptografie auf dem 68000 (Phase 2) | X25519-Leiter **7,71 s**, Schlüsselpaar (Comb) 3,1 s, XEdDSA-Prüfung 9,4 s, Signatur 7,8 s, RSA-2048-Verifikation 7,7 s, SHA-256 9,9 KB/s, AES-256-GCM 5,6 KB/s CPU / **11 KB/s mit Blitter+Copper** – alles asm, bitidentisch zu den C-Referenzen, RFC-/Go-/libsignal-Vektoren | BENCHMARKS.md 1–13, 20, CUSTOM-CHIPS.md, X25519-PLAN.md |
 | Netzwerk (Phase 3) | DNS, TCP (TheWire13 `bsdsocket.library` unter Kickstart 1.3, A2065 auf slirp), **TLS 1.3** mit Pin-Menge, Zertifikatscache und RSA-PSS, WebSocket | NETWORK.md, PROTOCOL.md 7, BENCHMARKS.md 14–18 |
 | WhatsApp-Verbindung (Phase 4) | Noise XX bitgenau zu whatsmeow, binäres XML/Protobuf, **QR-Pairing vom Bildschirm**, Identität, persistente Zugangsdaten, Login, Prekey-Upload, `<active/>`, Bestätigungen, zlib-Frames | PROTOCOL.md 6, 11; UI.md; BENCHMARKS.md 19–23 |
+| Nachrichten (Phase 5) | **Signal-Sessions** (X3DH beide Rollen, Double Ratchet) bitgenau zu libsignal, `<message>`/`<enc>` senden und entschlüsseln, Quittungen wie whatsmeow, Sitzungsdatensatz mit SHA-256; Interim-Chat auf Host und A500 (Konsole); Gruppen und Medien noch nicht | SIGNAL.md; `make signal-test`, `make pair-sim` (Szenario E) |
 | **Programmstart → eingeloggt** | **47 s** (mittags noch 122 s): vor dem Connect wird nichts mehr gerechnet, die Verbindung selbst dauert 43 s (TLS 20 s, Noise 20 s) – drei X25519-Leitern mit frischem Server-Ephemeral, RSA-PSS, HKDF/GCM | BENCHMARKS.md 21–23 |
 | Serverlimits | TLS-Flight 60 s, WebSocket-Leerlauf 10 s, per Pong-Herzschlag beliebig verlängerbar; keine TLS-Tickets vom Server | PROTOCOL.md 8 |
 | Speicher | Stack + Client brauchen 2 MiB Fast (190 KiB Fast + 447 KiB Chip frei im Betrieb); 1 MiB bleibt die Benchmark-Maschine | NETWORK.md 6 |
-| Offline-Tests | 24 Host-Testprogramme (ASan/UBSan), Pairing-Simulator (136 Prüfungen), alle Vektoren unter vamos und FS-UAE; Live-Versuche nach der Taktregel in PROTOCOL.md 11 | `make host-test`, `make pair-sim`, `make vamos` |
+| Offline-Tests | 25 Host-Testprogramme (ASan/UBSan), Pairing-/Chat-Simulator (241 Prüfungen, libsignal entschlüsselt unsere Nachricht), alle Vektoren unter vamos und FS-UAE; Live-Versuche nach der Taktregel in PROTOCOL.md 11 | `make host-test`, `make pair-sim`, `make vamos` |
 
-Noch nicht: Signal-Sessions (Phase 5, nächster Block: Nachrichten entschlüsseln und senden), GUI (Phase 6; vorhanden ist der Hires-Schirm mit QR-Code und Konsolenfenster), echte Hardware (FS-UAE ist zyklengenau, eine Bestätigung auf dem A500 steht aus).
+Noch nicht: Live-Nachricht vom A500 (Phase 5 ist offline fertig, der erste angekündigte Selbst-Chat-Versuch steht aus, SIGNAL.md 6), Gruppen (Sender Keys), Medien, GUI (Phase 6; vorhanden ist der Hires-Schirm mit QR-Code und Konsolenfenster), echte Hardware (FS-UAE ist zyklengenau, eine Bestätigung auf dem A500 steht aus).
 
 ## Ziel und verbindliche Hardware
 
