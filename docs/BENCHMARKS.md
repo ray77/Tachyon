@@ -268,3 +268,23 @@ Details in docs/CUSTOM-CHIPS.md Abschnitt 2d. 31 Fanout-1-Gatter des 113-Gatter-
 | CPU `aes_gcm_encrypt` (Referenz) | 5,56 KB/s | 5,55 KB/s |
 
 Einordnung: AES-256-GCM auf dem Medienpfad liegt jetzt beim Doppelten der CPU (1 MB ≈ 90 s statt 3 min). Für den Verbindungsaufbau ist das ohne Belang – der wird von X25519 (8,1 s) und XEdDSA-Verifikation (9,7 s) bestimmt, nicht von AES.
+
+## 2026-11-27 – Schritt 14: TLS-1.3-Handshake auf dem 68000 (`crypto/ref/tls13.c`)
+
+A500/FS-UAE, DateStamp-Ticks, Wiederabspielen der aufgezeichneten Go-Loopback-Session (`bench/tls13_vector.h`, ein selbstsigniertes RSA-2048-Zertifikat, deterministischer DRBG-Seed); Host-Vektoren und Live-Lauf siehe docs/PROTOCOL.md Abschnitt 7.
+
+| Operation | Zeit |
+|---|---:|
+| X25519-Schlüsselpaar für `key_share` (Comb, vor der Verbindung berechenbar) | 3,16 s |
+| **TLS-1.3-Client-Handshake online** (X25519-Shared-Secret + 1 Zertifikatsprüfung + `rsa_pub_set` Blattschlüssel + RSA-PSS-CertificateVerify + HKDF + 4 GCM-Schlüsselaufbauten) | **29,4 s** |
+| davon X25519 (`x25519_ref`) | ≈ 8,1 s |
+| davon RSA: 2 × `rsa_pub_set` (je 1,9 s) + 2 × öffentliche Operation (je 7,7 s) | ≈ 19,3 s |
+| davon HKDF-SHA256, AES-GCM-Schlüsselaufbau, Record-Layer, Transkript | ≈ 2 s |
+| TLS-1.2-Handshake (Vergleich, Schritt 11) | 21,1 s |
+| X.509-Kette web.whatsapp.com (2 RSA-2048-Prüfungen), nach Korrektur der Kettenprüfung | 19,5 s (zwischenzeitlich 29,5 s, s. u.) |
+
+Hochrechnung auf die Live-Kette (`*.whatsapp.net` ← DigiCert G2 TLS RSA CA1 ← gepinnter G2-Schlüssel): X25519 8,1 s + Kette 19,5 s + Blattschlüssel 1,9 s + RSA-PSS 7,7 s ≈ **37 s** ohne Cache; mit gepinntem Zwischenzertifikat (eine Prüfung weniger) ≈ 27 s; mit Zertifikatscache (Fingerabdruck statt Kettenprüfung) ≈ 18 s. Das gemessene Zeitlimit von 60 s gilt für den TLS-1.2-Flight (PROTOCOL.md Abschnitt 8) und ist für TLS 1.3 noch nachzumessen; der Pong-Herzschlag greift erst nach dem WebSocket-Upgrade, innerhalb des TLS-Handshakes hilft nur Rechenzeit sparen.
+
+Nebenbefund und Korrektur: `x509_verify_chain` prüfte seit der Vertrauensanker-Änderung jedes Zertifikat zuerst unter dem gepinnten Wurzelschlüssel – für das Blatt eine vergeblich verbrauchte RSA-Operation (Kette 19,5 s → 29,5 s im ersten Lauf dieses Schritts). Jetzt eine Prüfung je Zertifikat (Aussteller als Nächstes in der Kette → dessen Schlüssel; letztes Zertifikat → gepinnter Schlüssel). Außerdem war `bench/tls_vector.h` nach der Neuaufzeichnung der TLS-1.2-Session (Extended Master Secret) veraltet, das Wiederabspielen scheiterte auf dem Ziel mit `finished mismatch`; der Header wird jetzt per Make-Regel aus `tests/vectors/tls_session.bin` erzeugt (`tools/gen_tls_vector.py`). Beide TLS-Replays erreichen CONNECTED (vamos und FS-UAE, Lauf 3: `RESULT: all vectors passed`).
+
+Einordnung: Der A500-Verbindungsaufbau liegt mit TLS 1.3 bei ≈ 37 s TLS + 25 s Noise + Pairing-Signaturen, also ≈ 60–65 s ohne Caches. Die großen Hebel bleiben unverändert: Zertifikatscache (−19,5 s), gepinntes Zwischenzertifikat, Karatsuba/Entrollen in `rsa_mont_mul` (−25 % auf alle vier RSA-Schritte), und ein in Ruhe vorberechnetes X25519-Schlüsselpaar (bereits so gebaut: `tls13_client_start_kp`).

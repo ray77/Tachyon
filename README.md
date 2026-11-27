@@ -188,7 +188,7 @@ Zusätzlich Taktzyklen, Chip-/Fast-RAM-Spitzen, Stack, Blitter-Auslastung, Kopie
 
 - Kein offiziell unterstütztes allgemeines WhatsApp-Client-Protokoll; Änderungen und Kontoeinschränkungen möglich.
 - ~~68000 könnte serverseitige Handshake-Zeitlimits überschreiten.~~ Gemessen (docs/PROTOCOL.md Abschnitt 8): TLS 60 s, WebSocket-Leerlauf 10 s, per Pong-Herzschlag unbegrenzt verlängerbar (120 s geprüft). Herzschlag eingebaut (`CRYPTO_YIELD()` in X25519/Ed25519/RSA, `crypto/ref/heartbeat.c`) und mit unserem WebSocket/Noise-Stack gegen den Server bestätigt: 30 s Rechenpause, 7 Pongs, Handshake angenommen (Abschnitt 9).
-- **TLS-Plan geändert (2026-11-27):** der Server wählt RSA-Schlüsseltransport, vollendet ihn aber für keinen Client (`decrypt_error`, auch OpenSSL/LibreSSL/Go). Der A500 geht über TLS 1.3 mit X25519 und RSA-PSS-Zertifikat – 1 X25519 online plus RSA-Prüfungen, kein P-256 (docs/PROTOCOL.md Abschnitt 7). Der TLS-1.3-Client ist noch zu schreiben.
+- **TLS-Plan geändert (2026-11-27):** der Server wählt RSA-Schlüsseltransport, vollendet ihn aber für keinen Client (`decrypt_error`, auch OpenSSL/LibreSSL/Go). Der A500 geht über TLS 1.3 mit X25519 und RSA-PSS-Zertifikat – 1 X25519 online plus RSA-Prüfungen, kein P-256 (docs/PROTOCOL.md Abschnitt 7). Der TLS-1.3-Client (`crypto/ref/tls13.c`) ist geschrieben, gegen Go geprüft und wird vom Server angenommen (`make wa-probe`: eigener Stack von TCP aufwärts).
 - Blitter-Setup und Speichertransfers könnten jeden Geschwindigkeitsvorteil aufheben.
 - 1,5 MiB RAM könnten für Synchronisation oder TLS nicht genügen.
 - Netzwerkstack und Kickstart 1.3 sind noch nicht auf Kompatibilität geprüft.
