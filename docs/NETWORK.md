@@ -99,7 +99,41 @@ Ziele: `make amiga-probe` (Binary 178 KiB), `make run-probe GAP=0` (FS-UAE, Minu
 
 ## 4. Ergebnisse
 
-Siehe docs/BENCHMARKS.md Schritt 17.
+**2026-11-27, FS-UAE, `make run-probe GAP=0`: `RESULT: handshake ACCEPTED by web.whatsapp.com with our TLS 1.3/WS/Noise stack, 0.00 s hold, 12 pongs`.** DNS 0,9 s, TCP 0,8 s, TLS 1.3 31,8 s, WebSocket 0,5 s, Noise 51,8 s (12 Pongs), erster entschlüsselter Server-Frame nach 105 s. Zeiten und Einordnung: docs/BENCHMARKS.md Schritt 17.
+
+Vier Hindernisse lagen zwischen „Stack startet“ und diesem Ergebnis, alle ohne Quelltext von TheWire13 oder dem Treiber gelöst:
+
+| Symptom | Ursache | Lösung |
+|---|---|---|
+| `OpenDevice` a2065.device rc −1, „SANA open failed“ | der Treiber öffnet `utility.library` (erst ab Kickstart 2.0) | eigene `LIBS:utility.library` 37 (`tools/amiga/utility13.*`) |
+| `S2_CONFIGINTERFACE` io_Error 5 (`S2ERR_BAD_ADDRESS`) | TheWire13 konfiguriert mit der *aktuellen* Adresse der unkonfigurierten Einheit (ff:ff:ff:ff:ff:ff), der Treiber nimmt nur seine ROM-Adresse; vorkonfigurieren (`sana2hold`) endet in `S2ERR_BAD_STATE`, auch fatal | `a2065fix.device` (`tools/amiga/sanafix.*`): Wrapper, konfiguriert immer die ROM-Adresse, gibt sie in `ios2_SrcAddr` zurück, meldet „schon konfiguriert“ als Erfolg |
+| Programm startet nicht (kein `result.txt`), `Avail`: Fast 464 Bytes frei | TheWire13 reserviert beim Start 12 × 40 KiB TCP-Pool (kein Konfigurationsschlüssel) | Programm vor dem Stack starten; der Pool fällt auf 4 PCBs (240 KiB) zurück |
+| ARP-Antworten kommen nie an (DNS scheitert, `connect` ETIMEDOUT) | der Wrapper gab den privaten `ios2_BufferManagement`-Zeiger des Treibers nicht an den Stack weiter (SANA-II: muss in jedem Request stehen) | Zeiger nach `OpenDevice` in den Request des Stacks kopieren |
+
+Daneben: `run >file cmd` leitet nur Runs eigene Ausgabe um, `run >NIL: cmd >file` die des Programms; der CLI-Stack von 4000 Bytes wird vor dem Stack auf 50000 gesetzt (`stack`); `echo` braucht Anführungszeichen; ein Fehler eines Kommandos bricht die Startup-Sequence ab (Failat 10).
+
+### Ablauf einer Verbindung (Auszug `SYS:result.txt`, FS-UAE)
+
+```text
++   3.26s  net: bsdsocket.library v4 open, stack answers (socket() ok) after 6 tries
++   4.18s  dns: web.whatsapp.com -> 57.144.245.32 in 900 ms
++   5.02s  tcp: connected to 57.144.245.32:443 in 820 ms
++   8.44s  tls: X25519 key pair ready (3.42 s)
++  40.18s  tls: chain completed at pin 1 (CA1 intermediate), 1 RSA verification
++  40.28s  tls: TLS 1.3 TLS_AES_128_GCM_SHA256 / X25519 connected, 2 certificates verified against the pin set {G2 root, CA1 intermediate}, RSA-PSS CertificateVerify and Finished verified
++  40.78s  ws: wss://web.whatsapp.com/ws/chat open
++  47.60s  noise: ClientHello sent
++  48.98s  noise: ServerHello received (350 bytes)
++  89.40s  noise: intermediate certificate serial 3 signed by WhatsApp's root key: VERIFIED
++ 100.52s  noise: leaf certificate serial 366 signed by the intermediate, key == server static: VERIFIED
++ 100.52s  noise: 0 X25519 ladders during the hold, 12 pongs sent, heartbeat error 0
++ 100.80s  noise: ClientFinish sent 51.80 s after ServerHello
++ 105.48s  noise: first encrypted server frame: 695 bytes ciphertext -> 679 bytes plaintext, first bytes 00 f8 0a 19 (binary node, pair-device IQ)
+TIMING: dns 900 ms, tcp connect 820 ms, tls 35240 ms, ws 35760 ms, server hello 43940 ms, client finish 95780 ms, accepted 100460 ms (ms since probe start, 12 pongs)
+RESULT: handshake ACCEPTED by web.whatsapp.com with our TLS 1.3/WS/Noise stack, 0.00 s hold, 12 pongs
+```
+
+Stackseitig (`SYS:stack.log`, `log_enabled=1`): ARP 10.0.2.3 → 52:55:0a:00:02:03, DNS-Antwort 115 Bytes, `tcp_connect_prepare local_port=51463 remote=57.144.245.32:443`, `SYNACK ack validated`, `TCP state -> ESTABLISHED ... rx_mss=1460 peer_mss=1460 tx_mss=512`. Speicher danach: Fast 872 Bytes frei, Chip 69 KiB frei (`SYS:avail.txt`).
 
 ### SANA-II-Treiber allein (FS-UAE, `make run-sana2`, 2026-11-27)
 
@@ -121,6 +155,10 @@ Das unveränderte Amiga-Binary erreicht gegen web.whatsapp.com: DNS 60 ms, TCP 4
 
 ## 5. Offen
 
+- Speicher: TheWire13 (Code 114 KiB, BSS 126 KiB, TCP-Pool 240–480 KiB, RX-Puffer) und Client müssen sich 1 MiB Fast + 512 KiB Chip teilen; der Pool hat keinen Konfigurationsschlüssel. Für den Client: unter ≈ 400 KiB bleiben, Stack nach dem Client starten, oder beim Autor einen Pool-Schlüssel erbitten.
+- Rückmeldung an den TheWire13-Autor (aminet@jaehne.tk): `S2_CONFIGINTERFACE` sollte die Default-Adresse aus `S2_GETSTATIONADDRESS`/`ios2_DstAddr` verwenden (wie AmiTCP), dann entfällt `a2065fix.device`.
+- DHCP (`NET_DHCP=1`) noch nicht getestet; statische slirp-Adressen genügen für die Emulation.
+- `tx_mss=512` (TheWire13-Default `tx_buffer=512`): TLS-Records von 16 KiB gehen in 32 Segmenten – für den Handshake egal, für Medien später relevant.
 - Entropiesammler und Seed-Datei (docs/RNG.md) statt `SYS:seed.bin`.
 - Zeit per SNTP über den Adapter (ein UDP-Datagramm; braucht `sendto`/`recvfrom` im Adapter) oder `mini_ntp` in der Startup-Sequence.
 - Zertifikatscache persistent in `ENVARC:` (heute nur im Speicher der Probe).

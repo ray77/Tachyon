@@ -315,3 +315,31 @@ A500/FS-UAE, die echte zweistufige Kette von web.whatsapp.com (`tests/certs/`), 
 Hochrechnung TLS-1.3-Handshake auf der Live-Kette, kalt (kein Zertifikatscache): 37 s → **≈ 27,5 s** (X25519 8,1 s + Kette 9,8 s + Blattschlüssel 1,9 s + RSA-PSS 7,7 s); mit warmem Cache bleibt es bei ≈ 16,5 s (Schritt 15), der Pin greift nur beim ersten Kontakt und nach einer Blattrotation. Fällt DigiCert auf ein anderes Zwischenzertifikat zurück, läuft die Prüfung über die Wurzel (19,5 s) weiter, ohne Codeänderung.
 
 Stand der TLS-Zeiten damit: kalt 27,5 s, warm 16,5 s, Fenster des Servers 60 s. Verbindungsaufbau gesamt (TLS + Noise mit ≈ 35–45 s) ≈ 50–70 s; größter Posten bleibt X25519 (8,1 s je Operation, 1 in TLS, 3 in Noise).
+
+## 2026-11-27 – Schritt 17: Netzwerk live – TLS 1.3, WebSocket und Noise gegen web.whatsapp.com aus dem emulierten A500
+
+Erster vollständiger Verbindungsaufbau vom Amiga-Binary aus (`make run-probe GAP=0`, docs/NETWORK.md): A500/FS-UAE wie oben, dazu die emulierte A2065 auf slirp (`network_card = a2065`), TheWire13 1.9.1 als Stack über `a2065fix.device` und unsere `utility.library` 37 für Kickstart 1.3, Programm `build/amiga/wa_probe` (407 KiB, vor dem Stack gestartet). Zeitbasis `DateStamp()` ab Programmstart; Zufall aus `SYS:seed.bin`, Uhrzeit aus `SYS:now.txt` (die Amiga-Uhr stand auf 1978).
+
+| Phase | Dauer | Zeitpunkt |
+|---|---:|---:|
+| Warten, bis `bsdsocket.library` öffnet und `socket()` antwortet (Stack startet parallel) | 3,2 s | 3,26 s |
+| DNS `web.whatsapp.com` → 57.144.245.32 (Resolver des Stacks, slirp-DNS 10.0.2.3) | 0,90 s | 4,18 s |
+| TCP-Verbindung Port 443 (SYN → SYN/ACK über slirp-NAT) | 0,82 s | 5,02 s |
+| X25519-Schlüsselpaar (Festbasis-Comb) | 3,42 s | 8,44 s |
+| TLS-1.3-Handshake: ClientHello → Server-Flight → Kette am Pin CA1 (1 RSA) → RSA-PSS → Finished | 31,8 s | 40,28 s |
+| WebSocket-Upgrade `/ws/chat` | 0,50 s | 40,78 s |
+| Noise-ClientHello (statisches + ephemeres Schlüsselpaar, 2 Comb-Multiplikationen) | 6,8 s | 47,60 s |
+| ServerHello (Netz, 350 Bytes) | 1,4 s | 48,98 s |
+| `noise_client_finish` (3 DH, HKDF, AES-GCM) + XEdDSA-Prüfung des Zwischenzertifikats | 40,4 s | 89,40 s |
+| XEdDSA-Prüfung des Blattzertifikats, Schlüsselvergleich | 11,1 s | 100,52 s |
+| ClientFinish gesendet – **51,8 s nach ServerHello, 12 Pongs vom Herzschlag** | 0,3 s | 100,80 s |
+| erster verschlüsselter Server-Frame (695 → 679 Bytes, Pair-Device-IQ) empfangen und entschlüsselt | 4,7 s | 105,48 s |
+
+`RESULT: handshake ACCEPTED by web.whatsapp.com with our TLS 1.3/WS/Noise stack, 0.00 s hold, 12 pongs` – auf dem 68000 mit 7,09 MHz, Kickstart 1.3, über einen echten TCP/IP-Stack und einen SANA-II-Treiber.
+
+### Einordnung
+
+- **TLS 1.3: 31,8 s** gegen 27,5 s Hochrechnung (Schritt 16, kalt). Die Differenz sind Netz und Transport: zwei Umläufe über slirp (je ≈ 0,8–1,4 s), der Server-Flight kommt in 1460-Byte-Segmenten und wird Record für Record entschlüsselt, dazu WaitSelect/recv im Stack. Der Rechenanteil ist wie gemessen. Vom TCP-Connect bis zum eigenen Finished vergehen 35,3 s – innerhalb des 60-s-Fensters des Servers (PROTOCOL.md Abschnitt 8), aber ohne viel Luft für langsamere Netze; der Zertifikatscache (−11 s, Schritt 15) ist deshalb nicht optional.
+- **Noise: 51,8 s** zwischen ServerHello und ClientFinish gegen die frühere Schätzung 35–45 s. Aufschlüsselung: 3 × X25519 (≈ 24 s) + 2 × XEdDSA (≈ 22 s) + HKDF/AES; die Schätzung hatte die zweite XEdDSA-Prüfung nicht enthalten. Die 12 Pongs (alle 4 s aus `CRYPTO_YIELD()`) haben die 10-s-Leerlaufgrenze überbrückt; der Server nahm den ClientFinish an und antwortete 4,7 s später (Entschlüsseln und Parsen auf dem 68000 inklusive).
+- **Gesamt ≈ 100 s** vom Programmstart bis zum ersten entschlüsselten Server-Frame, ≈ 97 s ab TCP. Mit warmem Zertifikatscache ≈ 86 s. Nächste Hebel: XEdDSA-Verifikation (22 s für zwei Zertifikate; das Zwischenzertifikat ist stabil und ließe sich wie die TLS-Kette cachen → −11 s), die 6,8 s für die zwei Comb-Schlüsselpaare vor dem ClientHello (vorab berechnen, wie das TLS-Schlüsselpaar), und die 3,4 s TLS-Schlüsselpaar (ebenfalls vorab).
+- **Speicher:** `Avail` nach dem Start beider Programme: Fast 872 Bytes frei, Chip 69 KiB frei. TheWire13 belegt Code 114 KiB + BSS 126 KiB + TCP-Pool (12 PCBs × 40 KiB = 480 KiB, ohne Konfigurationsschlüssel; fällt bei Knappheit auf 4 PCBs = 240 KiB zurück) + RX-Puffer; die Probe 407 KiB (Code 147 KiB, BSS 260 KiB inkl. 64 KiB Stack). Startet der Stack zuerst, bleibt kein Fast-RAM für die Probe (Loader-Fehler, kein `result.txt`). Für den Client heißt das: Stack und Client teilen sich 1 MiB Fast + 512 KiB Chip; der TCP-Pool des Stacks muss klein bleiben, der Client unter ≈ 400 KiB.
