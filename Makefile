@@ -152,12 +152,18 @@ vectors:
 	go run ./tools/genvectors -mode aesgcm -n 64 > tests/vectors/aesgcm_random.txt
 	go run ./tools/genvectors -mode rsapss -n 24 > tests/vectors/rsa_pss.txt
 
+bench/tls_vector.h: tests/vectors/tls_session.bin tools/gen_tls_vector.py
+	python3 tools/gen_tls_vector.py $< tv > $@
+
+bench/tls13_vector.h: tests/vectors/tls13_session.bin tools/gen_tls_vector.py
+	python3 tools/gen_tls_vector.py $< tv13 > $@
+
 crypto/ref/ed25519_btable.h: tools/gen_btable.c crypto/ref/ed25519.c
 	$(HOSTCC) -O2 -Icrypto/ref tools/gen_btable.c crypto/ref/x25519_ref.c crypto/ref/sha512.c crypto/ref/ed25519.c crypto/ref/yield.c -o build/gen_btable
 	./build/gen_btable > $@
 
 # ---- amiga -----------------------------------------------------------------
-$(AMIGA_ASM): $(UNITY_SRC) $(CRYPTO_SRC) $(BENCH_SRC) crypto/ref/x25519.h crypto/ref/ed25519.h bench/xeddsa_vector.h
+$(AMIGA_ASM): $(UNITY_SRC) $(CRYPTO_SRC) $(BENCH_SRC) crypto/ref/x25519.h crypto/ref/ed25519.h crypto/ref/tls13.h bench/xeddsa_vector.h bench/tls_vector.h bench/tls13_vector.h
 	@mkdir -p build/amiga
 	$(VC) $(VCFLAGS) $(UNITY_SRC) -o=$@
 
@@ -180,7 +186,7 @@ amiga: build/amiga/x25519bench
 VAMOS := $(HOME)/opt/amitools-venv/bin/vamos
 vamos: build/amiga/x25519bench
 	mkdir -p build/vamos-sys && cp $< build/vamos-sys/test && rm -f build/vamos-sys/result.txt
-	cd build/vamos-sys && $(VAMOS) -q -V sys:. -s 64 test > vamos.log 2>&1; grep -E 'PASS|FAIL|RESULT' build/vamos-sys/result.txt
+	cd build/vamos-sys && $(VAMOS) -q -V sys:. -s 64 test > vamos.log 2>&1; grep -E 'PASS|FAIL|RESULT' result.txt
 
 # Blitter AES experiment: own small binary
 build/amiga/blitaes.s: bench/amiga/blit_unity.c crypto/blit/blitaes.c crypto/blit/blitaes_prog.h bench/blitaes_bench.c crypto/ref/aes.c

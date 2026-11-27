@@ -30,6 +30,8 @@
 #include "../tests/certs/wa_rsa_chain.h"
 #include "tls12.h"
 #include "tls_vector.h"
+#include "tls13.h"
+#include "tls13_vector.h"
 
 
 struct ExecBase *SysBase;
@@ -600,6 +602,28 @@ int main(void)
         out(r ? "PASS " : "FAIL "); out("tls 1.2 RSA client handshake replay reaches CONNECTED\n"); ok &= r;
         if (!r) { out("  state "); out_dec((ULONG)tl.state); out(" error "); out(tls12_errstr(tl.error)); out("\n"); }
         report("tls 1.2 client handshake (1 cert verify + RSA encrypt + PRF + GCM)", t1 - t0, 1);
+    }
+
+    {   /* TLS 1.3 client handshake replayed against a recorded Go server session (the path the live edge completes):
+         * X25519 key pair (precomputable, timed separately), ServerHello -> X25519 shared secret, HKDF schedule,
+         * certificate verify (RSA-2048 PKCS#1), RSA-PSS CertificateVerify, server Finished, client Finished. */
+        static tls13 tl13; static x509_cert sc13; static hmac_drbg rng13; static tls13_keypair kp13;
+        int r;
+        r = x509_parse(&sc13, tv13_cert, sizeof tv13_cert);
+        rng13.instantiated = 0; drbg_instantiate(&rng13, tv13_seed, 64);
+        t0 = ticks_now();
+        r &= tls13_keypair_generate(&kp13, &rng13);
+        t1 = ticks_now();
+        report("tls 1.3 X25519 key pair (comb, precomputable)", t1 - t0, 1);
+        t0 = ticks_now();
+        r &= tls13_client_start_kp(&tl13, "tls-test.localhost", sc13.n, sc13.n_len, sc13.e, 0, &rng13, &kp13);
+        tl13.out_len = 0;
+        r &= tls13_input(&tl13, tv13_server, sizeof tv13_server);
+        t1 = ticks_now();
+        r &= tl13.state == TLS13_ST_CONNECTED;
+        out(r ? "PASS " : "FAIL "); out("tls 1.3 client handshake replay reaches CONNECTED\n"); ok &= r;
+        if (!r) { out("  state "); out_dec((ULONG)tl13.state); out(" error "); out(tls13_errstr(tl13.error)); out("\n"); }
+        report("tls 1.3 client handshake (X25519 + 1 cert verify + RSA-PSS verify + HKDF + GCM)", t1 - t0, 1);
     }
 
     blitter_bench();

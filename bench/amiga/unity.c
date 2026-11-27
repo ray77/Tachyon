@@ -13,6 +13,7 @@
 #include "../../crypto/ref/rsa.c"
 #include "../../crypto/ref/x509.c"
 #include "../../crypto/ref/tls12.c"
+#include "../../crypto/ref/tls13.c"
 #include "../../crypto/ref/sha1.c"
 #include "../../crypto/ref/ws.c"
 #include "../../crypto/ref/heartbeat.c"
