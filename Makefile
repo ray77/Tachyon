@@ -25,7 +25,7 @@ BENCH_SRC  := bench/x25519_bench.c
 UNITY_SRC  := bench/amiga/unity.c
 AMIGA_ASM  := build/amiga/x25519bench.s
 
-.PHONY: all host-test amiga run vamos vectors clean tls-test ws-test run-blitaes
+.PHONY: all host-test amiga run vamos vectors clean tls-test ws-test run-blitaes run-blitgcm
 
 all: host-test amiga
 
@@ -82,6 +82,10 @@ build/blitaes_test: tests/blitaes_test.c crypto/blit/blitaes.c crypto/blit/blita
 	@mkdir -p build
 	$(HOSTCC) $(HOST_CFLAGS) -Icrypto/blit tests/blitaes_test.c crypto/blit/blitaes.c crypto/ref/aes.c -o $@
 
+build/blitgcm_test: tests/blitgcm_test.c crypto/blit/blitgcm.c crypto/blit/blitgcm.h crypto/blit/blitaes.c crypto/blit/blitaes.h crypto/blit/blitaes_prog.h crypto/ref/aes.c
+	@mkdir -p build
+	$(HOSTCC) $(HOST_CFLAGS) -Icrypto/blit tests/blitgcm_test.c crypto/blit/blitgcm.c crypto/blit/blitaes.c crypto/ref/aes.c -o $@
+
 build/drbg_test: tests/drbg_test.c crypto/ref/drbg.c crypto/ref/drbg.h crypto/ref/sha256.c
 	@mkdir -p build
 	$(HOSTCC) $(HOST_CFLAGS) tests/drbg_test.c crypto/ref/drbg.c crypto/ref/sha256.c -o $@
@@ -90,7 +94,7 @@ build/aes_test: tests/aes_test.c crypto/ref/aes.c crypto/ref/aes.h
 	@mkdir -p build
 	$(HOSTCC) $(HOST_CFLAGS) tests/aes_test.c crypto/ref/aes.c -o $@
 
-host-test: build/x25519_test build/ed25519_test build/sha256_test build/aes_test build/drbg_test build/noise_test build/rsa_test build/x509_test build/blitaes_test
+host-test: build/x25519_test build/ed25519_test build/sha256_test build/aes_test build/drbg_test build/noise_test build/rsa_test build/x509_test build/blitaes_test build/blitgcm_test
 	./build/x25519_test tests/vectors/x25519_random.txt
 	./build/ed25519_test tests/vectors
 	./build/sha256_test
@@ -100,6 +104,7 @@ host-test: build/x25519_test build/ed25519_test build/sha256_test build/aes_test
 	./build/rsa_test tests/vectors/rsa_random.txt
 	./build/x509_test
 	./build/blitaes_test
+	./build/blitgcm_test
 
 vectors:
 	go run ./tools/genvectors -mode x25519 -n 256 > tests/vectors/x25519_random.txt
@@ -147,6 +152,17 @@ build/amiga/blitaes: bench/amiga/startup_blit.s build/amiga/blitaes.s crypto/m68
 	$(VASM) $(VASMFLAGS) -o $@ bench/amiga/startup_blit.s
 
 run-blitaes: build/amiga/blitaes
+	tools/run-fsuae.sh $< 300
+
+# Blitter AES-GCM library benchmark (crypto/blit/blitgcm.c on the real Copper/Blitter)
+build/amiga/blitgcm.s: bench/amiga/blitgcm_unity.c crypto/blit/blitgcm.c crypto/blit/blitgcm.h crypto/blit/blitaes.c crypto/blit/blitaes_prog.h bench/blitgcm_bench.c crypto/ref/aes.c
+	@mkdir -p build/amiga
+	$(VC) $(VCFLAGS) -Icrypto/blit bench/amiga/blitgcm_unity.c -o=$@
+
+build/amiga/blitgcm: bench/amiga/startup_blitgcm.s build/amiga/blitgcm.s crypto/m68k/aes.s crypto/m68k/blitexec.s crypto/m68k/blitgcm.s
+	$(VASM) $(VASMFLAGS) -o $@ bench/amiga/startup_blitgcm.s
+
+run-blitgcm: build/amiga/blitgcm
 	tools/run-fsuae.sh $< 300
 
 run: build/amiga/x25519bench

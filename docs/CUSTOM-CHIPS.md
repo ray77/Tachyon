@@ -1,6 +1,6 @@
 # Custom Chips als Krypto-Beschleuniger – Messung und Bewertung
 
-Stand 2026-11-26. Alle Zahlen A500/FS-UAE (accuracy=1), Workbench-1.3-Bildschirm (Hires, 2 Bitplanes), Code und Daten der CPU in Fast RAM, Blitter-Puffer in Chip RAM. Harness: `bench/blitter_bench.c`. README-Vorgabe: Hypothese → Implementierung → Korrektheit → Messung → Vergleich.
+Stand 2026-11-27. Alle Zahlen A500/FS-UAE (accuracy=1), Workbench-1.3-Bildschirm (Hires, 2 Bitplanes), Code und Daten der CPU in Fast RAM, Blitter-Puffer in Chip RAM. Harness: `bench/blitter_bench.c`. README-Vorgabe: Hypothese → Implementierung → Korrektheit → Messung → Vergleich.
 
 ## 1. Was der Blitter kann – gemessen
 
@@ -70,6 +70,34 @@ Display-DMA: In Lauf 21/23 lief die Kette mit Display an in 3,40 s (4,8 KB/s) un
 
 Fehler auf dem Weg (jeder kostete einen FS-UAE-Lauf, zusammen eine Nacht): Konsolen-Write im Blitter-Besitz (Deadlock), COPER-Flag von der Systemliste gesetzt, zweimal falsch gezählte Blockgröße (Blöcke überlappen → kein COP1LC-Update → Endlosschleife ab dem VBL), Diagnose-Blits, die die Schlüssel-Lanes im Arena überschrieben (danach verglichen Copper und Executor denselben Schrott erfolgreich), Rücktransposition mit der falschen Liste. Methode, die am Ende zog: eine Sektion nach der anderen per Copper ausführen, Rest per Executor, Ergebnis vergleichen (Hybridtest).
 
+## 2c. AES-GCM-Bibliothek auf der Copper-Kette – umgesetzt und gemessen (27.11., vormittags)
+
+**Ergebnis: `crypto/blit/blitgcm.c` liefert AES-256-GCM mit 9,1 KB/s gegen 5,56 KB/s auf der CPU allein (+63 %), bitgenau gegen `aes_gcm_encrypt/decrypt` auf dem Host (168 Fälle) und auf FS-UAE (40000 Byte + AAD, 64 KiB in drei Varianten). Ohne CPU-Eigenblöcke 7,0 KB/s.** Erwartung vorab (Abschnitt 2b): 9–10 KB/s; die Messung liegt am unteren Rand.
+
+Konstruktion (`crypto/blit/blitgcm.h/.c`, `crypto/m68k/blitgcm.s`, Harness `bench/blitgcm_bench.c`, `make run-blitgcm`, Host-Test `tests/blitgcm_test.c`):
+* API: `blitgcm_init(ctx, aes_gcm_key*, Arena 100 KiB Chip, Copper-Listen 73 KiB Chip)`, `blitgcm_encrypt/decrypt` mit genau der Signatur und Semantik von `aes_gcm_encrypt/decrypt` (IV 12 Byte, AAD, Tag 16 Byte, in/out dürfen aliasen). Einzige Abweichung: `blitgcm_decrypt` schreibt den Klartext schon während der Kette und nullt ihn bei Tag-Fehler (Vergleich constant-time), statt ihn gar nicht zu schreiben.
+* Batch = 1024 Blöcke. Die CPU schreibt die 128 Zählerlanes direkt ins transponierte Layout (`bg_ctr_fill_asm`: 96 Nonce-Lanes als 8 Zeilen je Byte, 32 Zähler-Lanes je Wort aus zwei 26-Wort-Tabellen; 8192 Wortschreibzugriffe): **20 ms statt 140 ms in C**, Ergebnis bitgleich mit der C-Variante (im Harness geprüft).
+* Copper-Kette ab SBOX: die SBOX-Liste springt mit `MOVE COP1LC`/`MOVE COPJMP1` direkt in die MIX-Liste, erst deren Terminator setzt das AUD3-Flag; FINAL springt ebenso nach TOUT. Je Batch **14 statt 29 CPU-Neustarts** (Rundenschlüssel-Zeiger werden zwischen den Runden an 128 Stellen gepatcht, der SBOX-Terminator für die Schlussrunde auf FINAL umgebogen). Kette je 16 KiB: 2,10 s (Harness mit 29 Neustarts: 2,24 s).
+* Timeout ohne DOS: der Poller zählt Rasterdurchläufe über VPOSR/VHPOSR; nach 150 Frames je Abschnitt (normal ≈ 12) parkt er den Copper, zählt `timeouts` hoch und rechnet den Batch auf der CPU nach – das Ergebnis bleibt korrekt, nur langsamer.
+* Chiffretext = Keystream ⊕ Klartext: liegen Klartext und Chiffretext im Chip-RAM, ein Blit (A = Keystream, B = Klartext, D = Chiffretext, 8 Wörter je Zeile, 20 ms je 16 KiB); sonst `bg_xor_asm` auf der CPU mit `movem` (≈ 33 ms je 16 KiB). Kopieren-Blit-Zurückkopieren wäre langsamer (≈ 45 ms) und bräuchte 16 KiB Chip-Puffer.
+* Während die Kette läuft, pollt die CPU das Flag zwischen Arbeitseinheiten: erst GHASH (AAD, dann Chiffretext von Batch n−1 bzw. beim Entschlüsseln gleich den aktuellen Batch – der Chiffretext ist ja bekannt), dann **eigene Blöcke** hinter dem Batch mit den T-Tabellen, so viele wie die Kette dauert (dynamische Aufteilung, im 64-KiB-Lauf 341 je Batch). Der nächste Batch beginnt hinter den CPU-Blöcken.
+* Rest < 1024 Blöcke: lohnt eine Kette noch? Faustregel aus den Zahlen (Kette 2,1 s gegen 2,86 ms je CPU-Block abzüglich unter der Kette versteckbarem GHASH): ab R > 1000 − pending/4 Blöcken (und R ≥ 512) Teil-Batch, der Blitter nimmt R − min(R/2, 400), die CPU den Rest; sonst CPU. J0/Längenblock/Tag immer CPU.
+* OwnBlitter, Bitplane-/Sprite-DMA aus, LOFlist/SHFlist geparkt, CDANG – alles innerhalb des Aufrufs, keine Konsolenausgabe dazwischen; die Bibliothek restauriert am Ende (WaitTOF, DisownBlitter).
+
+| 64 KiB AES-256-GCM, Lauf 1 | Zeit | Durchsatz | davon Kette / Lanes / XOR / Schluss |
+|---|---:|---:|---|
+| CPU `aes_gcm_encrypt` (T-Tabellen + GHASH asm) | 11,78 s | 5,56 KB/s | – |
+| Blitter-Kette + GHASH, keine CPU-Blöcke (4 Batches) | 9,36 s | 7,0 KB/s | 8,38 / 0,16 / 0,12 / 0,60 s |
+| **Blitter-Kette + GHASH + CPU-Eigenblöcke (3 Batches + 1024 CPU-Blöcke)** | **7,22 s** | **9,1 KB/s** | 6,30 / 0,12 / 0,10 / 0,62 s |
+| dito, Puffer im Chip-RAM (XOR-Blit) | 7,18 s | 9,1 KB/s | 6,30 / 0,12 / 0,02 / 0,64 s |
+| 40000 B + 20 B AAD, verschlüsseln (1 voller + 1 Teil-Batch, 993 CPU-Blöcke) | 5,14 s | 7,8 KB/s | Schluss 0,74 s |
+| 40000 B, entschlüsseln (2 volle Batches, 452 CPU-Blöcke) | 4,38 s | 9,1 KB/s | Schluss 0 s |
+| CPU `aes_gcm_encrypt` 40000 B | 7,20 s | 5,56 KB/s | – |
+
+Lesart: Die CPU ist unter der Kette voll beschäftigt (GHASH ≈ 1000 Blöcke + 341 AES-Blöcke in 2,1 s), die Kette selbst ist mit 2,10 s je 16 KiB die Untergrenze dieser Pipeline. Der Schlussteil (GHASH des letzten Batches, 0,6 s = 8 %) ist beim Verschlüsseln unvermeidbar seriell, beim Entschlüsseln entfällt er – deshalb ist Entschlüsseln (Medien-Download!) mit 9,1 KB/s schon bei 40 KB so schnell wie Verschlüsseln bei 64 KB. Der XOR-Blit spart gegenüber der CPU nur 80 ms je 64 KiB; Chip-RAM für Medienpuffer lohnt dafür nicht. Chip-RAM-Bedarf der Bibliothek: 173 KiB.
+
+Was noch ginge (nicht umgesetzt): 96 Nonce-Lanes vom Copper füllen statt von der CPU (−10 ms je Batch), MIX-Liste frei laufen lassen mit Schlüssel-Patch im Schatten der SBOX-Liste (−14 Neustarts, Risiko bei Verdrängung der CPU), Display-DMA-Anteil je Lauf messen. Größerer Hebel bleibt die Gatterzahl der S-Box (Abschnitt 5).
+
 ## 2a. Erste Rechnung (vor der Umsetzung)
 
 Anordnung: ein 16-Bit-Wort trägt dasselbe Bit derselben Bytes aus 16 Blöcken; eine S-Box-Gatteroperation über alle 16 Bytepositionen ist ein Blit über 16 Wörter je 16 Blöcke. Für 1024 Blöcke (16 KiB) also 1024-Wort-Blits à 2,06 ms (1,40 ms ohne Display). Boyar-Peralta-S-Box: 113 Gatter; MixColumns + AddRoundKey mit 3-Quellen-XOR ≈ 256 Blits; ShiftRows kostenlos (Adress-Umbenennung).
@@ -94,6 +122,7 @@ X25519/Ed25519 bestehen aus 16×16-Bit-Multiplikationen (MULU, 256 je Feldmultip
 
 * ~~Blit-Setup in Assembler~~ gemessen: 3,76 → 3,70 s, der Blitter ist DMA-begrenzt.
 * ~~Copper-gesteuerte Blit-Kette~~ umgesetzt: 6,9 KB/s bei 87 % freier CPU (Abschnitt 2b).
-* CTR-Zählerblöcke direkt als Lanes erzeugen (die unteren 6 Zählerbits sind periodische Bitmuster, die oberen je 64er-Chunk konstant): spart Kopie-hinein und Transposition-hinein (≈ 220 ms je Batch).
+* ~~CTR-Zählerblöcke direkt als Lanes erzeugen~~ umgesetzt (Abschnitt 2b/2c): 20 ms in Assembler statt Kopie + Transposition.
+* ~~AES-GCM-Bibliothek auf der Kette~~ umgesetzt: 9,1 KB/s (Abschnitt 2c).
 * Weniger Blitter-Zugriffe statt weniger Blits: S-Box-Gatter mit drei Eingängen (A^B^C, Minterm 0x96) statt Zweier-XOR-Ketten, MixColumns-Termteilung.
 * Echte Hardware: Blitter-Timing ist in FS-UAE zyklengenau modelliert, Chip-RAM-Konflikte mit Bitplane-DMA ebenfalls; eine Bestätigung auf dem A500 steht aus.

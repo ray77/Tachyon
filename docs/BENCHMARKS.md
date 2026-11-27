@@ -233,3 +233,19 @@ A500/FS-UAE, DateStamp-Ticks, alle Vektoren gegen Go (`tools/genvectors/rsa.go`,
 | Noise-XX-Client-Handshake (3 X25519 + HKDF + 6 GCM-Schlüsselaufbauten) | – | 25,3 s |
 
 Einordnung: Verbindungsaufbau (TLS 21 s + Noise 25 s + Pairing-Signaturen) liegt jetzt bei ≈ 50 s. Größter Einzelposten bleibt X25519 (8,1 s je Operation, 3 im Noise-Handshake). Für RSA bliebe Karatsuba über den 128 Limbs (≈ −25 %) und das Entrollen der Comba-Innenschleife; beides zurückgestellt, weil der Zertifikatsweg nur einmal je Verbindung läuft und das Serverzertifikat zwischengespeichert werden kann (Fingerabdruck-Vergleich statt erneuter Verifikation: 19,5 s → Millisekunden bei unverändertem Zertifikat).
+
+## 2026-11-27 – Schritt 12: AES-GCM-Bibliothek mit Keystream auf dem Blitter (`crypto/blit/blitgcm.c`)
+
+Details in docs/CUSTOM-CHIPS.md Abschnitt 2c. A500/FS-UAE, AES-256-GCM, Puffer in Fast RAM, bitgenau gegen `aes_gcm_encrypt/decrypt` (Host: 168 Fälle inkl. Längen 0/15/16/16383/16384/16385/40000, mit/ohne AAD, in place, AES-128; FS-UAE: 40000 B + AAD und 64 KiB in drei Varianten, Tag-Manipulation abgewiesen).
+
+| Variante (64 KiB) | Zeit | Durchsatz |
+|---|---:|---:|
+| CPU `aes_gcm_encrypt` (T-Tabellen + GHASH asm), Referenz | 11,78 s | 5,56 KB/s |
+| Blitter-Kette + GHASH auf der CPU, keine CPU-Blöcke | 9,36 s | 7,0 KB/s |
+| **Blitter-Kette + GHASH + CPU-Eigenblöcke (dynamische Aufteilung)** | **7,22 s** | **9,1 KB/s** |
+| dito, Puffer im Chip-RAM (Chiffretext per XOR-Blit) | 7,18 s | 9,1 KB/s |
+| Entschlüsseln 40000 B (GHASH läuft dem Blitter voraus, kein serieller Schluss) | 4,38 s | 9,1 KB/s |
+| Zählerlanes je Batch: C 140 ms → Assembler | | **20 ms** |
+| Copper-Kette je 16 KiB: 29 → 14 CPU-Neustarts (SBOX springt per COPJMP1 nach MIX) | 2,24 → **2,10 s** | |
+
+Hypothese war 9–10 KB/s (Abschnitt 2b): bestätigt am unteren Rand. Die Kette (2,1 s je 16 KiB) ist die Untergrenze, die CPU ist darunter voll ausgelastet (GHASH ≈ 1000 Blöcke + ≈ 340 eigene AES-Blöcke je Kette). Beim Verschlüsseln bleibt der GHASH des letzten Batches seriell (0,6 s = 8 %). Preis: 173 KiB Chip-RAM (Arena + Copper-Listen), Anzeige während eines Aufrufs aus. Erster FS-UAE-Lauf fehlerfrei; der Host-Test mit simulierter Kettenlatenz (`ctx.soft_polls`) hatte vorher den einzigen Fehler gefunden (Tabellen-Shift der Zählerbits 6..31 um n statt n−6, sichtbar ab Block 62).
