@@ -296,7 +296,9 @@ A500/FS-UAE, dieselbe aufgezeichnete Session wie in Schritt 14, zweimal abgespie
 | Operation | Zeit |
 |---|---:|
 | TLS-1.3-Handshake online, Kette geprüft (Schritt 14) | 29,4 s |
-| **TLS-1.3-Handshake online, Zertifikat im Cache** (X25519 + `rsa_pub_set` Blatt + RSA-PSS-CertificateVerify + HKDF + GCM) | **19,8 s** |
+| TLS-1.3-Handshake online, Zertifikat im Cache (X25519 + `rsa_pub_set` Blatt + RSA-PSS-CertificateVerify + HKDF + GCM) | 19,8 s |
 | Ersparnis = eine Zertifikatsprüfung (`rsa_pub_set` 1,9 s + öffentliche Operation 7,7 s) | −9,6 s |
+| **dito, zusätzlich der vorbereitete Blattschlüssel (`rsa_pub`, R² mod n) im Cache**, auf Treffer mit `rsa_pub_check` geprüft (ein Montgomery-Produkt statt `rsa_pub_set`) | **18,3 s** |
+| Ersparnis `rsa_pub_set` 1,9 s − `rsa_pub_check` 0,45 s | −1,5 s |
 
-Hochrechnung Live-Kette (2 Prüfungen gespart): 37 s → **≈ 18 s** (X25519 8,1 s + Blattschlüssel 1,9 s + RSA-PSS 7,7 s + ≈ 0,5 s Rest); mit dem 60-s-Fenster (Abschnitt 8) bleiben 42 s Reserve. Übrig als RSA-Posten: `rsa_pub_set` des Blattschlüssels (R² mod n, 1,9 s – könnte mit dem Fingerabdruck mitgespeichert werden) und die eine PSS-Prüfung (7,7 s, Karatsuba/Entrollen ≈ −25 %). Der Verbindungsaufbau mit warmem Cache liegt damit bei ≈ 18 s TLS + 25 s Noise.
+Hochrechnung Live-Kette (2 Prüfungen und der Blattschlüssel gespart): 37 s → **≈ 16,5 s** (X25519 8,1 s + Schlüsselprüfung 0,45 s + RSA-PSS 7,7 s + ≈ 0,3 s Rest); mit dem 60-s-Fenster (Abschnitt 8) bleiben 43 s Reserve. Übrig als RSA-Posten nur noch die eine PSS-Prüfung (7,7 s, Karatsuba/Entrollen ≈ −25 %). Der Verbindungsaufbau mit warmem Cache liegt damit bei ≈ 16,5 s TLS + 25 s Noise. Der Cache ist ≈ 1,1 KiB (Fingerabdruck 32 Byte + `rsa_pub`); ein beschädigter Eintrag (`rsa_pub_check` schlägt fehl) zählt als Fehltreffer und wird nach der vollen Prüfung überschrieben – Hosttest mit verfälschtem R², kein Aussperren.
