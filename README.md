@@ -2,6 +2,22 @@
 
 # Tachyon – Native WhatsApp für den Amiga 500
 
+## Stand (2026-11-27 abends)
+
+Der emulierte A500 (FS-UAE, zyklengenau, 68000 bei 7,09 MHz, 2 MiB Fast) ist **als verknüpftes Gerät bei WhatsApp angemeldet und loggt sich mit gespeicherten Zugangsdaten ein** – mit eigenem Stack von TCP aufwärts, ohne Gateway, ohne Fremdrechenleistung. Das Telefon führt ihn als „Firefox (Amiga 500)“. Alles in `docs/` ist gemessen, nichts geschätzt.
+
+| Was | Stand | Belege |
+|---|---|---|
+| Kryptografie auf dem 68000 (Phase 2) | X25519-Leiter **7,71 s**, Schlüsselpaar (Comb) 3,1 s, XEdDSA-Prüfung 9,4 s, Signatur 7,8 s, RSA-2048-Verifikation 7,7 s, SHA-256 9,9 KB/s, AES-256-GCM 5,6 KB/s CPU / **11 KB/s mit Blitter+Copper** – alles asm, bitidentisch zu den C-Referenzen, RFC-/Go-/libsignal-Vektoren | BENCHMARKS.md 1–13, 20, CUSTOM-CHIPS.md, X25519-PLAN.md |
+| Netzwerk (Phase 3) | DNS, TCP (TheWire13 `bsdsocket.library` unter Kickstart 1.3, A2065 auf slirp), **TLS 1.3** mit Pin-Menge, Zertifikatscache und RSA-PSS, WebSocket | NETWORK.md, PROTOCOL.md 7, BENCHMARKS.md 14–18 |
+| WhatsApp-Verbindung (Phase 4) | Noise XX bitgenau zu whatsmeow, binäres XML/Protobuf, **QR-Pairing vom Bildschirm**, Identität, persistente Zugangsdaten, Login, Prekey-Upload, `<active/>`, Bestätigungen, zlib-Frames | PROTOCOL.md 6, 11; UI.md; BENCHMARKS.md 19–23 |
+| **Programmstart → eingeloggt** | **47 s** (mittags noch 122 s): vor dem Connect wird nichts mehr gerechnet, die Verbindung selbst dauert 43 s (TLS 20 s, Noise 20 s) – drei X25519-Leitern mit frischem Server-Ephemeral, RSA-PSS, HKDF/GCM | BENCHMARKS.md 21–23 |
+| Serverlimits | TLS-Flight 60 s, WebSocket-Leerlauf 10 s, per Pong-Herzschlag beliebig verlängerbar; keine TLS-Tickets vom Server | PROTOCOL.md 8 |
+| Speicher | Stack + Client brauchen 2 MiB Fast (190 KiB Fast + 447 KiB Chip frei im Betrieb); 1 MiB bleibt die Benchmark-Maschine | NETWORK.md 6 |
+| Offline-Tests | 24 Host-Testprogramme (ASan/UBSan), Pairing-Simulator (136 Prüfungen), alle Vektoren unter vamos und FS-UAE; Live-Versuche nach der Taktregel in PROTOCOL.md 11 | `make host-test`, `make pair-sim`, `make vamos` |
+
+Noch nicht: Signal-Sessions (Phase 5, nächster Block: Nachrichten entschlüsseln und senden), GUI (Phase 6; vorhanden ist der Hires-Schirm mit QR-Code und Konsolenfenster), echte Hardware (FS-UAE ist zyklengenau, eine Bestätigung auf dem A500 steht aus).
+
 ## Ziel und verbindliche Hardware
 
 Ein vollständig nativer WhatsApp-Multi-Device-Client, der echte Nachrichten direkt sendet und empfängt. Alle Protokolle und kryptografischen Operationen laufen lokal.
@@ -176,11 +192,11 @@ Zusätzlich Taktzyklen, Chip-/Fast-RAM-Spitzen, Stack, Blitter-Auslastung, Kopie
 
 ## Entwicklungsphasen
 
-1. **Recherche:** aktuelles Protokoll, Multi-Device, Kryptografie, Zeitlimits, Netzwerkstack, sichere Entropie, Lizenzen.
-2. **Kryptografie:** portable Referenz, X25519-Benchmark, 68000-Optimierung, AES/SHA/GHASH, Blitter/Copper-Experimente, Testvektoren.
-3. **Netzwerk:** TCP/IP, DNS, TLS, Zertifikatsprüfung, WebSocket, Speicher- und Laufzeitmessung.
-4. **WhatsApp-Verbindung:** binäres Protokoll, Noise, QR-Pairing, Identität, persistente Sitzung, Wiederverbindung.
-5. **E2EE:** Signal-Sitzungen, Schlüsselverwaltung, Double Ratchet, erste echte gesendete und empfangene Textnachricht.
+1. **Recherche:** aktuelles Protokoll, Multi-Device, Kryptografie, Zeitlimits, Netzwerkstack, sichere Entropie, Lizenzen. ✅ (docs/PROTOCOL.md, RNG.md)
+2. **Kryptografie:** portable Referenz, X25519-Benchmark, 68000-Optimierung, AES/SHA/GHASH, Blitter/Copper-Experimente, Testvektoren. ✅ (BENCHMARKS.md, CUSTOM-CHIPS.md)
+3. **Netzwerk:** TCP/IP, DNS, TLS, Zertifikatsprüfung, WebSocket, Speicher- und Laufzeitmessung. ✅ (NETWORK.md)
+4. **WhatsApp-Verbindung:** binäres Protokoll, Noise, QR-Pairing, Identität, persistente Sitzung, Wiederverbindung. ✅ Pairing und Login laufen (PROTOCOL.md 11); Wiederverbindung im Fehlerfall ist noch Sache des Clients.
+5. **E2EE:** Signal-Sitzungen, Schlüsselverwaltung, Double Ratchet, erste echte gesendete und empfangene Textnachricht. ⬅ nächster Block (Prekey-Bundles, X3DH, `<message>` entschlüsseln)
 6. **GUI:** Intuition, Kontakte, Chats, Gruppen, Verlauf, Benachrichtigungen.
 7. **Optimierung:** Speicher, Handshake-Laufzeit, CPU-Auslastung, Backend-Auswahl, Dauerbetrieb, Absturzsicherheit und Schlüsselablage.
 
@@ -190,13 +206,14 @@ Zusätzlich Taktzyklen, Chip-/Fast-RAM-Spitzen, Stack, Blitter-Auslastung, Kopie
 - ~~68000 könnte serverseitige Handshake-Zeitlimits überschreiten.~~ Gemessen (docs/PROTOCOL.md Abschnitt 8): TLS 60 s, WebSocket-Leerlauf 10 s, per Pong-Herzschlag unbegrenzt verlängerbar (120 s geprüft). Herzschlag eingebaut (`CRYPTO_YIELD()` in X25519/Ed25519/RSA, `crypto/ref/heartbeat.c`) und mit unserem WebSocket/Noise-Stack gegen den Server bestätigt: 30 s Rechenpause, 7 Pongs, Handshake angenommen (Abschnitt 9).
 - **TLS-Plan geändert (2026-11-27):** der Server wählt RSA-Schlüsseltransport, vollendet ihn aber für keinen Client (`decrypt_error`, auch OpenSSL/LibreSSL/Go). Der A500 geht über TLS 1.3 mit X25519 und RSA-PSS-Zertifikat – 1 X25519 online plus RSA-Prüfungen, kein P-256 (docs/PROTOCOL.md Abschnitt 7). Der TLS-1.3-Client (`crypto/ref/tls13.c`) ist geschrieben, gegen Go geprüft und wird vom Server angenommen (`make wa-probe`: eigener Stack von TCP aufwärts).
 - **Netzwerk läuft (2026-11-27):** `net/bsdsock_io.c` über TheWire13s `bsdsocket.library` (Kickstart 1.3), FS-UAE mit emulierter A2065 auf slirp. Der emulierte A500 baut die komplette Verbindung selbst auf: DNS, TCP, TLS 1.3 (31,8 s), WebSocket, Noise XX mit Herzschlag (51,8 s, 12 Pongs) – `RESULT: handshake ACCEPTED by web.whatsapp.com` (docs/NETWORK.md, BENCHMARKS.md Schritt 17). Dafür nötig: eigene `utility.library` für 1.3 und der SANA-II-Wrapper `a2065fix.device`. Mit den drei X25519-Schlüsselpaaren vor dem Connect und dem Fingerabdruck-Cache für WhatsApps Noise-Zwischenzertifikat (PROTOCOL.md 6) schrumpft das Verbindungsfenster auf 78 s, Noise auf 40,1 s (Schritt 18). Speicher: mit 1 MiB Fast bleiben nach Stack und Probe 872 Bytes Fast frei, mit 2 MiB 190 KiB Fast + 447 KiB Chip – der Netz-Client setzt deshalb 2 MiB Fast voraus (NETWORK.md Abschnitt 6). DHCP über slirp getestet (`NET_DHCP=1`): zwei Umläufe, `IP: 10.0.2.15 (DHCP)`, Handshake wie statisch.
-- **Pairing läuft (2026-11-27):** der emulierte A500 meldet sich als verknüpftes Gerät an (PROTOCOL.md Abschnitt 11, `proto/identity.c`, `clientpayload.c`, `pairing.c`, `creds.c`): Identität mit XEdDSA-signiertem Prekey, Registrierungs-Payload byteidentisch zu whatsmeow, QR-Code V11 auf dem Hires-Schirm (61 × 61 Module à 6 × 3 Pixel), vom Telefon aus dem FS-UAE-Fenster gescannt; `pair-success` geprüft (HMAC + Account-Signatur 11,3 s), Geräte-Signatur 7,8 s, `pair-device-sign` angenommen, 515-Neustart, Login-Verbindung 76 s – `RESULT: PAIRED and LOGGED IN`, Zugangsdaten in `tachyon.creds` (BENCHMARKS.md Schritt 19). Host und A500 sind beim ersten Versuch gepaart, das Telefon führt den A500 als „Firefox (Amiga 500)“; Live-Versuche nach der Taktregel in PROTOCOL.md 11.
-- Blitter-Setup und Speichertransfers könnten jeden Geschwindigkeitsvorteil aufheben.
-- 1,5 MiB RAM könnten für Synchronisation oder TLS nicht genügen.
-- Netzwerkstack und Kickstart 1.3 sind noch nicht auf Kompatibilität geprüft.
-- Sichere Entropie, Uhrzeit, Schlüsselablage und fehlende Speicherisolation sind Herausforderungen.
-- Erfolgreiche Kryptografie-Benchmarks garantieren keinen funktionierenden WhatsApp-Client.
-- Es liegen noch keine eigenen Benchmarks oder funktionierenden Prototypen vor.
+- **Pairing läuft (2026-11-27):** der emulierte A500 meldet sich als verknüpftes Gerät an (PROTOCOL.md Abschnitt 11, `proto/identity.c`, `clientpayload.c`, `pairing.c`, `creds.c`): Identität mit XEdDSA-signiertem Prekey, Registrierungs-Payload byteidentisch zu whatsmeow, QR-Code V11 auf dem Hires-Schirm (61 × 61 Module à 6 × 3 Pixel), vom Telefon aus dem FS-UAE-Fenster gescannt; `pair-success` geprüft (HMAC + Account-Signatur 11,3 s), Geräte-Signatur 7,8 s, `pair-device-sign` angenommen, 515-Neustart – `RESULT: PAIRED and LOGGED IN`, Zugangsdaten in `tachyon.creds` (BENCHMARKS.md Schritt 19). Host und A500 sind beim ersten Versuch gepaart, das Telefon führt den A500 als „Firefox (Amiga 500)“; Live-Versuche nach der Taktregel in PROTOCOL.md 11.
+- **Login-Verbindung 76 s → 43 s, Start → eingeloggt 122 s → 47 s (2026-11-27 abends):** TLS-Zertifikatscache als Datei, Cache für beide Noise-Zertifikate, schnellere Leiter (7,71 s), Noise `es` mit dem gespeicherten Server-Static vorab, Schlüsselpaare, `es` und Prekeys im Leerlauf nach dem Login für den nächsten Start (BENCHMARKS.md 20–23, PROTOCOL.md 6). Der Server schickt keine TLS-Tickets; was bleibt, sind drei X25519-Leitern mit frischem Server-Ephemeral – weniger geht nur mit Protokollwechsel.
+- ~~Blitter-Setup und Speichertransfers könnten jeden Geschwindigkeitsvorteil aufheben.~~ Gemessen (CUSTOM-CHIPS.md): bit-sliced AES auf Blitter + Copper liefert so viel wie die CPU, beide zusammen das Doppelte (AES-256-GCM 11 KB/s statt 5,6) – für den Medienpfad; für Kurvenarithmetik ohne Addierer rund 100× zu langsam, verworfen. Für den Verbindungsaufbau ist AES ohne Belang.
+- ~~1,5 MiB RAM könnten für Synchronisation oder TLS nicht genügen.~~ Gemessen (NETWORK.md 6): TLS/Noise/Pairing laufen mit 1 MiB Fast, aber mit 872 Bytes Reserve; der Client setzt 2 MiB Fast voraus. Große Servernachrichten (170 KB Offline-Stapel) werden verworfen statt geladen; Streaming-Verarbeitung ist Sache der Signal-Schicht.
+- ~~Netzwerkstack und Kickstart 1.3 sind noch nicht auf Kompatibilität geprüft.~~ TheWire13 läuft unter 1.3 mit eigener `utility.library` und dem SANA-II-Wrapper `a2065fix.device` (NETWORK.md); AmiTCP/Roadshow nicht geprüft.
+- Sichere Entropie (docs/RNG.md: Pool + HMAC_DRBG, Seed-Datei), Uhrzeit (Host-Zeit, später NTP) und Schlüsselablage (Dateien auf `SYS:`, später `ENVARC:`; private Ephemeral-Schlüssel des nächsten Starts liegen neben der Identität) sind gelöst genug für die Probe, nicht für den Client; Speicherisolation gibt es auf dem 68000 nicht.
+- Erfolgreiche Kryptografie-Benchmarks garantieren keinen funktionierenden WhatsApp-Client – aber der Login läuft; offen sind Signal-Sessions und GUI.
+- Echte Hardware: alle Zahlen stammen aus FS-UAE (zyklengenau); die Bestätigung auf einem A500 steht aus, besonders für Blitter-/Copper-Timing.
 
 ## Konkreter Arbeitsauftrag an Claude
 
@@ -209,6 +226,6 @@ Hypothese → Implementierung → Korrektheitstest → Benchmark
 
 Erfolgreiche und gescheiterte Ansätze, Messkonfigurationen und Testresultate dokumentieren. Keine unbelegten Performanceversprechen. Keine zusätzliche CPU und keine ausgelagerte Rechenleistung. Sicherheitsstandards niemals abschwächen. Hardware als Gesamtsystem betrachten, aber spekulative Ansätze ohne messbaren Vorteil verwerfen.
 
-**Erster Meilenstein:** korrekte und ausreichend schnelle lokale kryptografische Verbindung auf dem originalen A500 mit 1 MiB Fast-RAM zusätzlich.
+**Erster Meilenstein:** korrekte und ausreichend schnelle lokale kryptografische Verbindung auf dem originalen A500 mit 1 MiB Fast-RAM zusätzlich. ✅ Erreicht am 2026-11-27 (emuliert): Handshake angenommen, Pairing, Login in 43 s; für den Client sind es 2 MiB Fast.
 
 **Endgültiger Meilenstein:** echte WhatsApp-Textnachrichten direkt senden und empfangen, ohne Gateway oder externe Rechenunterstützung.
