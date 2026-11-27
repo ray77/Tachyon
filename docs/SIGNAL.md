@@ -118,4 +118,4 @@ Analyse nach Versuch 4 (vor Versuch 5 so vermutet): ein Stall unter der Anwendun
 
 Behoben für Versuch 6: Bytes auf der Leitung zählen als Aktivität (die Schleife wartet, bis der Frame fertig ist; `drain_quiet_ms` lässt den Simulator den Timer verkürzen – Szenario F liefert die 58-KB-Nachricht jetzt in 1-KB-Stücken über 9 s bei 2 s Timer), Stille-Zeilen nur bei echter Stille, TLS-Klartext- und Inflate-Puffer ins Chip-RAM, `tcp_window` 8 KiB (Fast-RAM). 361 Prüfungen, `make signal-test` 79, vbcc-Build.
 
-*Versuch 6 (Empfang der Antwort) steht aus (Freigabe nötig).*
+*Versuch 6 (Empfang der Antwort) steht aus: Pause auf Wunsch des Nutzers bis zum nächsten Tag, Start nur nach neuer Freigabe (Taktregel).*
