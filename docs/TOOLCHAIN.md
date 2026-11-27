@@ -43,7 +43,7 @@ make vectors       # Zufallsvektoren mit Go neu erzeugen
 
 `tools/run-fsuae.sh <exe>` legt `build/fsuae-run/dh0` als Verzeichnis-Festplatte (Bootpriorität 6) an, mit `S/Startup-Sequence` = Programm + `EndCLI`. Unter 1.3 gibt es keine residenten C:-Kommandos, deshalb muss das Programm selbst `SYS:result.txt` und zum Schluss `SYS:done` schreiben.
 
-Konfiguration: `tools/fsuae/a500-1mb-fast.fs-uae` (A500, `accuracy = 1`, `chip_memory = 512`, `slow_memory = 0`, `fast_memory = 1024`).
+Konfiguration: `tools/fsuae/a500-1mb-fast.fs-uae` (A500, `accuracy = 1`, `chip_memory = 512`, `slow_memory = 0`, `fast_memory = 1024`); Netzvarianten `a500-1mb-fast-net.fs-uae` und `a500-2mb-fast-net.fs-uae` (`network_card = a2065`, `fast_memory` 1024 bzw. 2048; `tools/run-fsuae-net.sh` schaltet mit `NET_FAST`, `make run-probe FAST=2048`).
 
 ## Stack
 

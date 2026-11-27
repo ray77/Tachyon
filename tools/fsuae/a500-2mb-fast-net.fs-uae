@@ -1,0 +1,18 @@
+# Tachyon client machine with network: A500, OCS, Kickstart 1.3, 512 KiB Chip + 2 MiB Fast (the client's minimum, see docs/NETWORK.md 6), emulated A2065 (Zorro II Ethernet)
+# on FS-UAE's slirp user-mode NAT (guest 10.0.2.15, gateway 10.0.2.2, DNS 10.0.2.3; outbound TCP only).
+# The hard drive directory (DH0) is supplied on the command line by tools/run-fsuae.sh.
+[config]
+amiga_model = A500
+kickstart_file = $HOME/Documents/FS-UAE/Kickstarts/kick13-34.5-a500.rom
+chip_memory = 512
+slow_memory = 0
+fast_memory = 2048
+accuracy = 1
+floppy_drive_0 = $HOME/Documents/FS-UAE/Floppies/wb133-boot.adf
+floppy_drive_count = 1
+window_width = 640
+window_height = 512
+fullscreen = 0
+video_sync = 0
+zoom = auto
+network_card = a2065

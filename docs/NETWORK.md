@@ -155,7 +155,7 @@ Das unveränderte Amiga-Binary erreicht gegen web.whatsapp.com: DNS 60 ms, TCP 4
 
 ## 5. Offen
 
-- Speicher: TheWire13 (Code 114 KiB, BSS 126 KiB, TCP-Pool 240–480 KiB, RX-Puffer) und Client müssen sich 1 MiB Fast + 512 KiB Chip teilen; der Pool hat keinen Konfigurationsschlüssel. Für den Client: unter ≈ 400 KiB bleiben, Stack nach dem Client starten, oder beim Autor einen Pool-Schlüssel erbitten.
+- Speicher: mit 1 MiB Fast müssen sich TheWire13 und Client 1 MiB Fast + 512 KiB Chip teilen, der Client bleibt unter ≈ 400 KiB und muss vor dem Stack starten. Deshalb setzt der Netz-Client 2 MiB Fast voraus (Abschnitt 6); ein Pool-Schlüssel beim Autor bliebe wünschenswert.
 - Rückmeldung an den TheWire13-Autor (aminet@jaehne.tk): `S2_CONFIGINTERFACE` sollte die Default-Adresse aus `S2_GETSTATIONADDRESS`/`ios2_DstAddr` verwenden (wie AmiTCP), dann entfällt `a2065fix.device`.
 - DHCP (`NET_DHCP=1`) noch nicht getestet; statische slirp-Adressen genügen für die Emulation.
 - `tx_mss=512` (TheWire13-Default `tx_buffer=512`): TLS-Records von 16 KiB gehen in 32 Segmenten – für den Handshake egal, für Medien später relevant.
@@ -164,3 +164,22 @@ Das unveränderte Amiga-Binary erreicht gegen web.whatsapp.com: DNS 60 ms, TCP 4
 - Zertifikatscache persistent in `ENVARC:` (heute nur im Speicher der Probe).
 - Nicht blockierender `connect` mit Timeout (heute blockierend; TheWire13 meldet EINPROGRESS, `WaitSelect` auf Schreibbereitschaft).
 - Echte Hardware: SANA-II-Treiber der tatsächlichen Karte in `S:thewire13.conf` eintragen, sonst keine Codeänderung.
+
+## 6. Speicherausbau: 1 MiB gegen 2 MiB Fast (2026-11-27)
+
+Mit 1 MiB Fast bleiben nach Stack und Probe 872 Bytes Fast und 69 KiB Chip frei (Schritt 17 in BENCHMARKS.md); die Probe ist nur Krypto und Netz, der Client braucht zusätzlich Bildschirm, Kontakte, Signal-Sessions und Nachrichtenpuffer. Deshalb wurde die Maschine mit 2 MiB Fast vermessen (`tools/fsuae/a500-2mb-fast-net.fs-uae`, `make run-probe FAST=2048`; `tools/run-fsuae-net.sh` übergibt `NET_FAST` als `--fast_memory`). `Avail` in Bytes:
+
+| Zustand (2 MiB Fast) | Fast belegt | Fast frei | größter Fast-Block | Chip frei |
+|---|---:|---:|---:|---:|
+| System + TheWire13 (Stack zuerst, vor der Probe) | 1 369 712 | 727 408 | 727 032 | 447 472 |
+| System + TheWire13 + Probe (beide laufen) | 1 906 584 | 190 536 | 190 152 | 447 472 |
+| nach Ende der Probe | 1 435 248 | 661 872 | 433 544 | 447 472 |
+
+Was sich gegenüber 1 MiB ändert:
+
+- **Der Stack wächst mit dem Angebot.** Mit 1 MiB belegen Stack und Probe zusammen ≈ 1,45 MiB (1 MiB Fast voll plus 447 KiB Chip), mit 2 MiB ≈ 1,89 MiB. Die Differenz von ≈ 440 KiB ist der TCP-Pool mit 12 statt 4 PCBs samt zugehörigen Puffern; der Stack allein liegt bei 2 MiB bei ≈ 1,3 MiB Fast (einschließlich System und CLI, ≈ 60 KiB). Die Probe selbst nahm 537 KiB (Binary von Commit b91672c mit vorgezogenen Schlüsselpaaren und Zertifikatscache).
+- **Chip-RAM bleibt frei.** Der Loader legt alles in Fast ab, 447 KiB Chip stehen für Bildschirm (Hires 640×256, 16 Farben: 80 KiB), Fonts und Blitter-Puffer zur Verfügung. Mit 1 MiB lagen ≈ 380 KiB des Stacks im Chip-RAM.
+- **Startreihenfolge ist egal.** Stack zuerst und Client zuerst funktionieren beide (`NET_ORDER=stack-first` getestet); mit 1 MiB lud die Probe nach dem Stack nicht mehr.
+- **Keine Zeitänderung.** TLS 1.3 31,5 s, Noise 40,5 s (mit Cache-Treffer und vorberechneten Schlüsseln, Commit b91672c), `handshake ACCEPTED` – die Rechenzeit hängt nicht am RAM-Ausbau.
+
+Budget für den Client bei 2 MiB: ≈ 700 KiB Fast neben dem voll ausgebauten Stack, dazu ≈ 440 KiB Chip. Die Krypto- und Netzschicht der Probe braucht davon ≈ 540 KiB (davon 64 KiB eigener Stack, TLS-Record-Puffer, Zertifikatskette); für Oberfläche, Kontakte, Sessions und Nachrichten bleiben ≈ 150 KiB Fast plus das Chip-RAM. Das ist eng, aber machbar; mit 1 MiB ist es nicht machbar, solange der Stack keinen Pool-Schlüssel hat. Für echte Hardware passt die Vorgabe: ein A500 mit Ethernet hat praktisch immer eine Seitenerweiterung mit 2 MiB oder mehr (A590, GVP, Supra; ACA500plus mit X-Surf-500 bringt 8 MiB), reine 1-MiB-Fast-Erweiterungen sind selten, die A501 im Trapdoor ist Slow-RAM. Die 1-MiB-Maschine bleibt die Benchmark-Maschine für die Kryptografie (`tools/fsuae/a500-1mb-fast.fs-uae`).
