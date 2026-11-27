@@ -99,7 +99,7 @@ Ziele: `make amiga-probe` (Binary 178 KiB), `make run-probe GAP=0` (FS-UAE, Minu
 
 ## 4. Ergebnisse
 
-**2026-11-27, FS-UAE, `make run-probe GAP=0`: `RESULT: handshake ACCEPTED by web.whatsapp.com with our TLS 1.3/WS/Noise stack, 0.00 s hold, 12 pongs`.** DNS 0,9 s, TCP 0,8 s, TLS 1.3 31,8 s, WebSocket 0,5 s, Noise 51,8 s (12 Pongs), erster entschlüsselter Server-Frame nach 105 s. Zeiten und Einordnung: docs/BENCHMARKS.md Schritt 17.
+**2026-11-27, FS-UAE, `make run-probe GAP=0`: `RESULT: handshake ACCEPTED by web.whatsapp.com with our TLS 1.3/WS/Noise stack, 0.00 s hold, 12 pongs`.** DNS 0,9 s, TCP 0,8 s, TLS 1.3 31,8 s, WebSocket 0,5 s, Noise 51,8 s (12 Pongs), erster entschlüsselter Server-Frame nach 105 s. Zeiten und Einordnung: docs/BENCHMARKS.md Schritt 17. **Abends derselbe Lauf mit den drei X25519-Schlüsselpaaren vor dem Connect (parallel zum Stackstart) und dem Cache für das Noise-Zwischenzertifikat (`SYS:noisecache.bin`, vorgewärmt vom Host-Lauf): Noise 40,1 s (9 Pongs), Verbindungsfenster 78,2 s statt 100,5 s, erster Frame nach 92 s – BENCHMARKS.md Schritt 18.**
 
 Vier Hindernisse lagen zwischen „Stack startet“ und diesem Ergebnis, alle ohne Quelltext von TheWire13 oder dem Treiber gelöst:
 

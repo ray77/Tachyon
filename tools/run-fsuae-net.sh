@@ -112,4 +112,4 @@ echo "--- SYS:stack.log ---"
 cat "$DH0/stack.log" 2>/dev/null || echo "(no stack.log)"
 echo "--- SYS:result.txt after ${i}s ---"
 cat "$DH0/result.txt" 2>/dev/null || echo "(no result.txt)"
-[ -f "$DH0/noisecache.bin" ] && [ -f "$DH0/done" ] && cp "$DH0/noisecache.bin" "$NCACHE" && echo "(noise certificate cache saved to $NCACHE)"
+if [ -f "$DH0/noisecache.bin" ] && [ -f "$DH0/done" ]; then cp "$DH0/noisecache.bin" "$NCACHE" && echo "(noise certificate cache saved to $NCACHE)"; fi

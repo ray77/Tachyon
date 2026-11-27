@@ -343,3 +343,36 @@ Erster vollständiger Verbindungsaufbau vom Amiga-Binary aus (`make run-probe GA
 - **Noise: 51,8 s** zwischen ServerHello und ClientFinish gegen die frühere Schätzung 35–45 s. Aufschlüsselung: 3 × X25519 (≈ 24 s) + 2 × XEdDSA (≈ 22 s) + HKDF/AES; die Schätzung hatte die zweite XEdDSA-Prüfung nicht enthalten. Die 12 Pongs (alle 4 s aus `CRYPTO_YIELD()`) haben die 10-s-Leerlaufgrenze überbrückt; der Server nahm den ClientFinish an und antwortete 4,7 s später (Entschlüsseln und Parsen auf dem 68000 inklusive).
 - **Gesamt ≈ 100 s** vom Programmstart bis zum ersten entschlüsselten Server-Frame, ≈ 97 s ab TCP. Mit warmem Zertifikatscache ≈ 86 s. Nächste Hebel: XEdDSA-Verifikation (22 s für zwei Zertifikate; das Zwischenzertifikat ist stabil und ließe sich wie die TLS-Kette cachen → −11 s), die 6,8 s für die zwei Comb-Schlüsselpaare vor dem ClientHello (vorab berechnen, wie das TLS-Schlüsselpaar), und die 3,4 s TLS-Schlüsselpaar (ebenfalls vorab).
 - **Speicher:** `Avail` nach dem Start beider Programme: Fast 872 Bytes frei, Chip 69 KiB frei. TheWire13 belegt Code 114 KiB + BSS 126 KiB + TCP-Pool (12 PCBs × 40 KiB = 480 KiB, ohne Konfigurationsschlüssel; fällt bei Knappheit auf 4 PCBs = 240 KiB zurück) + RX-Puffer; die Probe 407 KiB (Code 147 KiB, BSS 260 KiB inkl. 64 KiB Stack). Startet der Stack zuerst, bleibt kein Fast-RAM für die Probe (Loader-Fehler, kein `result.txt`). Für den Client heißt das: Stack und Client teilen sich 1 MiB Fast + 512 KiB Chip; der TCP-Pool des Stacks muss klein bleiben, der Client unter ≈ 400 KiB.
+
+## 2026-11-27 – Schritt 18: Schlüsselpaare vor dem Connect, Cache für das Noise-Zwischenzertifikat
+
+Dieselbe Maschine und derselbe Ablauf wie Schritt 17 (`make run-probe GAP=0`, FS-UAE, A2065/slirp, TheWire13 über `a2065fix.device`), Programm `build/amiga/wa_probe` aus Commit b91672c. Zwei Änderungen in `tests/wa_probe_core.c`: `wa_probe_prepare` berechnet die drei X25519-Schlüsselpaare (TLS, Noise-Static, Noise-Ephemeral; Festbasis-Comb) **vor** dem TCP-Connect – auf dem Amiga sogar vor dem Warten auf den Stack, der parallel startet –, und das Zwischenzertifikat der Noise-Kette wird nach einmaliger XEdDSA-Prüfung als Fingerabdruck gecacht (`noise_cert_cache`, PROTOCOL.md Abschnitt 6; hier vorgewärmt aus dem Host-Lauf `make wa-probe GAP=6` über `build/wa_noise_cache.bin` → `SYS:noisecache.bin`, wie es im Client aus `ENVARC:` käme).
+
+| Phase | Schritt 17 | Schritt 18 | Zeitpunkt (18) |
+|---|---:|---:|---:|
+| TLS-X25519-Schlüsselpaar | 3,42 s (nach Connect) | 4,62 s **vor** Connect, parallel zum Stackstart | 4,98 s |
+| Noise-Static + -Ephemeral (2 Comb-Multiplikationen) | 6,8 s (nach WebSocket) | 7,32 s **vor** Connect, parallel zum Stackstart | 12,32 s |
+| Warten auf `bsdsocket.library` | 3,2 s | 0,1 s (Stack war längst fertig) | 12,42 s |
+| DNS + TCP-Verbindung | 1,7 s | 1,5 s | 13,90 s |
+| TLS-1.3-Handshake (Kette am Pin CA1, 1 RSA, RSA-PSS, Finished) | 31,8 s | 31,5 s | 45,38 s |
+| WebSocket-Upgrade | 0,5 s | 0,5 s | 45,84 s |
+| Noise-ClientHello | 6,8 s | **0,3 s** | 46,10 s |
+| ServerHello (Netz) | 1,4 s | 1,3 s | 47,44 s |
+| `noise_client_finish` (3 DH, HKDF, AES-GCM) | ≈ 29,3 s | 28,8 s | 76,30 s |
+| XEdDSA Zwischenzertifikat | 11,1 s | **0,0 s (Cache-Treffer)** | 76,30 s |
+| XEdDSA Blattzertifikat, Schlüsselvergleich | 11,1 s | 11,0 s | 87,30 s |
+| ClientFinish gesendet – nach ServerHello | 51,8 s (12 Pongs) | **40,1 s (9 Pongs)** | 87,56 s |
+| erster verschlüsselter Server-Frame entschlüsselt | 4,7 s | 4,5 s | 92,08 s |
+| **Verbindungsfenster TCP-Connect → erster Frame** | **100,5 s** | **78,2 s** | |
+| Programmstart → erster Frame | 105,5 s | 92,1 s | |
+
+`RESULT: handshake ACCEPTED by web.whatsapp.com with our TLS 1.3/WS/Noise stack, 0.00 s hold, 9 pongs, Noise cert cache hit` (`TIMING: keys 12180 ms (tls 4620 + noise 7320, before connect), dns 980 ms, tcp connect 480 ms, tls 31460 ms, ws 31900 ms, server hello 33520 ms, client finish 73620 ms, accepted 78180 ms`).
+
+### Einordnung
+
+- **−22,3 s im Verbindungsfenster**, gerechnet waren 21,3 s (3,4 + 6,8 + 11,1); der Rest ist Streuung im Netz. Alle drei Posten sind aus dem Fenster verschwunden: der ClientHello folgt 0,3 s nach dem WebSocket-Upgrade, die Prüfung des Zwischenzertifikats kostet nichts mehr.
+- **Die Schlüsselpaare brauchen offline länger** (12,2 s statt 10,2 s), weil TheWire13 in derselben Zeit startet und den 68000 mitbenutzt – genau das ist der Gewinn: die Wartezeit auf den Stack (3,2 s) ist in den Schlüsselpaaren aufgegangen, der Programmstart bis zum ersten Frame fällt um 13,4 s. Im Client gehören die Schlüsselpaare in den Programmstart (Bildschirmaufbau, Konfiguration), noch vor jedem Connect.
+- **Noise jetzt 40,1 s zwischen ServerHello und ClientFinish:** 3 × X25519-Leiter (≈ 24 s) + HKDF/AES-GCM (≈ 5 s) + 1 × XEdDSA (11 s). Der Herzschlag deckte es mit 9 Pongs ab. Nächster Hebel hier: die XEdDSA-Prüfung des Blatts (11 s; das Blatt wechselt mit dem Serverschlüssel, Seriennummer 366 seit mehreren Läufen – auch cachebar, mit Fehltreffer bei Wechsel) und die Leitern selbst (X25519-PLAN.md).
+- **TLS bleibt 31,5 s**, davon ≈ 10 s RSA (eine Prüfung + `rsa_pub_set`), die der Zertifikatscache aus Schritt 15 spart, sobald der Amiga ihn aus einer Datei lädt wie jetzt den Noise-Fingerabdruck (`io.use_cache` ist in der Amiga-Probe noch 0). Damit läge das Fenster bei ≈ 68 s.
+- **Speicher:** `Avail` nach beiden Programmen Fast 696 Bytes frei, Chip 133 KiB frei – die Probe ist mit den vorgezogenen Schlüsselpaaren nicht gewachsen (gleiche statischen Puffer, nur umgehängt). Live-Verbindungen für diesen Schritt: Host 2 (Cache leer → gefüllt, Treffer), vamos 1, FS-UAE 1.
+
