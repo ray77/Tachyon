@@ -25,6 +25,9 @@ A2065DEV=${A2065DEV:-$ROOT/build/a2065dev/a2065.device}
 WORK=${TACHYON_NET_WORK:-"$ROOT/build/fsuae-net"}
 DH0="$WORK/dh0"
 NET_DHCP=${NET_DHCP:-0}
+NET_LOG=${NET_LOG:-0}          # log_enabled in thewire13.conf
+NET_WAIT=${NET_WAIT:-8}        # seconds between starting the stack and the program
+NET_STACK=${NET_STACK:-50000}  # CLI stack for the stack task (Kickstart 1.3 default is 4000 bytes)
 GAP=${GAP:-0}
 
 for f in "$WIRE/c/TheWire13" "$WIRE/libs/bsdsocket.library" "$A2065DEV" "$WBADF"; do
@@ -34,9 +37,11 @@ done
 rm -rf "$WORK"; mkdir -p "$DH0/S" "$DH0/C" "$DH0/Libs" "$DH0/Devs/Networks"
 cp "$EXE" "$DH0/test"
 # C: commands from the user's Workbench 1.3 disk (Kickstart 1.3 has none in ROM)
-for c in Run Wait; do "$XDFTOOL" "$WBADF" read "c/$c" "$DH0/C/$c" >/dev/null; done
+for c in Run Wait Stack; do "$XDFTOOL" "$WBADF" read "c/$c" "$DH0/C/$c" >/dev/null; done
 cp "$WIRE/c/TheWire13" "$WIRE/c/mini_ping" "$WIRE/c/mini_ntp" "$WIRE/c/mini_nslookup" "$DH0/C/" 2>/dev/null || cp "$WIRE/c/TheWire13" "$DH0/C/"
 cp "$WIRE/libs/bsdsocket.library" "$DH0/Libs/"
+# utility.library V37 for 1.3 (make utility13): the a2065.device opens it at init time
+[ -f "$ROOT/build/amiga/utility.library" ] && cp "$ROOT/build/amiga/utility.library" "$DH0/Libs/"
 cp "$A2065DEV" "$DH0/Devs/Networks/a2065.device"
 # slirp: guest 10.0.2.15/24, gateway 10.0.2.2, DNS 10.0.2.3 (static; the same addresses come via DHCP with NET_DHCP=1)
 cat > "$DH0/S/thewire13.conf" <<EOF
@@ -56,14 +61,16 @@ hostname=tachyon
 domain=lan
 mtu=1500
 
-log_enabled=0
+log_enabled=$NET_LOG
 EOF
 head -c 64 /dev/urandom > "$DH0/seed.bin"
 date -u +%Y%m%d%H%M%SZ | tr -d '\n' > "$DH0/now.txt"
 dig +short web.whatsapp.com 2>/dev/null | grep -E '^[0-9.]+$' | head -1 | tr -d '\n' > "$DH0/waip.txt" || true
 printf '%s' "$GAP" > "$DH0/gap.txt"
-# Run >file: the new CLI inherits the redirected output, so the stack's banner and DHCP/SANA messages are kept
-printf 'run >SYS:stack.log C:TheWire13\nwait 8\ntest\nendcli\n' > "$DH0/S/Startup-Sequence"
+# the redirection after the command name belongs to the started program (its banner, DHCP and SANA messages),
+# the one after Run only to Run's own "[CLI 2]" line
+if [ "${NET_NOSTACK:-0}" = 1 ]; then printf 'stack %s\ntest\nendcli\n' "$NET_STACK" > "$DH0/S/Startup-Sequence"   # driver tests without the stack
+else printf 'stack %s\nrun >NIL: C:TheWire13 >SYS:stack.log\nwait %s\ntest\nendcli\n' "$NET_STACK" "$NET_WAIT" > "$DH0/S/Startup-Sequence"; fi
 
 "$FSUAE" "$HERE/fsuae/a500-1mb-fast-net.fs-uae" \
     --floppy_drive_0= \
