@@ -29,6 +29,10 @@ typedef struct {
     heartbeat_send_fn send; void *io;
     uint32_t sent;              /* pongs sent */
     int error;                  /* a send failed; the connection is gone */
+    void (*poll)(void *io);     /* optional: called every poll_ms from the hook too - the caller reads its socket so the
+                                   network side never backs up during a long computation (FS-UAE's A2065 emulation died
+                                   with 170 KB waiting while the 68000 computed for 50 s, live attempt 2) */
+    uint32_t poll_ms, last_poll;
 } heartbeat;
 
 void heartbeat_init(heartbeat *h, ws_client *w, uint32_t (*now_ms)(void), uint32_t interval_ms,

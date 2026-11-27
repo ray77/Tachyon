@@ -31,21 +31,34 @@ static ws_client w;
  * WA_PROBE_ALLOC (the Amiga unity build): handed out by io->alloc, so they live in Chip RAM and leave Fast RAM to the
  * code, the TCP/IP stack and the session store; otherwise static */
 #define WA_PROBE_ARENA 12288
+#define WA_PROBE_STAGE 16384
 #ifdef WA_PROBE_ALLOC
-static uint8_t *msgbuf, *pend, *rx_plain, *hs_plain, *inflated, *arena_mem;
+static uint8_t *msgbuf, *pend, *rx_plain, *hs_plain, *inflated, *arena_mem, *stage;
 static int big_buffers(wa_probe_io *pio)
 {
     if (msgbuf) return 1;
     if (!pio->alloc) return 0;
     msgbuf = pio->alloc(pio->ctx, WA_PROBE_MSG_MAX); pend = pio->alloc(pio->ctx, WA_PROBE_MSG_MAX); rx_plain = pio->alloc(pio->ctx, WA_PROBE_MSG_MAX);
     hs_plain = pio->alloc(pio->ctx, WA_PROBE_MSG_MAX); inflated = pio->alloc(pio->ctx, WA_PROBE_MSG_MAX); arena_mem = pio->alloc(pio->ctx, WA_PROBE_ARENA);
-    return msgbuf && pend && rx_plain && hs_plain && inflated && arena_mem;
+    stage = pio->alloc(pio->ctx, WA_PROBE_STAGE);
+    return msgbuf && pend && rx_plain && hs_plain && inflated && arena_mem && stage;
 }
 #else
-static uint8_t msgbuf[WA_PROBE_MSG_MAX], pend[WA_PROBE_MSG_MAX], rx_plain[WA_PROBE_MSG_MAX], hs_plain[WA_PROBE_MSG_MAX], inflated[WA_PROBE_MSG_MAX], arena_mem[WA_PROBE_ARENA];
+static uint8_t msgbuf[WA_PROBE_MSG_MAX], pend[WA_PROBE_MSG_MAX], rx_plain[WA_PROBE_MSG_MAX], hs_plain[WA_PROBE_MSG_MAX], inflated[WA_PROBE_MSG_MAX], arena_mem[WA_PROBE_ARENA], stage[WA_PROBE_STAGE];
 static int big_buffers(wa_probe_io *pio) { (void)pio; return 1; }
 #endif
 static uint32_t pend_len;
+/* raw socket bytes read during a long computation (heartbeat poll, once a second) wait here for the pump, so the
+ * network side never backs up for tens of seconds: in live attempt 2 FS-UAE's A2065 emulation died with 170 KB queued
+ * while the 68000 computed for 50 s. The pump takes staged bytes before reading the socket again. */
+static uint32_t stage_len; static int in_pump;
+static void drain_poll(void *hio)
+{
+    int32_t r; (void)hio;
+    if (in_pump || !io || stage_len >= WA_PROBE_STAGE) return;
+    r = io->recv(io->ctx, stage + stage_len, WA_PROBE_STAGE - stage_len, 0);
+    if (r > 0) stage_len += (uint32_t)r;
+}
 static uint8_t rdbuf[8192];
 static uint32_t t_start;
 static char line[640];
@@ -161,7 +174,9 @@ static void log_tls_error(void)
 
 /* read until the TLS state machine reaches want_tls_state, or (want_msg == 2) the WebSocket upgrade completes,
  * or (want_msg == 1) a WebSocket message is complete */
-static int pump(int want_tls_state, int want_msg, uint32_t timeout_ms)
+static int pump_inner(int want_tls_state, int want_msg, uint32_t timeout_ms);
+static int pump(int want_tls_state, int want_msg, uint32_t timeout_ms) { int r; in_pump = 1; r = pump_inner(want_tls_state, want_msg, timeout_ms); in_pump = 0; return r; }
+static int pump_inner(int want_tls_state, int want_msg, uint32_t timeout_ms)
 {
     uint8_t out[256]; uint32_t ol;
     uint32_t deadline = ms() + timeout_ms;
@@ -191,7 +206,8 @@ static int pump(int want_tls_state, int want_msg, uint32_t timeout_ms)
         }
         now = ms();
         if (now > deadline) { if (!pump_quiet) logl("timeout"); return 0; }
-        r = io->recv(io->ctx, rdbuf, sizeof rdbuf, deadline - now);
+        if (stage_len) { uint32_t i, c = stage_len < sizeof rdbuf ? stage_len : (uint32_t)sizeof rdbuf; cp(rdbuf, stage, c); stage_len -= c; for (i = 0; i < stage_len; i++) stage[i] = stage[i + c]; r = (int32_t)c; }
+        else r = io->recv(io->ctx, rdbuf, sizeof rdbuf, deadline - now);
         if (r == 0) { if (!pump_quiet) logl("timeout"); return 0; }
         if (r < 0) { logl("socket closed by server"); return 0; }
         if (io->tunnel) {
@@ -446,7 +462,7 @@ static int handshake(const uint8_t *payload, uint32_t payload_len, uint8_t *plai
     {
         uint32_t t_hello = ms();
         /* the A500's computing time: X25519 ladders with the heartbeat armed */
-        heartbeat_init(&hb, &w, io->now_ms, 4000, hb_send, 0);
+        heartbeat_init(&hb, &w, io->now_ms, 4000, hb_send, 0); hb.poll = drain_poll;
         heartbeat_arm(&hb);
         if (io->gap_ms) { wa_fmt(line, sizeof line, "noise: holding ClientFinish for %T s of X25519 ladders, pong heartbeat every 4 s", io->gap_ms); logl(line); }
         spin_ladders(io->gap_ms, &ladders);
@@ -559,7 +575,7 @@ static int send_node(const wab_node *n, const char *what)
  * layer hands the message over in pieces (ws.stream), complete frames are taken from the front, the remainder is moved
  * down and more is read. A single frame longer than the buffer cannot be decrypted and is skipped, the Noise read
  * counter advanced by one so the frames after it still decrypt. 1 = frame, 0 = timeout, -1 = connection gone or bad frame. */
-static void frames_reset(void) { msg_off = 0; msg_have = 0; skip_left = 0; w.msg_len = 0; w.msg_ready = 0; w.msg_partial = 0; }
+static void frames_reset(void) { msg_off = 0; msg_have = 0; skip_left = 0; w.msg_len = 0; w.msg_ready = 0; w.msg_partial = 0; stage_len = 0; }
 static int recv_frame(uint32_t timeout_ms, uint8_t *plain, uint32_t *plen)
 {
     uint32_t flen, avail, deadline = ms() + timeout_ms;
@@ -996,7 +1012,7 @@ static int handle_message(const wab_node *n)
     wa_fmt(line, sizeof line, "msg: message %s from %s:%u@%s, <enc type=%s v=%s> %u bytes%s", attr_cstr(n, "id", idb, sizeof idb), user, (uint32_t)from->jid.device, lid ? "lid" : WA_SERVER_JID,
            is_pk ? "pkmsg" : "msg", attr_cstr(enc, "v", ty, sizeof ty), elen, sig_session_has_state(s) ? "" : " (new session: X3DH as responder)"); logl(line);
     t0 = ms();
-    heartbeat_init(&hb, &w, io->now_ms, 4000, hb_send, 0);
+    heartbeat_init(&hb, &w, io->now_ms, 4000, hb_send, 0); hb.poll = drain_poll;
     heartbeat_arm(&hb);
     r = sig_decrypt(s, &me_local, is_pk, enc->val.str.p, elen, msg_plain, sizeof msg_plain, &plen, &used);
     heartbeat_disarm(); io->pongs += hb.sent;
@@ -1034,7 +1050,7 @@ static int send_text(const char *user, uint32_t device, int lid, const char *tex
         if (!fetch_bundle(user, device, lid, &b)) return 0;
         s = sig_store_get(io->sessions, user, device, lid, 1);
         t0 = ms();
-        heartbeat_init(&hb, &w, io->now_ms, 4000, hb_send, 0);
+        heartbeat_init(&hb, &w, io->now_ms, 4000, hb_send, 0); hb.poll = drain_poll;
         heartbeat_arm(&hb);
         r = sig_session_start(s, &me_local, &b);
         heartbeat_disarm(); io->pongs += hb.sent;
@@ -1048,7 +1064,7 @@ static int send_text(const char *user, uint32_t device, int lid, const char *tex
     if (!plen) { logl("msg: text too long"); return 0; }
     plen = wa_pad(msg_pt, plen, sizeof msg_pt);
     t0 = ms();
-    heartbeat_init(&hb, &w, io->now_ms, 4000, hb_send, 0);
+    heartbeat_init(&hb, &w, io->now_ms, 4000, hb_send, 0); hb.poll = drain_poll;
     heartbeat_arm(&hb);
     r = sig_encrypt(s, &me_local, msg_pt, plen, msg_ct, sizeof msg_ct, &clen, &is_pk);
     heartbeat_disarm(); io->pongs += hb.sent;
@@ -1092,7 +1108,7 @@ static int send_text(const char *user, uint32_t device, int lid, const char *tex
 static uint32_t make_prekeys(uint32_t count, const char *when)
 {
     static heartbeat hb; uint32_t t0 = ms(), made;
-    heartbeat_init(&hb, &w, io->now_ms, 4000, hb_send, 0);
+    heartbeat_init(&hb, &w, io->now_ms, 4000, hb_send, 0); hb.poll = drain_poll;
     heartbeat_arm(&hb);
     made = wa_prekeys_generate(io->prekeys, count, &rng);
     heartbeat_disarm(); io->pongs += hb.sent;
@@ -1157,7 +1173,7 @@ static int post_login(void)
           pongs from the heartbeat keep the WebSocket alive meanwhile; the record goes to the caller right away */
     if (io->precompute_next && io->nextkeys) {
         static heartbeat hb; uint32_t t0 = ms();
-        heartbeat_init(&hb, &w, io->now_ms, 4000, hb_send, 0);
+        heartbeat_init(&hb, &w, io->now_ms, 4000, hb_send, 0); hb.poll = drain_poll;
         heartbeat_arm(&hb);
         wa_nextkeys_compute(io->nextkeys, &rng, have_cached_static ? cached_static : 0);
         heartbeat_disarm(); io->pongs += hb.sent;
@@ -1314,7 +1330,7 @@ next_code: ;
       for (i = 0; i < ps.biz.len && i < WA_CREDS_BIZ_MAX - 1; i++) io->creds->business[i] = (char)ps.biz.p[i]; io->creds->business[i] = 0; }
     wa_fmt(line, sizeof line, "pair: our JID %s:%u@%s, lid %s:%u, phone platform \"%s\"%s%s", io->creds->jid_user, io->creds->jid_device, WA_SERVER_JID, io->creds->lid_user, io->creds->lid_device,
            io->creds->platform, io->creds->business[0] ? ", business " : "", io->creds->business); logl(line);
-    heartbeat_init(&hb, &w, io->now_ms, 4000, hb_send, 0);
+    heartbeat_init(&hb, &w, io->now_ms, 4000, hb_send, 0); hb.poll = drain_poll;
     heartbeat_arm(&hb);
     {   uint32_t t0 = ms(), e;
         e = wa_pair_verify(ps.device_identity, ps.device_identity_len, &io->creds->id, &adv);

@@ -6,7 +6,7 @@ void heartbeat_init(heartbeat *h, ws_client *w, uint32_t (*now_ms)(void), uint32
 {
     h->ws = w; h->now_ms = now_ms; h->interval_ms = interval_ms;
     h->send = send; h->io = io; h->sent = 0; h->error = 0;
-    h->last_ms = now_ms();
+    h->last_ms = now_ms(); h->poll = 0; h->poll_ms = 1000; h->last_poll = h->last_ms;
 }
 
 int heartbeat_pong(heartbeat *h)
@@ -32,6 +32,7 @@ void heartbeat_tick(void *ctx)
         h->last_ms = now;
         heartbeat_pong(h);
     }
+    if (h->poll && now - h->last_poll >= h->poll_ms) { h->last_poll = now; h->poll(h->io); }
     if (chained) chained(chained_ctx);
 }
 
