@@ -205,14 +205,21 @@ int x509_verify_chain(const x509_cert *certs, int count, const uint8_t *root_n, 
         if (i > 0 && c->n_len == root_n_len && c->e == root_e && mem_eq(c->n, root_n, root_n_len)) break;
         if (!c->sig_sha256_rsa) return 0;
         if (now && !(str_le(c->not_before, now) && str_le(now, c->not_after))) return 0;
-        /* signed by the pinned key: chain complete, anything the server sent beyond this is ignored */
-        if (x509_verify_signature(c, root_n, root_n_len, root_e)) break;
+        /* One RSA verification per certificate (each costs ~9.6 s on the 68000): a certificate whose issuer
+         * is the next one in the chain is checked under that issuer's key; the last certificate, or one whose
+         * issuer carries the pinned key, is checked under the pinned key, which completes the chain. Anything
+         * the server sent beyond the completing certificate is ignored. */
         if (i + 1 < count) {
             const x509_cert *issuer = &certs[i + 1];
             if (c->issuer_len != issuer->subject_len || !mem_eq(c->issuer, issuer->subject, c->issuer_len)) return 0;
+            if (issuer->n_len == root_n_len && issuer->e == root_e && mem_eq(issuer->n, root_n, root_n_len)) {
+                if (!x509_verify_signature(c, root_n, root_n_len, root_e)) return 0;
+                break;
+            }
             if (!x509_verify_signature(c, issuer->n, issuer->n_len, issuer->e)) return 0;
         } else {
-            return 0;       /* last certificate is neither signed by the pinned key nor the pinned key itself */
+            if (!x509_verify_signature(c, root_n, root_n_len, root_e)) return 0;
+            break;          /* signed by the pinned key: chain complete */
         }
     }
     return x509_match_host(&certs[0], host);
