@@ -126,7 +126,8 @@ static void qr_hide(void *ctx, const char *status) { char l[160]; (void)ctx; snp
 
 int main(int argc, char **argv)
 {
-    static wa_probe_io io; static uint8_t seed[64], ncache[32]; static char nowstr[16];
+    static wa_probe_io io; static uint8_t seed[64], ncache[64], tcache[X509_CACHE_FILE_MAX]; static char nowstr[16];
+    const char *tcache_path = getenv("TLS_CACHE_FILE") && *getenv("TLS_CACHE_FILE") ? getenv("TLS_CACHE_FILE") : "build/wa_tls_cache.bin";
     const char *ncache_path = getenv("NOISE_CACHE");
     double gap = argc > 1 ? atof(argv[1]) : 30.0;
     struct addrinfo hints;
@@ -167,8 +168,13 @@ int main(int argc, char **argv)
     io.noise_cache_in = 0;
     if (ncache_path && *ncache_path) {
         FILE *cf = fopen(ncache_path, "rb");
-        if (cf) { if (fread(ncache, 1, 32, cf) == 32) io.noise_cache_in = ncache; fclose(cf); }
-        { char l[160]; snprintf(l, sizeof l, "noise: certificate cache %s (%s)", io.noise_cache_in ? "loaded" : "empty", ncache_path); log_line(0, l); }
+        if (cf) { size_t n = fread(ncache, 1, 64, cf); if (n >= 32) io.noise_cache_in = ncache; if (n == 64) io.noise_leaf_cache_in = ncache + 32; fclose(cf); }
+        { char l[160]; snprintf(l, sizeof l, "noise: certificate cache %s (%s)", io.noise_leaf_cache_in ? "loaded: intermediate + leaf" : io.noise_cache_in ? "loaded: intermediate" : "empty", ncache_path); log_line(0, l); }
+    }
+    {   /* TLS certificate cache (leaf fingerprint + prepared RSA key): skips the chain verification on a hit */
+        FILE *cf = fopen(tcache_path, "rb");
+        if (cf) { size_t n = fread(tcache, 1, sizeof tcache, cf); fclose(cf); if (n) { io.tls_cache_in = tcache; io.tls_cache_in_len = (uint32_t)n; } }
+        { char l[160]; snprintf(l, sizeof l, "tls: certificate cache %s (%s)", io.tls_cache_in ? "loaded" : "empty", tcache_path); log_line(0, l); }
     }
     if (io.mode == WA_MODE_PAIR) {
         static uint8_t rec[WA_CREDS_SIZE + 1]; FILE *cf;
@@ -207,7 +213,11 @@ int main(int argc, char **argv)
         int ok = wa_probe_run(&io);
         if (ok && io.noise_cache_valid && ncache_path && *ncache_path) {
             FILE *cf = fopen(ncache_path, "wb");
-            if (cf) { fwrite(io.noise_cache_fp, 1, 32, cf); fclose(cf); }
+            if (cf) { fwrite(io.noise_cache_fp, 1, 32, cf); if (io.noise_leaf_valid) fwrite(io.noise_leaf_fp, 1, 32, cf); fclose(cf); }
+        }
+        if (io.tls_cache_out_len) {
+            FILE *cf = fopen(tcache_path, "wb");
+            if (cf) { fwrite(io.tls_cache_out, 1, io.tls_cache_out_len, cf); fclose(cf); printf("tls: certificate cache written (%s, %u bytes)\n", tcache_path, io.tls_cache_out_len); }
         }
         if (!ok && getenv("WA_PROBE_DUMP")) {
             tls13 *t = wa_probe_tls(); int i;

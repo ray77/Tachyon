@@ -86,6 +86,9 @@ printf '%s' "$GAP" > "$DH0/gap.txt"
 # Amiga run): with it the probe skips the ~11 s XEdDSA verification of the intermediate; copied back after the run
 NCACHE=${NOISE_CACHE:-$ROOT/build/wa_noise_cache.bin}
 [ -f "$NCACHE" ] && cp "$NCACHE" "$DH0/noisecache.bin"
+# TLS certificate cache (leaf fingerprint + prepared RSA key, x509_cache_write): skips the RSA chain verification
+TCACHE=${TLS_CACHE_FILE:-$ROOT/build/wa_tls_cache.bin}
+[ -f "$TCACHE" ] && cp "$TCACHE" "$DH0/tlscache.bin"
 # pairing / login mode (make run-pair, docs/PROTOCOL.md 11): SYS:pair.txt switches the probe to it; the credentials record
 # travels in both directions so a paired Amiga logs in on the next run (PAIR_CREDS, default build/tachyon-a500.creds)
 PAIR=${PAIR:-0}
@@ -123,5 +126,6 @@ cat "$DH0/stack.log" 2>/dev/null || echo "(no stack.log)"
 echo "--- SYS:result.txt after ${i}s ---"
 cat "$DH0/result.txt" 2>/dev/null || echo "(no result.txt)"
 if [ -f "$DH0/noisecache.bin" ] && [ -f "$DH0/done" ]; then cp "$DH0/noisecache.bin" "$NCACHE" && echo "(noise certificate cache saved to $NCACHE)"; fi
+if [ -f "$DH0/tlscache.bin" ] && [ -f "$DH0/done" ]; then cp "$DH0/tlscache.bin" "$TCACHE" && echo "(tls certificate cache saved to $TCACHE)"; fi
 if [ "$PAIR" = 1 ] && [ -f "$DH0/tachyon.creds" ]; then cp "$DH0/tachyon.creds" "$PAIR_CREDS" && echo "(credentials saved to $PAIR_CREDS)"; fi
 if [ "$PAIR" = 1 ] && [ -f "$DH0/tachyon.prekeys" ]; then cp "$DH0/tachyon.prekeys" "$PAIR_PREKEYS" && echo "(prekeys saved to $PAIR_PREKEYS)"; fi

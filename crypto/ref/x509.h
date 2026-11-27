@@ -57,6 +57,10 @@ int x509_valid_at(const x509_cert *c, const char *now);
  * 68000); a mismatch is treated as a cache miss. About 1.1 KiB, meant to be stored (ENVARC: on the Amiga) and
  * refreshed on each full verification. */
 typedef struct { uint8_t fp[32]; int valid; rsa_pub key; } x509_cache;
+/* portable file form (big-endian, version byte, SHA-256 at the end): the host primes it, the A500 loads it */
+#define X509_CACHE_FILE_MAX (1u + 32u + 2u + 4u + 2u + 4u * RSA_MAX_LIMBS + 32u)
+uint32_t x509_cache_write(uint8_t *out, uint32_t cap, const x509_cache *c);   /* bytes written, 0 = invalid / no room */
+int      x509_cache_read(x509_cache *c, const uint8_t *in, uint32_t len);     /* 1 = a valid record (c->valid = 1) */
 void x509_cache_fingerprint(uint8_t fp[32], const x509_pin *pins, int npins,
                             const char *host, const uint8_t *leaf_der, uint32_t leaf_len);
 /* 1 if the cache holds exactly this (pin set, host, leaf); constant-time compare */

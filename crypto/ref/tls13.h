@@ -71,6 +71,7 @@ typedef struct {
     x509_pin pins[X509_MAX_PINS]; int npins; int cert_pin;
     /* optional certificate cache (x509.h); cert_cached = 1 when the chain verification was skipped on a hit */
     x509_cache *cache; int cert_cached;
+    uint32_t tickets;           /* NewSessionTicket messages seen after the handshake (resumption not implemented) */
 } tls13;
 
 /* Fresh X25519 key pair from the DRBG (fixed-base comb; can run long before the connection). */

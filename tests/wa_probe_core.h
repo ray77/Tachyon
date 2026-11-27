@@ -50,6 +50,8 @@ typedef struct wa_probe_io {
     int use_cache;              /* prime the certificate cache on a first connection, the real one must hit it */
     int debug;                  /* dump reads and messages */
     const uint8_t *noise_cache_in;  /* 32-byte fingerprint of the verified Noise intermediate from an earlier run, or 0 */
+    const uint8_t *noise_leaf_cache_in;     /* 32-byte fingerprint of the verified Noise leaf (under that intermediate), or 0 */
+    const uint8_t *tls_cache_in; uint32_t tls_cache_in_len;   /* x509_cache file (x509_cache_write) from an earlier run, or 0 */
 
     /* pairing / login (WA_MODE_PAIR) */
     int mode;
@@ -89,6 +91,9 @@ typedef struct wa_probe_io {
     uint32_t pongs, ladders;
     int noise_cert_cached;              /* 1 = the intermediate's XEdDSA verification was skipped on a cache hit */
     uint8_t noise_cache_fp[32]; int noise_cache_valid;   /* the fingerprint after the run (store it for the next one) */
+    uint8_t noise_leaf_fp[32]; int noise_leaf_valid, noise_leaf_cached;   /* same for the leaf certificate */
+    uint8_t tls_cache_out[X509_CACHE_FILE_MAX]; uint32_t tls_cache_out_len; int tls_cert_cached;   /* TLS cache after the run */
+    uint32_t tls_tickets;               /* NewSessionTicket messages the server sent (PSK resumption not implemented) */
     char result[200];           /* "RESULT: ..." */
 } wa_probe_io;
 

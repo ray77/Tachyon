@@ -375,7 +375,7 @@ static int t13_on_handshake_msg(tls13 *t, const uint8_t *m, uint32_t mlen)
 {
     uint8_t type = m[0];
     if (t->state == TLS13_ST_CONNECTED) {
-        if (type == 4) return 1;                                        /* NewSessionTicket: no resumption, ignored */
+        if (type == 4) { t->tickets++; return 1; }                      /* NewSessionTicket: counted, no resumption yet */
         if (type == 24) return t13_fail(t, T13E_KEYUPDATE);
         return t13_fail(t, T13E_STATE);
     }

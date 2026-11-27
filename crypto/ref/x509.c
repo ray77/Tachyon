@@ -281,3 +281,47 @@ void x509_cache_store(x509_cache *c, const x509_pin *pins, int npins,
     x509_cache_fingerprint(c->fp, pins, npins, host, leaf_der, leaf_len);
     c->valid = 1;
 }
+
+/* ---- cache file ---------------------------------------------------------------------------------------------- */
+static void xc_be16(uint8_t *d, uint32_t v) { d[0] = (uint8_t)(v >> 8); d[1] = (uint8_t)v; }
+static uint32_t xc_rd16(const uint8_t *p) { return ((uint32_t)p[0] << 8) | p[1]; }
+
+uint32_t x509_cache_write(uint8_t *out, uint32_t cap, const x509_cache *c)
+{
+    uint32_t o = 0, i, limbs = (uint32_t)c->key.limbs, size;
+    if (!c->valid || limbs == 0 || limbs > RSA_MAX_LIMBS) return 0;
+    size = 1 + 32 + 2 + 4 + 2 + 4 * limbs + 32;
+    if (cap < size) return 0;
+    out[o++] = 1;
+    for (i = 0; i < 32; i++) out[o++] = c->fp[i];
+    xc_be16(out + o, limbs); o += 2;
+    out[o++] = (uint8_t)(c->key.e >> 24); out[o++] = (uint8_t)(c->key.e >> 16); out[o++] = (uint8_t)(c->key.e >> 8); out[o++] = (uint8_t)c->key.e;
+    xc_be16(out + o, c->key.n0inv); o += 2;
+    for (i = 0; i < limbs; i++) { xc_be16(out + o, c->key.n[i]); o += 2; }
+    for (i = 0; i < limbs; i++) { xc_be16(out + o, c->key.rr[i]); o += 2; }
+    sha256(out + o, out, o);
+    return size;
+}
+
+int x509_cache_read(x509_cache *c, const uint8_t *in, uint32_t len)
+{
+    uint8_t h[32]; uint32_t o = 0, i, limbs, d = 0;
+    c->valid = 0;
+    if (len < 1 + 32 + 2 + 4 + 2 + 32 || in[0] != 1) return 0;
+    limbs = xc_rd16(in + 33);
+    if (limbs == 0 || limbs > RSA_MAX_LIMBS || len != 1 + 32 + 2 + 4 + 2 + 4 * limbs + 32) return 0;
+    sha256(h, in, len - 32);
+    for (i = 0; i < 32; i++) d |= h[i] ^ in[len - 32 + i];
+    if (d) return 0;
+    o = 1;
+    for (i = 0; i < 32; i++) c->fp[i] = in[o++];
+    o += 2;
+    c->key.e = ((uint32_t)in[o] << 24) | ((uint32_t)in[o + 1] << 16) | ((uint32_t)in[o + 2] << 8) | in[o + 3]; o += 4;
+    c->key.n0inv = (uint16_t)xc_rd16(in + o); o += 2;
+    c->key.limbs = (int)limbs;
+    for (i = 0; i < RSA_MAX_LIMBS; i++) { c->key.n[i] = 0; c->key.rr[i] = 0; }
+    for (i = 0; i < limbs; i++) { c->key.n[i] = (uint16_t)xc_rd16(in + o); o += 2; }
+    for (i = 0; i < limbs; i++) { c->key.rr[i] = (uint16_t)xc_rd16(in + o); o += 2; }
+    c->valid = 1;
+    return 1;
+}

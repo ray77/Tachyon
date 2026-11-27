@@ -33,7 +33,7 @@ static char line[640];
 /* prepared offline (wa_probe_prepare), consumed by wa_probe_run */
 static hmac_drbg rng; static x509_cert root, inter; static tls13_keypair kp;
 static uint8_t eph_priv[32], eph_pub[32], st_priv[32], st_pub[32];
-static noise_cert_cache ncache;
+static noise_cert_cache ncache, lcache;   /* intermediate and leaf certificate fingerprints */
 static int prepared;
 static noise_transport tr;            /* transport keys of the current connection */
 static int pump_quiet;                /* suppress the "timeout" log line (QR wait loop) */
@@ -221,7 +221,7 @@ static int fail(const char *fmt, const char *a, uint32_t b) { wa_fmt(io->result,
 static int tls_connect(x509_cert *root, x509_cert *inter, hmac_drbg *rng, tls13_keypair *kp, x509_cache *cache)
 {
     if (!tls13_client_start_kp(&t, io->host, root->n, root->n_len, root->e, io->now, rng, kp)) return fail("RESULT: tls start failed", 0, 0);
-    if (io->use_cache) tls13_set_cert_cache(&t, cache);
+    tls13_set_cert_cache(&t, cache);                 /* empty: filled after the full verification; loaded: a hit skips the chain */
     tls13_add_pin(&t, inter->n, inter->n_len, inter->e);   /* pins: {G2 root, G2 TLS RSA 2020 CA1 intermediate} */
     if (!pump(TLS13_ST_CONNECTED, 0, 60000)) return fail("RESULT: TLS handshake failed", 0, 0);
     return 1;
@@ -255,7 +255,8 @@ int wa_probe_prepare(wa_probe_io *pio)
     rng.instantiated = 0; drbg_instantiate(&rng, io->seed, io->seed_len);
     if (!x509_parse(&root, wa_cert2, sizeof wa_cert2) || !x509_parse(&inter, wa_cert1, sizeof wa_cert1)) return fail("RESULT: root/intermediate parse failed", 0, 0);
     /* the stored fingerprint of WhatsApp's intermediate Noise certificate, if the caller kept one */
-    ncache.valid = 0;
+    ncache.valid = 0; lcache.valid = 0; io->noise_leaf_cached = 0; io->noise_leaf_valid = 0; io->tls_cert_cached = 0; io->tls_cache_out_len = 0; io->tls_tickets = 0;
+    if (io->noise_leaf_cache_in) { cp(lcache.fp, io->noise_leaf_cache_in, 32); lcache.valid = 1; }
     if (io->noise_cache_in) { cp(ncache.fp, io->noise_cache_in, 32); ncache.valid = 1; }
     else if (io->mode == WA_MODE_PAIR && io->creds && io->creds_loaded && io->creds->noise_cache_valid) { cp(ncache.fp, io->creds->noise_cache_fp, 32); ncache.valid = 1; logl("noise: certificate cache fingerprint taken from the credentials"); }
     if (io->mode == WA_MODE_PAIR) {
@@ -310,6 +311,12 @@ static int handshake(const uint8_t *payload, uint32_t payload_len, uint8_t *plai
     if (!io->tunnel) {
         /* use_cache: a first connection fills the certificate cache (full chain verification), then the real one
          * must hit it and skip the chain - as a second A500 session would after storing the entry in ENVARC: */
+        if (!io->use_cache && !cache.valid) {
+            /* the stored certificate cache (host: TLS_CACHE_FILE, A500: SYS:tlscache.bin); within one run the cache
+             * filled by the pairing connection serves the login connection */
+            if (io->tls_cache_in && x509_cache_read(&cache, io->tls_cache_in, io->tls_cache_in_len)) logl("tls: certificate cache loaded (leaf fingerprint + prepared RSA key)");
+            else if (io->tls_cache_in) logl("tls: stored certificate cache invalid, ignored");
+        }
         if (io->use_cache) {
             cache.valid = 0;
             if (!tls_connect(&root, &inter, &rng, &kp, &cache) || !flush_tls()) { wa_fmt(io->result, sizeof io->result, "RESULT: TLS handshake (cache priming) failed"); return 0; }
@@ -323,7 +330,8 @@ static int handshake(const uint8_t *payload, uint32_t payload_len, uint8_t *plai
         if (io->use_cache) {
             wa_fmt(line, sizeof line, "tls: certificate cache %s on the second connection", t.cert_cached ? "HIT - chain verification skipped, CertificateVerify checked" : "MISS (different leaf?)"); logl(line);
             if (!t.cert_cached) return fail("RESULT: certificate cache missed", 0, 0);
-        }
+        } else if (t.cert_cached) { logl("tls: certificate cache HIT - chain verification and rsa_pub_set skipped, CertificateVerify checked"); io->tls_cert_cached = 1; }
+        if (cache.valid) io->tls_cache_out_len = x509_cache_write(io->tls_cache_out, sizeof io->tls_cache_out, &cache);
         if (io->hold_ms) {
             /* timeout measurement: our Finished sits in t.out; hold it and watch whether the server closes the socket.
              * pump() flushed t.out before reading, so CONNECTED is reached with the Finished record still unsent only
@@ -417,9 +425,15 @@ static int handshake(const uint8_t *payload, uint32_t payload_len, uint8_t *plai
             if (!ok) { heartbeat_disarm(); return fail("RESULT: intermediate certificate rejected", 0, 0); }
             cp(io->noise_cache_fp, ncache.fp, 32); io->noise_cache_valid = 1;
             if (io->mode == WA_MODE_PAIR && io->creds) { cp(io->creds->noise_cache_fp, ncache.fp, 32); io->creds->noise_cache_valid = 1; }
-            ok = leaf.issuer_serial == interc.serial && xeddsa_verify(leaf.sig, leaf.details, leaf.details_len, interc.key);
+            /* leaf: issuer must be this intermediate; its XEdDSA (another ~11 s) is skipped when the leaf cache holds
+             * the fingerprint of exactly these details + signature under exactly this intermediate key */
+            ok = leaf.issuer_serial == interc.serial;
+            if (ok && noise_cert_cache_match(&lcache, interc.key, leaf.details, leaf.details_len, leaf.sig)) io->noise_leaf_cached = 1;
+            else { ok = ok && xeddsa_verify(leaf.sig, leaf.details, leaf.details_len, interc.key); if (ok) noise_cert_cache_store(&lcache, interc.key, leaf.details, leaf.details_len, leaf.sig); }
             ok = ok && eq(leaf.key, server_static, 32);
-            wa_fmt(line, sizeof line, "noise: leaf certificate serial %u signed by the intermediate, key == server static: %s", leaf.serial, ok ? "VERIFIED" : "FAILED"); logl(line);
+            wa_fmt(line, sizeof line, "noise: leaf certificate serial %u signed by the intermediate%s, key == server static: %s", leaf.serial,
+                   io->noise_leaf_cached ? " (cache HIT, XEdDSA skipped)" : "", ok ? "VERIFIED" : "FAILED"); logl(line);
+            if (ok) { cp(io->noise_leaf_fp, lcache.fp, 32); io->noise_leaf_valid = 1; }
             if (!ok) { heartbeat_disarm(); return fail("RESULT: leaf certificate rejected", 0, 0); }
         }
         heartbeat_disarm();
@@ -891,6 +905,7 @@ int wa_probe_run(wa_probe_io *pio)
         wa_fmt(line, sizeof line, "payload: %s ClientPayload, %u bytes", io->creds->paired ? "login" : "registration", pl); logl(line);
     }
     if (!handshake(pp, pl, plain, &plen)) return 0;
+    if (!io->tunnel && t.tickets) { io->tls_tickets = t.tickets; wa_fmt(line, sizeof line, "tls: %u NewSessionTicket(s) received - PSK resumption would skip the certificate chain and CertificateVerify (not implemented)", t.tickets); logl(line); }
     if (io->mode != WA_MODE_PAIR) {
         close_ws();
         wa_fmt(io->result, sizeof io->result, "RESULT: handshake ACCEPTED by %s with our %s/WS/Noise stack, %T s hold, %u pongs%s", io->host,

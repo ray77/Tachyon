@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "x509.h"
+#include "rsa.h"
 #include "../tests/certs/wa_rsa_chain.h"
 
 static int failures;
@@ -22,6 +23,23 @@ int main(void)
     result(c[0].n_len == 256 && c[0].e == 65537 && !c[0].is_ca, "leaf: RSA-2048, e=65537, not a CA");
     result(c[1].is_ca && c[2].is_ca, "intermediate and root flagged cA");
     result(x509_match_host(&c[0], "web.whatsapp.com"), "SAN matches web.whatsapp.com via *.whatsapp.com");
+    {   /* cache file: fingerprint + prepared RSA key survive the round trip; corruption, truncation and a foreign version are rejected */
+        static x509_cache a, b; static uint8_t buf[X509_CACHE_FILE_MAX]; uint32_t n, i; int bad = 0;
+        x509_pin pin; pin.n = c[2].n; pin.n_len = c[2].n_len; pin.e = c[2].e;
+        result(rsa_pub_set(&a.key, c[0].n, c[0].n_len, c[0].e), "prepared leaf key");
+        x509_cache_store(&a, &pin, 1, "web.whatsapp.com", wa_cert0, sizeof wa_cert0);
+        n = x509_cache_write(buf, sizeof buf, &a);
+        result(n == 1 + 32 + 2 + 4 + 2 + 4 * 128 + 32, "cache file written (RSA-2048: 615 bytes)");
+        result(x509_cache_read(&b, buf, n) && b.valid && memcmp(a.fp, b.fp, 32) == 0 && b.key.limbs == a.key.limbs && b.key.e == a.key.e
+               && b.key.n0inv == a.key.n0inv && memcmp(a.key.n, b.key.n, sizeof a.key.n) == 0 && memcmp(a.key.rr, b.key.rr, sizeof a.key.rr) == 0, "cache file read back identical");
+        result(rsa_pub_check(&b.key, c[0].n, c[0].n_len, c[0].e), "read-back key passes rsa_pub_check against the leaf");
+        result(x509_cache_match(&b, &pin, 1, "web.whatsapp.com", wa_cert0, sizeof wa_cert0), "read-back entry hits for the same pin set / host / leaf");
+        for (i = 0; i < n; i += 37) { buf[i] ^= 1; if (x509_cache_read(&b, buf, n)) bad++; buf[i] ^= 1; }
+        result(bad == 0, "every corrupted byte rejected (SHA-256)");
+        result(!x509_cache_read(&b, buf, n - 1) && !x509_cache_read(&b, buf + 1, n - 1), "truncated / shifted record rejected");
+        buf[0] = 2; result(!x509_cache_read(&b, buf, n), "unknown version rejected"); buf[0] = 1;
+        result(x509_cache_write(buf, n - 1, &a) == 0, "no room: nothing written");
+    }
     result(x509_match_host(&c[0], "WHATSAPP.COM"), "SAN exact match, case-insensitive");
     result(!x509_match_host(&c[0], "a.b.whatsapp.com"), "wildcard does not span two labels");
     result(!x509_match_host(&c[0], "whatsapp.org"), "unrelated host rejected");
