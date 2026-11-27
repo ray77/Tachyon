@@ -217,6 +217,20 @@ build/nextkeys_test: tests/nextkeys_test.c proto/nextkeys.c proto/nextkeys.h $(C
 nextkeys-test: build/nextkeys_test
 	./build/nextkeys_test
 
+# Signal session layer (proto/signal.c, docs/SIGNAL.md) against libsignal running both parties (tools/signalvectors):
+# every ciphertext bit for bit, rejections, skipped keys, the session store. ASan + UBSan.
+SIGNAL_TEST_SRC := tests/signal_test.c proto/signal.c proto/prekeys.c proto/wabinary.c
+build/signal_test: $(SIGNAL_TEST_SRC) proto/signal.h proto/prekeys.h proto/pb.h $(CRYPTO_SRC)
+	@mkdir -p build
+	$(HOSTCC) -O1 -Wall -Wextra -std=c99 -Iproto -Icrypto/ref $(SANITIZE) $(SIGNAL_TEST_SRC) $(CRYPTO_SRC) -o $@
+
+.PHONY: signal-test signal-vectors
+signal-test: build/signal_test
+	./build/signal_test tests/vectors/signal_vectors.txt
+
+signal-vectors:
+	go run ./tools/signalvectors > tests/vectors/signal_vectors.txt
+
 .PHONY: pairing-test pair-success-vector
 pair-success-vector:
 	go run ./tools/pairvectors -mode pairsuccess > tests/vectors/pair_success_iq.bin
@@ -240,6 +254,7 @@ host-test: build/x25519_test build/ed25519_test build/sha256_test build/aes_test
 	$(MAKE) nextkeys-test
 	$(MAKE) clientpayload-test
 	$(MAKE) pairing-test
+	$(MAKE) signal-test
 	$(MAKE) pair-sim
 	$(MAKE) tls13-test
 

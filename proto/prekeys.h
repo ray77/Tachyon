@@ -31,6 +31,8 @@ uint32_t wa_prekeys_pending(const wa_prekeys *ps);                              
 void     wa_prekeys_mark_uploaded(wa_prekeys *ps);
 uint32_t wa_prekeys_write(uint8_t *out, uint32_t cap, const wa_prekeys *ps);    /* bytes written, 0 = does not fit */
 int      wa_prekeys_read(wa_prekeys *ps, const uint8_t *in, uint32_t len);      /* 1 = valid record */
+const wa_prekey *wa_prekeys_find(const wa_prekeys *ps, uint32_t id);            /* 0 = not held */
+int      wa_prekeys_remove(wa_prekeys *ps, uint32_t id);                        /* a one-time prekey was used (Signal responder): 1 = removed */
 
 /* node storage for one upload IQ (the nodes point into this struct, into ps and into iq_id) */
 typedef struct wa_prekey_upload {

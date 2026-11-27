@@ -68,6 +68,20 @@ int wa_prekeys_read(wa_prekeys *ps, const uint8_t *in, uint32_t len)
     return 1;
 }
 
+const wa_prekey *wa_prekeys_find(const wa_prekeys *ps, uint32_t id) { uint32_t i; for (i = 0; i < ps->n; i++) if (ps->k[i].id == id) return &ps->k[i]; return 0; }
+
+int wa_prekeys_remove(wa_prekeys *ps, uint32_t id)
+{
+    uint32_t i, j;
+    for (i = 0; i < ps->n; i++) if (ps->k[i].id == id) {
+        for (j = i + 1; j < ps->n; j++) ps->k[j - 1] = ps->k[j];
+        ps->n--;
+        for (j = 0; j < 32; j++) ps->k[ps->n].priv[j] = 0;        /* wipe the private half of the vacated slot */
+        return 1;
+    }
+    return 0;
+}
+
 static void be24(uint8_t *d, uint32_t v) { d[0] = (uint8_t)(v >> 16); d[1] = (uint8_t)(v >> 8); d[2] = (uint8_t)v; }
 static void bytes_node(wab_node *n, const char *tag, const uint8_t *p, uint32_t len) { wab_node_init(n, tag); n->val = wab_bytes(p, len); }
 static void list_node(wab_node *n, const char *tag, const wab_node *children, uint32_t count) { wab_node_init(n, tag); n->val.kind = WAB_LIST; n->children = children; n->n_children = count; }
