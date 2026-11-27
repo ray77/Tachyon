@@ -28,6 +28,7 @@
  */
 #include <exec/types.h>
 #include <exec/execbase.h>
+#include <exec/memory.h>
 #include <dos/dos.h>
 #include <dos/dosextens.h>
 #include <proto/exec.h>
@@ -120,22 +121,37 @@ static int clock_string(char *s)
 
 /* ---- pairing: credentials file and the QR screen ------------------------------------------------- */
 static wa_creds creds; static int pair_mode; static wa_prekeys prekeys; static wa_nextkeys nextkeys;
-static sig_store sessions; static uint8_t sessions_rec[SIG_STORE_MAX_SIZE];
+static sig_store *sessions; static uint8_t *sessions_rec;      /* Chip RAM (chip_alloc), the record buffer serves reading and writing */
 static char chat_peer[32], chat_text[200];
+
+/* the big buffers (receive buffers of the core, session store and record) live in Chip RAM: Fast RAM is the scarce
+ * one on a 2 MiB machine (the stack, the code and the static data of the probe fill it), Chip has ~300 KB to spare and
+ * the CPU reads it at full speed outside the display DMA slots */
+static APTR chip_blocks[12]; static ULONG chip_sizes[12]; static int chip_n;
+static void *chip_alloc(void *ctx, uint32_t n)
+{
+    APTR p; (void)ctx;
+    if (chip_n >= 12) return 0;
+    p = AllocMem(n, MEMF_CHIP | MEMF_CLEAR);
+    if (!p) return 0;
+    chip_blocks[chip_n] = p; chip_sizes[chip_n] = n; chip_n++;
+    return p;
+}
+static void chip_free_all(void) { while (chip_n) { chip_n--; FreeMem(chip_blocks[chip_n], chip_sizes[chip_n]); } }
 
 /* the session store: SYS:tachyon.sessions.tmp first, then the old record is deleted and the new one renamed into place
  * (AmigaDOS Rename does not overwrite), so a crash never leaves a torn record under the real name */
 static void write_sessions(void *ctx)
 {
     uint32_t n; BPTR f; (void)ctx;
-    if (!(n = sig_store_write(sessions_rec, sizeof sessions_rec, &sessions))) return;
+    if (!sessions || !(n = sig_store_write(sessions_rec, SIG_STORE_MAX_SIZE, sessions))) return;
     f = Open((STRPTR)"SYS:tachyon.sessions.tmp", MODE_NEWFILE);
     if (!f) { log_line(0, "sessions: cannot write SYS:tachyon.sessions.tmp"); return; }
     if (Write(f, sessions_rec, n) != (LONG)n) { Close(f); log_line(0, "sessions: short write"); return; }
     Close(f);
     DeleteFile((STRPTR)"SYS:tachyon.sessions");
     if (!Rename((STRPTR)"SYS:tachyon.sessions.tmp", (STRPTR)"SYS:tachyon.sessions")) log_line(0, "sessions: rename failed");
-    else logf1("sessions: SYS:tachyon.sessions written (%s%u sessions)", "", sessions.n);
+    else logf1("sessions: SYS:tachyon.sessions written (%s%u sessions)", "", sessions->n);
 }
 /* a typed line from the console window, without blocking (CON: hands over whole lines) */
 static int chat_input(void *ctx, char *line, uint32_t cap)
@@ -242,6 +258,7 @@ static void finish(void)
     if (screen_open) { scr_close(); screen_open = 0; }
     bsdsock_close(&net);
     if (logfile) Close(logfile);
+    chip_free_all();
     if (owncon) { Close(owncon); owncon = 0; con = 0; }
     done = Open((STRPTR)"SYS:done", MODE_NEWFILE);
     if (done) Close(done);
@@ -278,7 +295,7 @@ int main(void)
     n = read_file("SYS:waip.txt", small, 19); if (n > 0) { int i; for (i = 0; i < n && small[i] > ' '; i++) waip[i] = (char)small[i]; waip[i] = 0; } else waip[0] = 0;
     n = read_file("SYS:gap.txt", small, 8); if (n > 0) { int i; for (i = 0; i < n && small[i] >= '0' && small[i] <= '9'; i++) gap_ms = gap_ms * 10 + (uint32_t)(small[i] - '0'); gap_ms *= 1000; }
 
-    io.ctx = 0; io.send = io_send; io.recv = io_recv; io.reconnect = io_reconnect; io.now_ms = now_ms; io.log = log_line;
+    io.ctx = 0; io.send = io_send; io.recv = io_recv; io.reconnect = io_reconnect; io.now_ms = now_ms; io.log = log_line; io.alloc = chip_alloc;
     io.host = "web.whatsapp.com"; io.now = nowstr[0] ? nowstr : 0; io.seed = seed; io.seed_len = 64;
     io.gap_ms = gap_ms; io.tunnel = 0; io.use_cache = 0; io.debug = 0; io.hold_ms = 0;
     n = read_file("SYS:noisecache.bin", ncache, 96);
@@ -316,14 +333,16 @@ int main(void)
             }
         }
         /* Signal sessions and the interim chat (docs/SIGNAL.md) */
-        {   static uint8_t srec[SIG_STORE_MAX_SIZE + 1]; static uint8_t ctext[300];
-            io.sessions = &sessions; io.sessions_loaded = 0; io.save_sessions = write_sessions; io.chat_recv = chat_recv;
-            n = read_file("SYS:tachyon.sessions", srec, sizeof srec);
-            if (n <= 0) n = read_file("SYS:tachyon.sessions.tmp", srec, sizeof srec);      /* a crash between the write and the rename */
+        {   static uint8_t ctext[300];
+            sessions = (sig_store *)chip_alloc(0, sizeof(sig_store)); sessions_rec = (uint8_t *)chip_alloc(0, SIG_STORE_MAX_SIZE + 1);
+            if (!sessions || !sessions_rec) { out("RESULT: no Chip RAM for the session store\n"); finish(); return 10; }
+            io.sessions = sessions; io.sessions_loaded = 0; io.save_sessions = write_sessions; io.chat_recv = chat_recv;
+            n = read_file("SYS:tachyon.sessions", sessions_rec, SIG_STORE_MAX_SIZE + 1);
+            if (n <= 0) n = read_file("SYS:tachyon.sessions.tmp", sessions_rec, SIG_STORE_MAX_SIZE + 1);      /* a crash between the write and the rename */
             if (n > 0) {
-                if (!sig_store_read(&sessions, srec, (uint32_t)n)) { out("RESULT: SYS:tachyon.sessions is not a valid record - refusing to continue (delete it to start without sessions)\n"); finish(); return 10; }
+                if (!sig_store_read(sessions, sessions_rec, (uint32_t)n)) { out("RESULT: SYS:tachyon.sessions is not a valid record - refusing to continue (delete it to start without sessions)\n"); finish(); return 10; }
                 io.sessions_loaded = 1;
-                logf1("sessions: SYS:tachyon.sessions loaded: %s%u sessions", "", sessions.n);
+                logf1("sessions: SYS:tachyon.sessions loaded: %s%u sessions", "", sessions->n);
             }
             n = read_file("SYS:chat.txt", ctext, sizeof ctext - 1);
             if (n > 0) {

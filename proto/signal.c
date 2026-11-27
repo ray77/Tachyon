@@ -7,7 +7,7 @@
 #include "pb.h"
 #include "prekeys.h"
 
-#define SIG_BODY_MAX 4096                       /* padded plaintext / ciphertext body */
+#define SIG_BODY_MAX 2048                       /* padded plaintext / ciphertext body (texts; media travel as references) */
 #define SIG_INNER_MAX (1 + 2 + 33 + 6 + 6 + 3 + SIG_BODY_MAX + SIG_MAC_LEN)
 
 /* ---- helpers --------------------------------------------------------------------------------------- */

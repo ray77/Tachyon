@@ -14,8 +14,8 @@ Der emulierte A500 (FS-UAE, zyklengenau, 68000 bei 7,09 MHz, 2 MiB Fast) ist **a
 | Nachrichten (Phase 5) | **Signal-Sessions** (X3DH beide Rollen, Double Ratchet) bitgenau zu libsignal, `<message>`/`<enc>` senden und entschlüsseln, Quittungen wie whatsmeow, Sitzungsdatensatz mit SHA-256; Interim-Chat auf Host und A500 (Konsole); Gruppen und Medien noch nicht | SIGNAL.md; `make signal-test`, `make pair-sim` (Szenario E) |
 | **Programmstart → eingeloggt** | **47 s** (mittags noch 122 s): vor dem Connect wird nichts mehr gerechnet, die Verbindung selbst dauert 43 s (TLS 20 s, Noise 20 s) – drei X25519-Leitern mit frischem Server-Ephemeral, RSA-PSS, HKDF/GCM | BENCHMARKS.md 21–23 |
 | Serverlimits | TLS-Flight 60 s, WebSocket-Leerlauf 10 s, per Pong-Herzschlag beliebig verlängerbar; keine TLS-Tickets vom Server | PROTOCOL.md 8 |
-| Speicher | Stack + Client brauchen 2 MiB Fast (190 KiB Fast + 447 KiB Chip frei im Betrieb); 1 MiB bleibt die Benchmark-Maschine | NETWORK.md 6 |
-| Offline-Tests | 25 Host-Testprogramme (ASan/UBSan), Pairing-/Chat-Simulator (241 Prüfungen, libsignal entschlüsselt unsere Nachricht), alle Vektoren unter vamos und FS-UAE; Live-Versuche nach der Taktregel in PROTOCOL.md 11 | `make host-test`, `make pair-sim`, `make vamos` |
+| Speicher | Stack + Client brauchen 2 MiB Fast; die großen Puffer der Probe (Empfang, Sitzungen: ≈ 140 KB) liegen im Chip-RAM, das BSS im Fast-RAM ist 221 KB; 1 MiB bleibt die Benchmark-Maschine | NETWORK.md 6, SIGNAL.md 2.5 |
+| Offline-Tests | 25 Host-Testprogramme (ASan/UBSan), Pairing-/Chat-Simulator (297 Prüfungen, libsignal entschlüsselt unsere Nachricht, 170-KB-Offline-Stapel nachgestellt), alle Vektoren unter vamos und FS-UAE; Live-Versuche nach der Taktregel in PROTOCOL.md 11 | `make host-test`, `make pair-sim`, `make vamos` |
 
 Noch nicht: Live-Nachricht vom A500 (Phase 5 ist offline fertig, der erste angekündigte Selbst-Chat-Versuch steht aus, SIGNAL.md 6), Gruppen (Sender Keys), Medien, GUI (Phase 6; vorhanden ist der Hires-Schirm mit QR-Code und Konsolenfenster), echte Hardware (FS-UAE ist zyklengenau, eine Bestätigung auf dem A500 steht aus).
 

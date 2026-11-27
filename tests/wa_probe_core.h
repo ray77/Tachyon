@@ -37,6 +37,7 @@ typedef struct wa_probe_io {
     void *ctx;
     int      (*send)(void *ctx, const uint8_t *p, uint32_t n);                     /* 1 = all bytes on the wire */
     int32_t  (*recv)(void *ctx, uint8_t *p, uint32_t cap, uint32_t timeout_ms);   /* >0 bytes, 0 timeout, -1 closed */
+    void    *(*alloc)(void *ctx, uint32_t n);                                       /* WA_PROBE_ALLOC builds: the big receive buffers (A500: Chip RAM) */
     int      (*reconnect)(void *ctx);           /* new TCP connection to the same server (use_cache only; may be 0) */
     uint32_t (*now_ms)(void);                    /* monotonic milliseconds (the heartbeat takes it without ctx) */
     void     (*log)(void *ctx, const char *line);

@@ -42,8 +42,12 @@ static void log_line(void *ctx, const char *s) { (void)ctx; printf("+%7.2fs  %s\
 
 /* ---- the fake server ------------------------------------------------------------------------- */
 static uint8_t *pd_frame, *ps_frame; static uint32_t pd_len, ps_len;
-static uint8_t queue[8][4096]; static uint32_t qlen[8], qhead, qtail;           /* server -> client frames (decrypted node frames) */
-static int coalesce;                                                              /* deliver the next two queued frames in ONE WebSocket message */
+static uint8_t queue[16][4096]; static uint32_t qlen[16], qhead, qtail;           /* server -> client frames (decrypted node frames) */
+static int coalesce;                                                              /* deliver the next N (2 by default) queued frames in ONE WebSocket message */
+static int coalesce_n = 2;
+static uint32_t fat_frame;                                                        /* F: a frame of this many bytes (longer than the core's buffer) leads the message */
+static int fat_batch; static uint32_t fat_first;                                 /* F: the "offline batch" after <active/>: fat frame + 6 fat notifications in one message */
+static uint8_t big[65536]; static uint32_t big_len, big_off;                      /* the WebSocket message being served in chunks */
 static int closed_by_server, closed_after_queue, stage, codes_shown, ticks, pongs, keepalives, acks, signs, errors, closes;
 static int counts, uploads, actives, stanza_acks, upload_keys, bad_upload; static char ack_class[2][16], ack_id[2][16], ack_to[2][40];
 static wa_prekeys prekeys; static int prekeys_saved; static void save_prekeys(void *ctx) { (void)ctx; prekeys_saved++; }
@@ -53,8 +57,8 @@ static uint8_t sign_frame[2048]; static uint32_t sign_len;
 static char err_code[8], err_text[32];
 static uint8_t arena_mem[16384];
 
-static void enqueue(const uint8_t *frame, uint32_t len) { memcpy(queue[qtail & 7], frame, len); qlen[qtail & 7] = len; qtail++; }
-static void enqueue_node(const wab_node *n) { uint8_t b[1024]; uint32_t l; if (wab_encode_frame(n, b, sizeof b, &l) == WAB_OK) enqueue(b, l); else CHECK(!"encode (queue frame)"); }
+static void enqueue(const uint8_t *frame, uint32_t len) { memcpy(queue[qtail & 15], frame, len); qlen[qtail & 15] = len; qtail++; }
+static void enqueue_node(const wab_node *n) { static uint8_t b[4096]; uint32_t l; if (wab_encode_frame(n, b, sizeof b, &l) == WAB_OK) enqueue(b, l); else CHECK(!"encode (queue frame)"); }
 
 static void enqueue_result(const wab_value *id, const wab_node *child);
 /* ---- E: the Signal vectors (tests/vectors/signal_vectors.txt, name=hex) and the fake phone ---- */
@@ -152,21 +156,32 @@ static int32_t io_recv(void *ctx, uint8_t *p, uint32_t cap, uint32_t timeout_ms)
     (void)ctx;
     if (closed_by_server) return -1;
     if (qhead == qtail && closed_after_queue) { closed_by_server = 1; return -1; }
-    if (qhead == qtail) { usleep(timeout_ms * 1000 > 200000 ? 200000 : timeout_ms * 1000); return 0; }
-    {
-        uint32_t o = 0, total = 0, k, n = coalesce && qtail - qhead >= 2 ? 2 : 1;
-        for (k = 0; k < n; k++) total += 3 + qlen[(qhead + k) & 7] + 16;
+    if (big_off >= big_len) {
+        if (qhead == qtail) { usleep(timeout_ms * 1000 > 200000 ? 200000 : timeout_ms * 1000); return 0; }
+        /* build the next WebSocket message (one or several WA frames, optionally led by an oversize one) into big */
+        uint32_t o = 0, total = 0, k, n;
+        if (fat_batch && qhead == fat_first) { fat_batch = 0; fat_frame = 18000; coalesce = 1; coalesce_n = 6; }   /* F: the fat message */
+        n = coalesce && qtail - qhead >= (uint32_t)coalesce_n ? (uint32_t)coalesce_n : 1;
+        for (k = 0; k < n; k++) total += 3 + qlen[(qhead + k) & 15] + 16;
+        if (fat_frame) total += 3 + fat_frame;
         if (coalesce) coalesce = 0;
-        if (cap < total + 4) return -1;
-        p[o++] = 0x82;
-        if (total < 126) p[o++] = (uint8_t)total; else { p[o++] = 126; p[o++] = (uint8_t)(total >> 8); p[o++] = (uint8_t)total; }
+        big[o++] = 0x82;
+        if (total < 126) big[o++] = (uint8_t)total; else if (total < 65536) { big[o++] = 126; big[o++] = (uint8_t)(total >> 8); big[o++] = (uint8_t)total; }
+        else { big[o++] = 127; memset(big + o, 0, 4); o += 4; big[o++] = (uint8_t)(total >> 24); big[o++] = (uint8_t)(total >> 16); big[o++] = (uint8_t)(total >> 8); big[o++] = (uint8_t)total; }
+        if (fat_frame) { big[o++] = (uint8_t)(fat_frame >> 16); big[o++] = (uint8_t)(fat_frame >> 8); big[o++] = (uint8_t)fat_frame; memset(big + o, 0xfa, fat_frame); o += fat_frame; fat_frame = 0; }
         for (k = 0; k < n; k++) {
-            uint32_t len = qlen[qhead & 7], flen = len + 16; const uint8_t *f = queue[qhead & 7];
+            uint32_t len = qlen[qhead & 15], flen = len + 16; const uint8_t *f = queue[qhead & 15];
             qhead++;
-            p[o++] = (uint8_t)(flen >> 16); p[o++] = (uint8_t)(flen >> 8); p[o++] = (uint8_t)flen;
-            memcpy(p + o, f, len); o += len; memset(p + o, 0xee, 16); o += 16;
+            big[o++] = (uint8_t)(flen >> 16); big[o++] = (uint8_t)(flen >> 8); big[o++] = (uint8_t)flen;
+            memcpy(big + o, f, len); o += len; memset(big + o, 0xee, 16); o += 16;
         }
-        return (int32_t)o;
+        big_len = o; big_off = 0;
+        if (fat_frame == 0 && coalesce_n == 6) coalesce_n = 2;
+    }
+    {   /* served in chunks no larger than the caller's buffer (the TCP stack hands over what has arrived) */
+        uint32_t c = big_len - big_off; if (c > cap) c = cap;
+        memcpy(p, big + big_off, c); big_off += c;
+        return (int32_t)c;
     }
 }
 
@@ -274,6 +289,27 @@ static int io_send(void *ctx, const uint8_t *p, uint32_t n)
                     ra[1].key = wab_s("id"); ra[1].val = wab_text("ABCDEF1234"); ra[2].key = wab_s("type"); ra[2].val = wab_text("read"); ra[3].key = wab_s("t"); ra[3].val = wab_text("1764300002");
                     rcpt.attrs = ra; rcpt.n_attrs = 4;
                     enqueue_node(&rcpt);
+                    if (fat_batch) {
+                        /* F: the offline batch as one WebSocket message far longer than the core's 16 KiB buffer: an
+                           18000-byte frame (skipped) followed by six 3 KB notifications (acknowledged), then the marker */
+                        static uint8_t blob[3000]; static wab_node fn[6], fc[6]; static wab_attr fa[6][4]; static char ids[6][12]; static wab_node ib, off; static wab_attr ia[1], oa[1]; int k;
+                        memset(blob, 0x5b, sizeof blob);
+                        for (k = 0; k < 6; k++) {
+                            snprintf(ids[k], sizeof ids[k], "FAT%07d", k);
+                            wab_node_init(&fn[k], "notification"); fa[k][0].key = wab_s("from"); fa[k][0].val = wab_jid_value("", "s.whatsapp.net", 0);
+                            fa[k][1].key = wab_s("id"); fa[k][1].val = wab_text(ids[k]); fa[k][2].key = wab_s("type"); fa[k][2].val = wab_text("status"); fa[k][3].key = wab_s("t"); fa[k][3].val = wab_text("1764300003");
+                            fn[k].attrs = fa[k]; fn[k].n_attrs = 4;
+                            wab_node_init(&fc[k], "blob"); fc[k].val = wab_bytes(blob, sizeof blob);
+                            fn[k].val.kind = WAB_LIST; fn[k].children = &fc[k]; fn[k].n_children = 1;
+                        }
+                        /* the frames already queued go out one by one; the message starting with the first fat
+                           notification carries the oversize frame in front and all six notifications */
+                        fat_first = qtail;
+                        for (k = 0; k < 6; k++) enqueue_node(&fn[k]);
+                        wab_node_init(&off, "offline"); oa[0].key = wab_s("count"); oa[0].val = wab_text("7"); off.attrs = oa; off.n_attrs = 1;
+                        wab_node_init(&ib, "ib"); ia[0].key = wab_s("from"); ia[0].val = wab_jid_value("", "s.whatsapp.net", 0); ib.attrs = ia; ib.n_attrs = 1; ib.val.kind = WAB_LIST; ib.children = &off; ib.n_children = 1;
+                        enqueue_node(&ib);
+                    }
                 }
                 else if (wab_get_child(nd, "pair-device-sign")) {
                     const wab_node *di = wab_get_child(wab_get_child(nd, "pair-device-sign"), "device-identity"); const wab_value *ki;
@@ -320,7 +356,7 @@ static int saved; static void save_creds(void *ctx) { (void)ctx; saved++; }
 
 static void reset(wa_probe_io *io, wa_creds *creds)
 {
-    qhead = qtail = 0; closed_by_server = 0; closed_after_queue = 0; coalesce = 0; stage = 1; codes_shown = ticks = pongs = keepalives = acks = signs = errors = closes = 0; sign_len = 0; saved = 0;
+    qhead = qtail = 0; closed_by_server = 0; closed_after_queue = 0; coalesce = 0; coalesce_n = 2; fat_frame = 0; fat_batch = 0; fat_first = 0xffffffffu; big_len = big_off = 0; stage = 1; codes_shown = ticks = pongs = keepalives = acks = signs = errors = closes = 0; sign_len = 0; saved = 0;
     err_code[0] = err_text[0] = 0;
     memset(creds, 0, sizeof *creds); test_identity(&creds->id);
     io->creds = creds; io->creds_loaded = 1; io->paired_now = 0;
@@ -447,6 +483,23 @@ int main(int argc, char **argv)
         r = wa_probe_sim_login(&io, b, l);
         printf("%s\n", io.result);
         CHECK(r == 1 && bundles == 0 && msgs == 1 && enc_is_pk == 0 && io.msgs_sent == 1 && io.sessions_started == 0 && io.msgs_received == 0 && receipts == 0);
+    }
+    /* ---- F: the offline batch as one long WebSocket message: an oversize frame is skipped, the six 3 KB stanzas
+     * behind it are acknowledged one by one as they stream through the 16 KiB buffer, the <offline> marker ends the
+     * drain before the chat begins ---- */
+    printf("--- F: 36 KB WebSocket message through the 16 KiB buffer: oversize frame skipped, 6 stanzas acknowledged ---\n");
+    {   wab_node n; wab_attr a[2]; uint8_t b[256]; uint32_t l;
+        reset(&io, &creds); creds.paired = 1; strcpy(creds.jid_user, "4917612345678"); creds.jid_device = 7; counts = 1; fat_batch = 1;
+        io.sessions = 0; io.chat_user = 0; io.chat_send = 0; io.chat_input = 0; io.linger_ms = 1500;
+        wab_node_init(&n, "success"); a[0].key = wab_s("t"); a[0].val = wab_text("1764300000"); a[1].key = wab_s("lid"); a[1].val = wab_jid_value("123456789012345", "lid", 7); n.attrs = a; n.n_attrs = 2;
+        CHECK(wab_encode_frame(&n, b, sizeof b, &l) == WAB_OK);
+        r = wa_probe_sim_login(&io, b, l);
+        printf("%s\n", io.result);
+        CHECK(r == 1 && io.logged_in && actives == 1);
+        CHECK(stanza_acks == 8 && io.acks_sent == 8);                          /* notification + receipt + 6 fat notifications */
+        CHECK(strcmp(ack_id[1], "FAT0000005") == 0 && strcmp(ack_class[1], "notification") == 0);
+        CHECK(io.frames_after_login == 3 + 2 + 6 + 1);                         /* 3 results, 2 small, 6 fat, the <ib offline> marker */
+        CHECK(fat_frame == 0 && fat_batch == 0 && big_off == big_len);
     }
     printf("%s: %d checks, %d failures\n", fails ? "FAIL" : "PASS", checks, fails);
     return fails ? 1 : 0;

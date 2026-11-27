@@ -150,10 +150,11 @@ int ws_input(ws_client *w, const uint8_t *data, uint32_t len, uint8_t *out, uint
                 if (w->opcode == 1) { w->state = WS_ERROR; return 0; }       /* text frames: not used by WhatsApp */
                 if (w->opcode >= 8 && (plen > 125 || !w->fin)) { w->state = WS_ERROR; return 0; }
                 if (w->opcode < 8) {
-                    if (w->opcode == 0 && w->msg_len == 0 && !w->msg_ready) { /* continuation without start */ w->state = WS_ERROR; return 0; }
-                    if (w->opcode == 2) { w->msg_len = 0; w->skipping = 0; }
+                    if (w->opcode == 0 && !w->in_msg) { /* continuation without start */ w->state = WS_ERROR; return 0; }
+                    if (w->opcode == 2) { w->msg_len = 0; w->skipping = 0; w->in_msg = 1; }
                     if (plen > WS_MAX_FRAME) { w->state = WS_ERROR; return 0; }
-                    if (w->skipping || w->msg_len + plen > w->msg_cap) {
+                    if (w->stream) { /* delivered in pieces below, nothing is dropped */ }
+                    else if (w->skipping || w->msg_len + plen > w->msg_cap) {
                         /* too big for the caller's buffer: swallow the whole message and report it (WhatsApp sends
                            large app-state / history stanzas after login; the probe only needs the small ones) */
                         if (!w->skipping) { w->skipping = 1; w->dropped++; w->dropped_len = w->msg_len; }
@@ -170,6 +171,15 @@ int ws_input(ws_client *w, const uint8_t *data, uint32_t len, uint8_t *out, uint
         }
         {
             uint32_t take = len < w->need ? len : w->need;
+            if (w->opcode < 8 && w->stream) {
+                /* stream mode: fill the buffer; when it is full and the message goes on, hand it over (the caller
+                   consumes whole WA frames before feeding more; one byte at a time keeps this exact) */
+                uint32_t room = w->msg_cap - w->msg_len, c = take < room ? take : room;
+                for (i = 0; i < c; i++) w->msg[w->msg_len + i] = data[i];
+                w->msg_len += c; data += c; len -= c; w->need -= c;
+                if (w->need) { if (w->msg_len == w->msg_cap) { w->msg_partial = 1; return 1; } break; }
+                goto frame_done;
+            }
             if (w->opcode < 8) { if (!w->skipping) { for (i = 0; i < take; i++) w->msg[w->msg_len + i] = data[i]; w->msg_len += take; } }
             else { for (i = 0; i < take && w->hdr_len < 14; i++) w->hdr[w->hdr_len++] = data[i]; }   /* control payload (<=125, we keep 14) */
             data += take; len -= take; w->need -= take;
@@ -177,6 +187,7 @@ int ws_input(ws_client *w, const uint8_t *data, uint32_t len, uint8_t *out, uint
         }
 frame_done:
         if (w->opcode < 8) {
+            if (w->fin) w->in_msg = 0;
             if (w->fin && w->skipping) { w->skipping = 0; w->msg_len = 0; continue; }   /* discarded, no message */
             if (w->fin) { w->msg_ready = 1; return 1; }       /* caller consumes before feeding more */
         } else if (w->opcode == 9) {                          /* ping -> pong with the same payload */

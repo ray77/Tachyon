@@ -3,6 +3,7 @@
  * (see docs/TOOLCHAIN.md) every C module is compiled as one translation unit so vbcc emits a single
  * assembler file; bench/amiga/startup_probe.s includes it together with the assembler backends.
  */
+#define WA_PROBE_ALLOC 1          /* the core's big receive buffers come from chip_alloc (bench/wa_probe_amiga.c) */
 #include "../../crypto/ref/x25519_ref.c"
 #include "../../crypto/ref/sha512.c"
 #include "../../crypto/ref/ed25519.c"

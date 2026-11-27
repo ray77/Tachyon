@@ -56,6 +56,25 @@ int main(int argc, char **argv)
         frame[0] = 0x82; frame[1] = 10;
         result(ws_input(&w, frame, 12, o2, &ol, sizeof o2) == 1 && w.msg_ready && w.msg_len == 10 && w.msg[9] == 9, "the next message arrives intact");
         w.msg_ready = 0;
+        /* stream mode: the same 100-byte message in a 64-byte buffer arrives in pieces, nothing dropped; the caller
+           consumes 30 bytes each time the buffer is full and moves the rest down */
+        {   uint32_t got = 0, pieces = 0, d = w.dropped, next = 0; int ok = 1;
+            w.stream = 1; frame[0] = 0x82; frame[1] = 100; for (k = 0; k < 100; k++) frame[2 + k] = (uint8_t)k;
+            for (k = 0; k < 102 && ok; k++) {
+                if (ws_input(&w, frame + k, 1, o2, &ol, sizeof o2) != 1) ok = 0;
+                if (w.msg_partial) {
+                    uint32_t j; pieces++;
+                    if (w.msg_len != 64) ok = 0;
+                    for (j = 0; j < 30; j++) if (w.msg[j] != (uint8_t)(next + j)) ok = 0;
+                    next += 30; got += 30;
+                    for (j = 30; j < w.msg_len; j++) w.msg[j - 30] = w.msg[j];
+                    w.msg_len -= 30; w.msg_partial = 0;
+                }
+            }
+            { uint32_t j; for (j = 0; j < w.msg_len; j++) if (w.msg[j] != (uint8_t)(next + j)) ok = 0; got += w.msg_len; }
+            result(ok && w.msg_ready && pieces == 2 && got == 100 && w.dropped == d, "stream mode: 100-byte message through a 64-byte buffer in pieces, in order");
+            w.msg_ready = 0; w.stream = 0; w.msg_len = 0;
+        }
     }
     fd = socket(AF_INET, SOCK_STREAM, 0);
     memset(&sa, 0, sizeof sa); sa.sin_family = AF_INET; sa.sin_port = htons((uint16_t)port); sa.sin_addr.s_addr = htonl(0x7f000001);

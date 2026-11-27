@@ -369,7 +369,7 @@ run-pair: build/amiga/wa_probe build/amiga/utility.library build/amiga/sana2_hol
 CHAT_LINGER ?= 180
 run-chat: build/amiga/wa_probe build/amiga/utility.library build/amiga/sana2_hold build/amiga/a2065fix.device
 	@test -n "$(CHAT_TO)" || { echo "usage: make run-chat CHAT_TO=<number> [CHAT_SEND='text'] [CHAT_LINGER=180] FAST=2048"; exit 2; }
-	PAIR=1 GAP=0 NET_FAST=$(FAST) CHAT_TO=$(CHAT_TO) CHAT_SEND='$(CHAT_SEND)' CHAT_LINGER=$(CHAT_LINGER) tools/run-fsuae-net.sh $< $$(( $(CHAT_LINGER) + 400 ))
+	PAIR=1 GAP=0 NET_FAST=$(FAST) CHAT_TO=$(CHAT_TO) CHAT_SEND='$(CHAT_SEND)' CHAT_LINGER=$(CHAT_LINGER) tools/run-fsuae-net.sh $< $$(( $(CHAT_LINGER) + 700 ))
 
 # utility.library V37 for Kickstart 1.3 (tools/amiga/utility13.*): 2.0-era SANA-II drivers (a2065.device) need it
 build/amiga/utility13_c.s: tools/amiga/utility13.c

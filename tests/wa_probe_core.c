@@ -27,7 +27,25 @@ static const uint8_t wa_cert_pub[32] = { 0x14, 0x23, 0x75, 0x57, 0x4d, 0x0a, 0x5
 static wa_probe_io *io;
 static tls13 t;
 static ws_client w;
-static uint8_t msgbuf[WA_PROBE_MSG_MAX], pend[WA_PROBE_MSG_MAX]; static uint32_t pend_len;
+/* the big receive buffers: WebSocket message, pending TLS plaintext, decrypted frame (two), inflated node, node arena.
+ * WA_PROBE_ALLOC (the Amiga unity build): handed out by io->alloc, so they live in Chip RAM and leave Fast RAM to the
+ * code, the TCP/IP stack and the session store; otherwise static */
+#define WA_PROBE_ARENA 12288
+#ifdef WA_PROBE_ALLOC
+static uint8_t *msgbuf, *pend, *rx_plain, *hs_plain, *inflated, *arena_mem;
+static int big_buffers(wa_probe_io *pio)
+{
+    if (msgbuf) return 1;
+    if (!pio->alloc) return 0;
+    msgbuf = pio->alloc(pio->ctx, WA_PROBE_MSG_MAX); pend = pio->alloc(pio->ctx, WA_PROBE_MSG_MAX); rx_plain = pio->alloc(pio->ctx, WA_PROBE_MSG_MAX);
+    hs_plain = pio->alloc(pio->ctx, WA_PROBE_MSG_MAX); inflated = pio->alloc(pio->ctx, WA_PROBE_MSG_MAX); arena_mem = pio->alloc(pio->ctx, WA_PROBE_ARENA);
+    return msgbuf && pend && rx_plain && hs_plain && inflated && arena_mem;
+}
+#else
+static uint8_t msgbuf[WA_PROBE_MSG_MAX], pend[WA_PROBE_MSG_MAX], rx_plain[WA_PROBE_MSG_MAX], hs_plain[WA_PROBE_MSG_MAX], inflated[WA_PROBE_MSG_MAX], arena_mem[WA_PROBE_ARENA];
+static int big_buffers(wa_probe_io *pio) { (void)pio; return 1; }
+#endif
+static uint32_t pend_len;
 static uint8_t rdbuf[8192];
 static uint32_t t_start;
 static char line[640];
@@ -41,7 +59,8 @@ static uint8_t cached_static[32]; static int have_cached_static;   /* the server
 static int prepared;
 static noise_transport tr;            /* transport keys of the current connection */
 static int pump_quiet;                /* suppress the "timeout" log line (QR wait loop) */
-static uint32_t msg_off, msg_have;    /* one WebSocket message may carry several WA frames (3-byte length each,
+static int offline_done;               /* <ib><offline count/></ib>: the server has delivered everything that waited for us */
+static uint32_t msg_off, msg_have, skip_left;    /* one WebSocket message may carry several WA frames (3-byte length each,
                                          whatsmeow socket/framesocket.go processData): the ones not taken yet */
 
 /* ---- freestanding helpers ------------------------------------------------------------------------ */
@@ -154,16 +173,16 @@ static int pump(int want_tls_state, int want_msg, uint32_t timeout_ms)
         if (want_msg == 2 && w.state == WS_OPEN) return 1;
         if (want_msg) {
             /* feed pending decrypted bytes one at a time so nothing after a complete message is lost */
-            while (pend_len && !w.msg_ready) {
+            while (pend_len && !w.msg_ready && !w.msg_partial) {
                 uint32_t i;
                 ol = 0;
                 { uint32_t d = w.dropped;
                   if (!ws_input(&w, pend, 1, out, &ol, sizeof out)) { wa_fmt(line, sizeof line, "ws error, state %d", w.state); logl(line); return 0; }
-                  if (w.dropped != d) { wa_fmt(line, sizeof line, "ws: a %u-byte message was dropped (larger than the %u-byte buffer)", w.dropped_len, (uint32_t)sizeof msgbuf); logl(line); } }
+                  if (w.dropped != d) { wa_fmt(line, sizeof line, "ws: a %u-byte message was dropped (larger than the %u-byte buffer)", w.dropped_len, (uint32_t)WA_PROBE_MSG_MAX); logl(line); } }
                 if (ol && !app_send(out, ol)) return 0;
                 pend_len--; for (i = 0; i < pend_len; i++) pend[i] = pend[i + 1];
             }
-            if (w.msg_ready) { if (io->debug) { wa_fmt(line, sizeof line, "  ws message %u bytes:", w.msg_len); log_hex(line, w.msg, w.msg_len < 4 ? w.msg_len : 4); } return 1; }
+            if (w.msg_ready || w.msg_partial) { if (io->debug) { wa_fmt(line, sizeof line, "  ws message %u bytes%s:", w.msg_len, w.msg_partial ? " (partial)" : ""); log_hex(line, w.msg, w.msg_len < 4 ? w.msg_len : 4); } return 1; }
             if (w.state == WS_CLOSED) { wa_fmt(line, sizeof line, "server closed the WebSocket (code %u)", (uint32_t)w.close_code); logl(line); return 0; }
         }
         now = ms();
@@ -173,7 +192,7 @@ static int pump(int want_tls_state, int want_msg, uint32_t timeout_ms)
         if (r < 0) { logl("socket closed by server"); return 0; }
         if (io->tunnel) {
             if (w.state == WS_WAIT_HTTP) { ol = 0; if (!ws_input(&w, rdbuf, (uint32_t)r, out, &ol, sizeof out)) { logl("ws upgrade failed"); return 0; } }
-            else { if (pend_len + (uint32_t)r > sizeof pend) return 0; cp(pend + pend_len, rdbuf, (uint32_t)r); pend_len += (uint32_t)r; }
+            else { if (pend_len + (uint32_t)r > WA_PROBE_MSG_MAX) return 0; cp(pend + pend_len, rdbuf, (uint32_t)r); pend_len += (uint32_t)r; }
             continue;
         }
         if (io->debug) { wa_fmt(line, sizeof line, "  read %d bytes: ", r); log_hex(line, rdbuf, r < 100 ? (uint32_t)r : 100); }
@@ -183,7 +202,7 @@ static int pump(int want_tls_state, int want_msg, uint32_t timeout_ms)
                 ol = 0;
                 if (!ws_input(&w, t.app, t.app_len, out, &ol, sizeof out)) { logl("ws upgrade failed"); return 0; }
             } else {
-                if (pend_len + t.app_len > sizeof pend) return 0;
+                if (pend_len + t.app_len > WA_PROBE_MSG_MAX) return 0;
                 cp(pend + pend_len, t.app, t.app_len); pend_len += t.app_len;
             }
             t.app_len = 0;
@@ -276,6 +295,7 @@ int wa_probe_prepare(wa_probe_io *pio)
 {
     io = pio; t_start = io->now_ms(); prepared = 0;
     io->t_tls_key = io->t_noise_keys = 0; io->result[0] = 0;
+    if (!big_buffers(pio)) return fail("RESULT: no memory for the receive buffers", 0, 0);
     io->noise_cert_cached = 0; io->noise_cache_valid = 0;
     if (!io->seed || io->seed_len < 32) return fail("RESULT: no seed", 0, 0);
     rng.instantiated = 0; drbg_instantiate(&rng, io->seed, io->seed_len);
@@ -317,6 +337,7 @@ int wa_probe_prepare(wa_probe_io *pio)
 }
 
 static int recv_frame(uint32_t timeout_ms, uint8_t *plain, uint32_t *plen);
+static void frames_reset(void);
 
 /* TCP is connected: TLS -> WebSocket -> Noise XX with `payload` as the ClientPayload; the first decrypted server
  * frame lands in plain[0..*plain_len). Shared by the probe, the pairing connection and the login connection. */
@@ -329,7 +350,7 @@ static int handshake(const uint8_t *payload, uint32_t payload_len, uint8_t *plai
     uint32_t server_static_ct_len = 0, cert_ct_len = 0, n, ladders = 0;
     const uint8_t *p, *end, *d; uint32_t f, wire, l, v; int es_used = 0;
 
-    pend_len = 0; pump_quiet = 0; msg_have = 0; msg_off = 0;
+    pend_len = 0; pump_quiet = 0; frames_reset();
     if (payload_len + 16 > sizeof payload_ct) return fail("RESULT: ClientPayload too long", 0, 0);
     if (!io->tunnel) {
         /* use_cache: a first connection fills the certificate cache (full chain verification), then the real one
@@ -380,7 +401,8 @@ static int handshake(const uint8_t *payload, uint32_t payload_len, uint8_t *plai
     }
 
     /* WebSocket upgrade */
-    n = ws_client_start(&w, io->host, "/ws/chat", "https://web.whatsapp.com", msgbuf, sizeof msgbuf, &rng, out, sizeof out);
+    n = ws_client_start(&w, io->host, "/ws/chat", "https://web.whatsapp.com", msgbuf, WA_PROBE_MSG_MAX, &rng, out, sizeof out);
+    w.stream = 1;                                   /* long messages (the offline batch after login) arrive frame by frame */
     if (!n || !app_send(out, n)) return fail("RESULT: WebSocket request failed", 0, 0);
     if (!pump(-1, 2, 20000)) { wa_fmt(io->result, sizeof io->result, "RESULT: WebSocket upgrade failed (state %u)", (uint32_t)w.state); return 0; }
     io->t_ws = ms();
@@ -486,7 +508,7 @@ static int handshake(const uint8_t *payload, uint32_t payload_len, uint8_t *plai
         io->t_finish = ms();
         wa_fmt(line, sizeof line, "noise: ClientFinish sent %T s after ServerHello (%u-byte ClientPayload)", ms() - t_hello, payload_len); logl(line);
     }
-    msg_have = 0; msg_off = 0;
+    frames_reset();
     {
         int r = recv_frame(20000, plain, plain_len);
         if (r == 0) { wa_fmt(io->result, sizeof io->result, "RESULT: handshake REJECTED (no encrypted frame after ClientFinish, gap %T s)", io->gap_ms); return 0; }
@@ -499,7 +521,7 @@ static int handshake(const uint8_t *payload, uint32_t payload_len, uint8_t *plai
 }
 
 /* ---- pairing session ----------------------------------------------------------------------------- */
-static uint8_t arena_mem[12288]; static wab_arena arena;   /* post-login stanzas (inflated) are larger than the pairing IQs */
+static wab_arena arena;   /* over arena_mem: post-login stanzas (inflated) are larger than the pairing IQs */
 static uint8_t refbuf[WA_QR_REFS_MAX][128]; static uint32_t reflen[WA_QR_REFS_MAX], nrefs;
 static char qr_text[WA_PAIR_QR_MAX]; static qr qr_code; static qr_work qr_scratch;
 static uint32_t iq_counter; static char iq_prefix[16];
@@ -527,25 +549,53 @@ static int send_node(const wab_node *n, const char *what)
 /* next WA frame: 1 = decrypted into plain (*plen), 0 = nothing within timeout_ms, -1 = connection gone or a malformed
  * frame. A WebSocket message holds one or more frames (3-byte big-endian length each; the server sends e.g.
  * <stream:error code=515> and <xmlstreamend> in one message), so the frames not taken yet are served first. */
+/* the next WA frame (3-byte length + Noise ciphertext), decrypted into plain. A WebSocket message may carry many
+ * frames and may be far longer than our buffer (the offline batch after login: 170 KB in one message): the WebSocket
+ * layer hands the message over in pieces (ws.stream), complete frames are taken from the front, the remainder is moved
+ * down and more is read. A single frame longer than the buffer cannot be decrypted and is skipped, the Noise read
+ * counter advanced by one so the frames after it still decrypt. 1 = frame, 0 = timeout, -1 = connection gone or bad frame. */
+static void frames_reset(void) { msg_off = 0; msg_have = 0; skip_left = 0; w.msg_len = 0; w.msg_ready = 0; w.msg_partial = 0; }
 static int recv_frame(uint32_t timeout_ms, uint8_t *plain, uint32_t *plen)
 {
-    uint32_t flen;
-    if (!msg_have) {
-        pump_quiet = 1;
-        if (!pump(-1, 1, timeout_ms)) { pump_quiet = 0; return w.state == WS_CLOSED || w.state == WS_ERROR || t.error ? -1 : 0; }
-        pump_quiet = 0;
-        w.msg_ready = 0; msg_off = 0; msg_have = 1;
-        if (io->debug && w.msg_len) { wa_fmt(line, sizeof line, "  ws message %u bytes", w.msg_len); logl(line); }
+    uint32_t flen, avail, deadline = ms() + timeout_ms;
+    for (;;) {
+        avail = w.msg_len - msg_off;
+        if (skip_left) {                                 /* discarding an oversize frame */
+            uint32_t d = avail < skip_left ? avail : skip_left;
+            msg_off += d; skip_left -= d; avail -= d;
+            if (!skip_left) { logl("ws: oversize frame skipped, Noise read counter advanced"); tr.read_counter++; }
+        }
+        if (!skip_left && avail >= 3) {
+            flen = ((uint32_t)w.msg[msg_off] << 16) | ((uint32_t)w.msg[msg_off + 1] << 8) | w.msg[msg_off + 2];
+            if (flen < 16) { wa_fmt(line, sizeof line, "wab: bad encrypted frame (length %u at %u)", flen, msg_off); logl(line); frames_reset(); return -1; }
+            if (3 + flen > WA_PROBE_MSG_MAX) {
+                wa_fmt(line, sizeof line, "ws: a %u-byte frame is longer than the %u-byte buffer: skipping it (an app-state or history stanza, not needed)", flen, (uint32_t)WA_PROBE_MSG_MAX); logl(line);
+                skip_left = 3 + flen; continue;
+            }
+            if (avail >= 3 + flen) {
+                if (!noise_transport_decrypt(&tr, w.msg + msg_off + 3, flen, plain)) { logl("wab: frame does not decrypt"); frames_reset(); return -1; }
+                *plen = flen - 16;
+                msg_off += 3 + flen;
+                if (msg_off >= w.msg_len) { msg_off = 0; w.msg_len = 0; if (w.msg_ready) { w.msg_ready = 0; msg_have = 0; } }
+                else if (io->debug) { wa_fmt(line, sizeof line, "ws: %u more bytes of frames in this message", w.msg_len - msg_off); logl(line); }
+                return 1;
+            }
+        }
+        /* more bytes needed: a complete message must not end inside a frame */
+        if (w.msg_ready) {
+            if (avail && !skip_left) { wa_fmt(line, sizeof line, "wab: bad encrypted frame (%u bytes left at the end of a %u-byte message)", avail, w.msg_len); logl(line); frames_reset(); return -1; }
+            w.msg_ready = 0; msg_off = 0; w.msg_len = 0; avail = 0;
+        }
+        if (msg_off) { uint32_t i; for (i = 0; i < avail; i++) w.msg[i] = w.msg[msg_off + i]; w.msg_len = avail; msg_off = 0; }
+        w.msg_partial = 0; msg_have = 1;
+        {
+            uint32_t now = ms();
+            if (now >= deadline) return 0;
+            pump_quiet = 1;
+            if (!pump(-1, 1, deadline - now)) { pump_quiet = 0; return w.state == WS_CLOSED || w.state == WS_ERROR || t.error ? -1 : 0; }
+            pump_quiet = 0;
+        }
     }
-    if (w.msg_len - msg_off < 3 + 16) { logl("wab: bad encrypted frame (short)"); msg_have = 0; return -1; }
-    flen = ((uint32_t)w.msg[msg_off] << 16) | ((uint32_t)w.msg[msg_off + 1] << 8) | w.msg[msg_off + 2];
-    if (flen < 16 || flen > w.msg_len - msg_off - 3 || flen - 16 > WA_PROBE_MSG_MAX) { wa_fmt(line, sizeof line, "wab: bad encrypted frame (length %u in a %u-byte message at %u)", flen, w.msg_len, msg_off); logl(line); msg_have = 0; return -1; }
-    if (!noise_transport_decrypt(&tr, w.msg + msg_off + 3, flen, plain)) { logl("wab: frame does not decrypt"); msg_have = 0; return -1; }
-    *plen = flen - 16;
-    msg_off += 3 + flen;
-    if (msg_off >= w.msg_len) msg_have = 0;
-    else { wa_fmt(line, sizeof line, "ws: %u more bytes of frames in this message", w.msg_len - msg_off); logl(line); }
-    return 1;
 }
 
 static void log_node(const char *prefix, const wab_node *n)
@@ -571,11 +621,11 @@ static void log_node(const char *prefix, const wab_node *n)
 static const wab_node *decode(const uint8_t *plain, uint32_t plen)
 {
     const wab_node *n; int e;
-    wab_arena_init(&arena, arena_mem, sizeof arena_mem);
+    wab_arena_init(&arena, arena_mem, WA_PROBE_ARENA);
     if (plen && (plain[0] & WAB_FLAG_COMPRESSED)) {
         /* whatsmeow message.go: flags bit 1 = the node is a zlib stream (proto/inflate.c) */
-        static uint8_t inflated[WA_PROBE_MSG_MAX]; uint32_t ilen = 0, t0 = ms();
-        e = wa_inflate(plain + 1, plen - 1, inflated, sizeof inflated, &ilen);
+        uint32_t ilen = 0, t0 = ms();
+        e = wa_inflate(plain + 1, plen - 1, inflated, WA_PROBE_MSG_MAX, &ilen);
         if (e != WA_INFLATE_OK) { wa_fmt(line, sizeof line, "wab: compressed frame: %s (%u bytes in, %u out)", wa_inflate_errstr(e), plen - 1, ilen); logl(line); return 0; }
         wa_fmt(line, sizeof line, "wab: inflated %u -> %u bytes in %T s", plen - 1, ilen, ms() - t0); logl(line);
         e = wab_decode_node(inflated, ilen, &arena, &n);
@@ -653,12 +703,12 @@ static int send_ack(const wab_node *n)
 /* one decoded node from the server; 0 = nothing within timeout_ms (or a malformed frame, logged) or *gone = 1 */
 static const wab_node *recv_node(uint32_t timeout_ms, int *gone)
 {
-    static uint8_t plain[WA_PROBE_MSG_MAX]; uint32_t plen; int r = recv_frame(timeout_ms, plain, &plen);
+    uint32_t plen; int r = recv_frame(timeout_ms, rx_plain, &plen);
     *gone = 0;
     if (r < 0) { *gone = 1; return 0; }
     if (r == 0) return 0;
     io->frames_after_login++;
-    return decode(plain, plen);
+    return decode(rx_plain, plen);
 }
 
 static int handle_message(const wab_node *n);
@@ -692,7 +742,10 @@ static int handle_async(const wab_node *n)
         if (io->sessions) return handle_message(n);
         logl("login: an encrypted message waits for us (left unacknowledged: no session store in this run)");
     }
-    if (wab_str_eq(&n->tag, "ib") && n->val.kind == WAB_LIST) { uint32_t i; for (i = 0; i < n->n_children; i++) log_node("  ib: ", &n->children[i]); }
+    if (wab_str_eq(&n->tag, "ib") && n->val.kind == WAB_LIST) {
+        uint32_t i;
+        for (i = 0; i < n->n_children; i++) { log_node("  ib: ", &n->children[i]); if (wab_str_eq(&n->children[i].tag, "offline")) offline_done = 1; }
+    }
     return 1;                                   /* ib (offline_preview, offline, dirty, edge_routing), iq from the server, ...: logged only */
 }
 
@@ -727,7 +780,7 @@ static int iq_is_result(const wab_node *r) { const wab_value *ty = r ? wab_get_a
 
 /* ---- messages: Signal sessions, <message> in and out (docs/SIGNAL.md; whatsmeow send.go, message.go, receipt.go) ---- */
 static sig_local me_local;
-static uint8_t msg_pt[1024], msg_ct[1400], msg_plain[WA_PROBE_MSG_MAX], msg_devid[600];
+static uint8_t msg_pt[1024], msg_ct[1400], msg_plain[2048], msg_devid[600];   /* a Signal body is at most SIG_BODY_MAX = 2048 */
 static char chat_line[256];
 
 static void core_random(void *ctx, uint8_t *out, uint32_t n) { (void)ctx; drbg_generate(&rng, out, n); }
@@ -1060,6 +1113,19 @@ static int post_login(void)
     if (!iq_is_result(r)) return fail("RESULT: logged in, but <active/> was not accepted (see recv: line)", 0, 0);
     io->active_set = 1; io->t_active = ms();
     wa_fmt(line, sizeof line, "login: <active/> accepted %T s after <success>; staying online for %T s", io->t_active - io->t_login_accepted, io->linger_ms); logl(line);
+    /* 3b. the offline batch: right after <active/> the server delivers everything that waited for us (receipts,
+          notifications, status updates, messages - 29 stanzas in one 170 KB WebSocket message in the first live chat
+          attempt), ending with <ib><offline count/></ib>. Each stanza is handled as it arrives (acknowledged, messages
+          decrypted when we have sessions); nothing else goes out until the batch is done or the line has been quiet. */
+    {
+        uint32_t t0 = ms(), last = ms(), before = io->frames_after_login; offline_done = 0;
+        while (!offline_done && ms() - last < 6000) {
+            const wab_node *n = recv_node(1000, &gone);
+            if (gone) { logl("login: connection closed by the server during the offline batch"); close_ws(); return 1; }
+            if (n) { last = ms(); if (!handle_async(n)) { close_ws(); return 1; } }
+        }
+        wa_fmt(line, sizeof line, "login: offline batch: %u stanzas in %T s%s", io->frames_after_login - before, ms() - t0, offline_done ? ", <offline> marker seen" : ", no <offline> marker (line quiet for 6 s)"); logl(line);
+    }
     /* 4. idle time: the key material for the next start (two key pairs, es with the server static just verified),
           pongs from the heartbeat keep the WebSocket alive meanwhile; the record goes to the caller right away */
     if (io->precompute_next && io->nextkeys) {
@@ -1279,7 +1345,7 @@ next_code: ;
 
 int wa_probe_run(wa_probe_io *pio)
 {
-    static uint8_t plain[WA_PROBE_MSG_MAX], payload[WA_CLIENTPAYLOAD_MAX];
+    static uint8_t payload[WA_CLIENTPAYLOAD_MAX]; uint8_t *plain = hs_plain;
     const uint8_t *pp = wa_client_payload; uint32_t pl = sizeof wa_client_payload, plen = 0;
 
     if (!prepared || io != pio) { if (!wa_probe_prepare(pio)) return 0; }
@@ -1325,7 +1391,7 @@ int wa_probe_run(wa_probe_io *pio)
 static void sim_open(wa_probe_io *pio)
 {
     static uint8_t out[1024]; uint32_t i;
-    io = pio; t_start = io->now_ms(); pend_len = 0; io->tunnel = 1; io->result[0] = 0; msg_have = 0; msg_off = 0;
+    io = pio; t_start = io->now_ms(); pend_len = 0; io->tunnel = 1; io->result[0] = 0; frames_reset(); big_buffers(pio);
     io->paired_now = io->logged_in = 0; io->pongs = 0; io->qr_shown = 0;
     io->t_qr_shown = io->t_pair_success = io->d_verify = io->d_sign = io->t_sign_sent = io->t_515 = io->t_login_connect = io->t_login_accepted = 0;
     io->server_prekeys = io->prekeys_uploaded = io->t_active = io->frames_after_login = io->acks_sent = io->messages_seen = 0; io->have_server_prekeys = io->active_set = 0;
@@ -1335,20 +1401,20 @@ static void sim_open(wa_probe_io *pio)
     io->t_msg_sent = io->t_msg_ack = io->t_msg_receipt = io->t_msg_received = 0; last_msg_id[0] = 0;
     if (io->sessions && !io->sessions_loaded) { sig_store_init(io->sessions); io->sessions_loaded = 1; }
     if (io->mode == WA_MODE_PAIR && io->creds) local_init();
-    ws_client_start(&w, io->host, "/ws/chat", "https://web.whatsapp.com", msgbuf, sizeof msgbuf, &rng, out, sizeof out);
-    w.state = WS_OPEN;
+    ws_client_start(&w, io->host, "/ws/chat", "https://web.whatsapp.com", msgbuf, WA_PROBE_MSG_MAX, &rng, out, sizeof out);
+    w.state = WS_OPEN; w.stream = 1;
     for (i = 0; i < sizeof tr; i++) ((uint8_t *)&tr)[i] = 0;
 }
 int wa_probe_sim_pair(wa_probe_io *pio, const uint8_t *first_frame, uint32_t len)
 {
-    static uint8_t plain[WA_PROBE_MSG_MAX];
+    uint8_t *plain = hs_plain;
     sim_open(pio);
     cp(plain, first_frame, len);
     return pair_session(plain, len);
 }
 int wa_probe_sim_login(wa_probe_io *pio, const uint8_t *first_frame, uint32_t len)
 {
-    static uint8_t plain[WA_PROBE_MSG_MAX];
+    uint8_t *plain = hs_plain;
     int r;
     sim_open(pio);
     if (!rng.instantiated) drbg_instantiate(&rng, io->seed, io->seed_len);

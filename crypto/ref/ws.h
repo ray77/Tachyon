@@ -25,6 +25,10 @@ typedef struct {
     uint8_t opcode; int fin;
     uint8_t *msg; uint32_t msg_len, msg_cap;    /* reassembled message (caller-provided buffer) */
     int msg_ready;                       /* a complete binary message is in msg[0..msg_len) */
+    int stream;                          /* caller-set: deliver a long message in pieces (msg_partial) instead of dropping it */
+    int msg_partial;                     /* stream mode: msg[0..msg_len) is full but the message goes on - the caller consumes
+                                            whole WA frames from the front, moves the rest down, sets msg_len and clears this */
+    int in_msg;                          /* between the first and the final fragment of a data message */
     int skipping;                        /* a message larger than msg_cap is being discarded (not an error) */
     uint32_t dropped, dropped_len;       /* how many messages were discarded, and the last one's size */
     uint16_t close_code;
