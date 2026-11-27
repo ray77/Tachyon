@@ -996,7 +996,7 @@ static int handle_message(const wab_node *n)
     elen = enc->val.str.len;
     /* the ciphertext as hex (200 bytes per line): an offline replay of exactly this message against the stored
        credentials and prekeys (host, vamos) is worth more than any guess when the 68000 stops here */
-    for (i = 0; i < elen; i += 200) { char pfx[40]; wa_fmt(pfx, sizeof pfx, "enc %s %u/%u: ", is_pk ? "pkmsg" : "msg", i, elen); log_hex(pfx, enc->val.str.p + i, elen - i < 200 ? elen - i : 200); }
+    for (i = 0; i < elen; i += 100) { char pfx[40]; wa_fmt(pfx, sizeof pfx, "enc %s %u/%u: ", is_pk ? "pkmsg" : "msg", i, elen); log_hex(pfx, enc->val.str.p + i, elen - i < 100 ? elen - i : 100); }   /* 100 bytes: the A500 log line holds 300 chars */
     if (wab_get_attr(n, "offline")) {
         /* interim: a message that waited on the server while we were offline (the phone's app-state keys, other
            devices' first messages) is acknowledged without decrypting it - the second live attempt stopped inside the
@@ -1144,6 +1144,21 @@ static int post_login(void)
         if (io->save_prekeys) io->save_prekeys(io->ctx);
         wa_fmt(line, sizeof line, "login: %u one-time prekeys uploaded and accepted (registration id %u, signed prekey id %u)", n, io->creds->id.reg_id, io->creds->id.spk_id); logl(line);
     }
+    /* 2b. the chat text goes out while we are still passive: prekey bundle, X3DH, <message>, the server's <ack>. The
+          offline batch only comes after <active/>, and FS-UAE's A2065 emulation has died shortly after that burst in
+          three live attempts - the user's text is on its way before the risky part begins. */
+    if (io->sessions && io->chat_user && io->chat_send) {
+        if (!send_text(io->chat_user, io->chat_device, io->chat_lid, io->chat_send)) logl("msg: the initial text was not sent");
+        else {
+            uint32_t t0 = ms();
+            while (!io->t_msg_ack && ms() - t0 < 30000) {
+                const wab_node *n = recv_node(1000, &gone);
+                if (gone) return fail("RESULT: logged in and text sent, but the connection closed before the server's ack", 0, 0);
+                if (n && !handle_async(n)) { close_ws(); return 1; }
+            }
+            if (!io->t_msg_ack) logl("msg: no <ack> from the server within 30 s (passive mode may withhold it); going active");
+        }
+    }
     /* 3. passive -> active */
     next_iq_id(id, sizeof id);
     if (!send_iq1(id, "passive", "set", "active", "passive/active")) return fail("RESULT: logged in, but sending <active/> failed", 0, 0);
@@ -1187,7 +1202,7 @@ static int post_login(void)
         if (!make_prekeys(io->prekeys_wanted - wa_prekeys_pending(io->prekeys), "while online, for the next upload")) { close_ws(); return 1; }
     }
     /* 5. linger / chat: incoming stanzas (messages decrypted when a session store is set), typed lines sent to the peer */
-    if (io->sessions && io->chat_user && io->chat_send) { if (!send_text(io->chat_user, io->chat_device, io->chat_lid, io->chat_send)) logl("msg: the initial text was not sent"); }
+    if (io->sessions && io->chat_user && io->chat_send && !io->msgs_sent) { if (!send_text(io->chat_user, io->chat_device, io->chat_lid, io->chat_send)) logl("msg: the initial text was not sent (second try, after <active/>)"); }
     t_end = ms() + io->linger_ms; last_ka = ms();
     while (ms() < t_end) {
         const wab_node *n; uint32_t now = ms(), left = t_end - now;
