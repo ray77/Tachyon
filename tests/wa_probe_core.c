@@ -153,7 +153,9 @@ static int pump(int want_tls_state, int want_msg, uint32_t timeout_ms)
             while (pend_len && !w.msg_ready) {
                 uint32_t i;
                 ol = 0;
-                if (!ws_input(&w, pend, 1, out, &ol, sizeof out)) { wa_fmt(line, sizeof line, "ws error, state %d", w.state); logl(line); return 0; }
+                { uint32_t d = w.dropped;
+                  if (!ws_input(&w, pend, 1, out, &ol, sizeof out)) { wa_fmt(line, sizeof line, "ws error, state %d", w.state); logl(line); return 0; }
+                  if (w.dropped != d) { wa_fmt(line, sizeof line, "ws: a %u-byte message was dropped (larger than the %u-byte buffer)", w.dropped_len, (uint32_t)sizeof msgbuf); logl(line); } }
                 if (ol && !app_send(out, ol)) return 0;
                 pend_len--; for (i = 0; i < pend_len; i++) pend[i] = pend[i + 1];
             }
@@ -611,6 +613,7 @@ static int handle_async(const wab_node *n)
     if (wab_str_eq(&n->tag, "stream:error") || wab_str_eq(&n->tag, "xmlstreamend") || wab_str_eq(&n->tag, "failure")) { logl("login: the server ended the stream"); return 0; }
     if (wab_str_eq(&n->tag, "receipt") || wab_str_eq(&n->tag, "notification")) return send_ack(n);
     if (wab_str_eq(&n->tag, "message")) { io->messages_seen++; logl("login: an encrypted message waits for us (left unacknowledged: no Signal session layer yet)"); }
+    if (wab_str_eq(&n->tag, "ib") && n->val.kind == WAB_LIST) { uint32_t i; for (i = 0; i < n->n_children; i++) log_node("  ib: ", &n->children[i]); }
     return 1;                                   /* ib (offline_preview, offline, dirty, edge_routing), iq from the server, ...: logged only */
 }
 

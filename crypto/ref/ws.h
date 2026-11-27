@@ -25,6 +25,8 @@ typedef struct {
     uint8_t opcode; int fin;
     uint8_t *msg; uint32_t msg_len, msg_cap;    /* reassembled message (caller-provided buffer) */
     int msg_ready;                       /* a complete binary message is in msg[0..msg_len) */
+    int skipping;                        /* a message larger than msg_cap is being discarded (not an error) */
+    uint32_t dropped, dropped_len;       /* how many messages were discarded, and the last one's size */
     uint16_t close_code;
 } ws_client;
 

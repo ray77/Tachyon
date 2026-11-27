@@ -151,8 +151,14 @@ int ws_input(ws_client *w, const uint8_t *data, uint32_t len, uint8_t *out, uint
                 if (w->opcode >= 8 && (plen > 125 || !w->fin)) { w->state = WS_ERROR; return 0; }
                 if (w->opcode < 8) {
                     if (w->opcode == 0 && w->msg_len == 0 && !w->msg_ready) { /* continuation without start */ w->state = WS_ERROR; return 0; }
-                    if (w->opcode == 2) w->msg_len = 0;
-                    if (w->msg_len + plen > w->msg_cap || plen > WS_MAX_FRAME) { w->state = WS_ERROR; return 0; }
+                    if (w->opcode == 2) { w->msg_len = 0; w->skipping = 0; }
+                    if (plen > WS_MAX_FRAME) { w->state = WS_ERROR; return 0; }
+                    if (w->skipping || w->msg_len + plen > w->msg_cap) {
+                        /* too big for the caller's buffer: swallow the whole message and report it (WhatsApp sends
+                           large app-state / history stanzas after login; the probe only needs the small ones) */
+                        if (!w->skipping) { w->skipping = 1; w->dropped++; w->dropped_len = w->msg_len; }
+                        w->dropped_len += plen;
+                    }
                 } else {
                     w->msg_len = w->msg_len;                                  /* control frames are collected separately below */
                 }
@@ -164,13 +170,14 @@ int ws_input(ws_client *w, const uint8_t *data, uint32_t len, uint8_t *out, uint
         }
         {
             uint32_t take = len < w->need ? len : w->need;
-            if (w->opcode < 8) { for (i = 0; i < take; i++) w->msg[w->msg_len + i] = data[i]; w->msg_len += take; }
+            if (w->opcode < 8) { if (!w->skipping) { for (i = 0; i < take; i++) w->msg[w->msg_len + i] = data[i]; w->msg_len += take; } }
             else { for (i = 0; i < take && w->hdr_len < 14; i++) w->hdr[w->hdr_len++] = data[i]; }   /* control payload (<=125, we keep 14) */
             data += take; len -= take; w->need -= take;
             if (w->need) break;
         }
 frame_done:
         if (w->opcode < 8) {
+            if (w->fin && w->skipping) { w->skipping = 0; w->msg_len = 0; continue; }   /* discarded, no message */
             if (w->fin) { w->msg_ready = 1; return 1; }       /* caller consumes before feeding more */
         } else if (w->opcode == 9) {                          /* ping -> pong with the same payload */
             uint32_t f = 0;

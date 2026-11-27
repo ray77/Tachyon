@@ -43,6 +43,20 @@ int main(int argc, char **argv)
     }
     FILE *f = fopen("/dev/urandom", "rb"); if (!f || fread(seed, 1, 64, f) != 64) return 1; fclose(f);
     rng.instantiated = 0; drbg_instantiate(&rng, seed, 64);
+    {   /* offline: a server message larger than the caller's buffer is discarded as a whole, the next one arrives */
+        static uint8_t small[64], frame[140], o2[64]; uint32_t ol = 0, k;
+        ws_client_start(&w, "x", "/", "o", small, sizeof small, &rng, out, sizeof out); w.state = WS_OPEN;
+        frame[0] = 0x02; frame[1] = 50; for (k = 0; k < 50; k++) frame[2 + k] = (uint8_t)k;            /* first fragment, 50 bytes */
+        result(ws_input(&w, frame, 52, o2, &ol, sizeof o2) == 1 && !w.msg_ready && !w.skipping, "fragment 1 of a message fits");
+        frame[0] = 0x80; frame[1] = 50;                                                                 /* final fragment: 100 > 64 */
+        result(ws_input(&w, frame, 52, o2, &ol, sizeof o2) == 1 && !w.msg_ready && w.dropped == 1 && w.dropped_len == 100 && !w.skipping, "oversize message discarded, parser alive");
+        frame[0] = 0x82; frame[1] = 100;                                                                /* a single oversize frame, fed byte by byte */
+        for (k = 0; k < 102; k++) if (ws_input(&w, frame + k, 1, o2, &ol, sizeof o2) != 1) break;
+        result(k == 102 && !w.msg_ready && w.dropped == 2 && w.dropped_len == 100, "oversize single frame discarded byte by byte");
+        frame[0] = 0x82; frame[1] = 10;
+        result(ws_input(&w, frame, 12, o2, &ol, sizeof o2) == 1 && w.msg_ready && w.msg_len == 10 && w.msg[9] == 9, "the next message arrives intact");
+        w.msg_ready = 0;
+    }
     fd = socket(AF_INET, SOCK_STREAM, 0);
     memset(&sa, 0, sizeof sa); sa.sin_family = AF_INET; sa.sin_port = htons((uint16_t)port); sa.sin_addr.s_addr = htonl(0x7f000001);
     if (connect(fd, (struct sockaddr *)&sa, sizeof sa) != 0) { printf("FAIL connect\n"); return 1; }
