@@ -39,6 +39,25 @@ int main(void)
     rootn[100] ^= 1;
     result(!x509_verify_chain(c, 2, rootn, c[2].n_len, c[2].e, "web.whatsapp.com", 0), "chain rejected under a wrong root key");
     result(!x509_verify_chain(c, 3, rootn, c[2].n_len, c[2].e, "web.whatsapp.com", 0), "chain of 3 rejected under a wrong root key (appended root is not the anchor)");
+    rootn[100] ^= 1;                                            /* the G2 key again */
+    {   /* pin set: root G2 and the CA1 intermediate; the chain completes at the intermediate (one RSA verification) */
+        x509_pin pins[2]; int used = -1;
+        pins[0].n = c[1].n; pins[0].n_len = c[1].n_len; pins[0].e = c[1].e;      /* intermediate */
+        pins[1].n = rootn;  pins[1].n_len = c[2].n_len; pins[1].e = c[2].e;      /* root */
+        result(x509_verify_chain_pins(c, 3, pins, 2, "web.whatsapp.com", "20261126000000Z", &used) && used == 0, "pin set {intermediate, root}: chain of 3 completes at the intermediate");
+        used = -1;
+        result(x509_verify_chain_pins(c, 2, pins, 2, "web.whatsapp.com", 0, &used) && used == 0, "pin set: chain of 2 completes at the intermediate");
+        pins[0].n = rootn; pins[0].n_len = c[2].n_len; pins[0].e = c[2].e; pins[1].n = c[1].n; pins[1].n_len = c[1].n_len; pins[1].e = c[1].e;
+        used = -1;
+        result(x509_verify_chain_pins(c, 2, pins, 2, "web.whatsapp.com", 0, &used) && used == 1, "pin set {root, intermediate}: order does not matter, intermediate used");
+        pins[1].n = c[0].n; pins[1].n_len = c[0].n_len; pins[1].e = c[0].e;      /* an unrelated second pin (the leaf's own key) */
+        used = -1;
+        result(x509_verify_chain_pins(c, 2, pins, 2, "web.whatsapp.com", 0, &used) && used == 0, "pin set {root, other}: falls back to the root (two verifications)");
+        rootn[10] ^= 0x55; pins[0].n = rootn;
+        result(!x509_verify_chain_pins(c, 2, pins, 2, "web.whatsapp.com", 0, 0), "pin set with neither key matching rejected");
+        result(!x509_verify_chain_pins(c, 1, pins, 1, "web.whatsapp.com", 0, 0), "leaf alone under a wrong single pin rejected");
+        rootn[10] ^= 0x55;
+    }
     {   /* truncated / corrupted DER must not parse or verify */
         x509_cert t;
         static uint8_t bad[2048];

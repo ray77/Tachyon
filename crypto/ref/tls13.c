@@ -147,6 +147,7 @@ int tls13_client_start_kp(tls13 *t, const char *host, const uint8_t *root_n, uin
     uint32_t p = 0, hl = t13_slen(host), ext_start, i;
     for (i = 0; i < sizeof(*t); i++) ((uint8_t *)t)[i] = 0;
     t->host = host; t->root_n = root_n; t->root_n_len = root_n_len; t->root_e = root_e; t->now = now; t->rng = rng;
+    t->pins[0].n = root_n; t->pins[0].n_len = root_n_len; t->pins[0].e = root_e; t->npins = 1; t->cert_pin = -1;
     for (i = 0; i < 32; i++) { t->kp.priv[i] = kp->priv[i]; t->kp.pub[i] = kp->pub[i]; }
     if (hl > 255) return t13_fail(t, T13E_TOOBIG);
     if (!drbg_generate(rng, t->client_random, 32)) return t13_fail(t, T13E_RNG);
@@ -175,6 +176,13 @@ int tls13_client_start_kp(tls13 *t, const char *host, const uint8_t *root_n, uin
 }
 
 void tls13_set_cert_cache(tls13 *t, x509_cache *cache) { t->cache = cache; t->cert_cached = 0; }
+
+int tls13_add_pin(tls13 *t, const uint8_t *n, uint32_t n_len, uint32_t e)
+{
+    if (t->npins >= X509_MAX_PINS) return 0;
+    t->pins[t->npins].n = n; t->pins[t->npins].n_len = n_len; t->pins[t->npins].e = e; t->npins++;
+    return 1;
+}
 
 int tls13_client_start(tls13 *t, const char *host, const uint8_t *root_n, uint32_t root_n_len, uint32_t root_e,
                        const char *now, hmac_drbg *rng)
@@ -290,7 +298,7 @@ static int t13_on_certificate(tls13 *t, const uint8_t *m, uint32_t mlen)
         p += el;
     }
     if (p != end || t->chain_len == 0) return t13_fail(t, T13E_CERT_PARSE);
-    if (x509_cache_match(t->cache, t->root_n, t->root_n_len, t->root_e, t->host, t->chain[0].der, t->chain[0].len)) {
+    if (x509_cache_match(t->cache, t->pins, t->npins, t->host, t->chain[0].der, t->chain[0].len)) {
         /* this exact leaf was verified against this root for this host before: skip the RSA chain verification,
          * keep the cheap checks (clock, host name); CertificateVerify below still proves possession of the key.
          * The stored prepared key is used only if it is the presented leaf's key (one Montgomery product checks
@@ -302,10 +310,10 @@ static int t13_on_certificate(tls13 *t, const uint8_t *m, uint32_t mlen)
         }
     }
     if (!t->cert_cached) {
-        if (!x509_verify_chain(t->chain, t->chain_len, t->root_n, t->root_n_len, t->root_e, t->host, t->now)) return t13_fail(t, T13E_CERT_CHAIN);
+        if (!x509_verify_chain_pins(t->chain, t->chain_len, t->pins, t->npins, t->host, t->now, &t->cert_pin)) return t13_fail(t, T13E_CERT_CHAIN);
         if (!rsa_pub_set(&t->server_key, t->chain[0].n, t->chain[0].n_len, t->chain[0].e)) return t13_fail(t, T13E_RSA);
         if (t->cache) {
-            x509_cache_store(t->cache, t->root_n, t->root_n_len, t->root_e, t->host, t->chain[0].der, t->chain[0].len);
+            x509_cache_store(t->cache, t->pins, t->npins, t->host, t->chain[0].der, t->chain[0].len);
             t->cache->key = t->server_key;
         }
     }

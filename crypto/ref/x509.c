@@ -193,70 +193,91 @@ int x509_match_host(const x509_cert *c, const char *host)
 static int str_le(const char *a, const char *b) { int i; for (i = 0; i < 15; i++) { if (a[i] < b[i]) return 1; if (a[i] > b[i]) return 0; } return 1; }
 int x509_valid_at(const x509_cert *c, const char *now) { return !now || (str_le(c->not_before, now) && str_le(now, c->not_after)); }
 
-int x509_verify_chain(const x509_cert *certs, int count, const uint8_t *root_n, uint32_t root_n_len, uint32_t root_e,
-                      const char *host, const char *now)
+static int pin_index(const x509_pin *pins, int npins, const uint8_t *n, uint32_t n_len, uint32_t e)
 {
-    int i;
-    if (count < 1 || count > 4) return 0;
-    for (i = 0; i < count; i++) {
+    int j;
+    for (j = 0; j < npins; j++) if (pins[j].n_len == n_len && pins[j].e == e && mem_eq(pins[j].n, n, n_len)) return j;
+    return -1;
+}
+
+int x509_verify_chain_pins(const x509_cert *certs, int count, const x509_pin *pins, int npins,
+                           const char *host, const char *now, int *pin_used)
+{
+    int i, j, used = -1;
+    if (count < 1 || count > 4 || npins < 1 || npins > X509_MAX_PINS) return 0;
+    for (i = 0; i < count && used < 0; i++) {
         const x509_cert *c = &certs[i];
         if (i > 0 && !c->is_ca) return 0;
-        /* trust anchor reached by key: a certificate carrying the pinned key itself (e.g. the cross-signed
-         * DigiCert Global Root G2 that web.whatsapp.com sends as third certificate, signed by a root we do
-         * not know) ends the chain without its own signature being checked; the leaf is never the anchor */
-        if (i > 0 && c->n_len == root_n_len && c->e == root_e && mem_eq(c->n, root_n, root_n_len)) break;
+        /* trust anchor reached by key: a certificate carrying a pinned key itself (e.g. the cross-signed DigiCert
+         * Global Root G2 that web.whatsapp.com sends as third certificate, signed by a root we do not know) ends the
+         * chain without its own signature being checked; the leaf is never the anchor */
+        if (i > 0 && (j = pin_index(pins, npins, c->n, c->n_len, c->e)) >= 0) { used = j; break; }
         if (!c->sig_sha256_rsa) return 0;
         if (!x509_valid_at(c, now)) return 0;
-        /* One RSA verification per certificate (each costs ~9.6 s on the 68000): a certificate whose issuer
-         * is the next one in the chain is checked under that issuer's key; the last certificate, or one whose
-         * issuer carries the pinned key, is checked under the pinned key, which completes the chain. Anything
-         * the server sent beyond the completing certificate is ignored. */
+        /* One RSA verification per certificate (each costs ~9.6 s on the 68000): a certificate whose issuer is the
+         * next one in the chain is checked under that issuer's key; if that issuer carries a pinned key, or the
+         * certificate is the last one, it is checked under the pinned key, which completes the chain. Anything the
+         * server sent beyond the completing certificate is ignored. */
         if (i + 1 < count) {
             const x509_cert *issuer = &certs[i + 1];
             if (c->issuer_len != issuer->subject_len || !mem_eq(c->issuer, issuer->subject, c->issuer_len)) return 0;
-            if (issuer->n_len == root_n_len && issuer->e == root_e && mem_eq(issuer->n, root_n, root_n_len)) {
-                if (!x509_verify_signature(c, root_n, root_n_len, root_e)) return 0;
-                break;
+            j = pin_index(pins, npins, issuer->n, issuer->n_len, issuer->e);
+            if (j >= 0) {
+                if (!x509_verify_signature(c, pins[j].n, pins[j].n_len, pins[j].e)) return 0;
+                used = j; break;
             }
             if (!x509_verify_signature(c, issuer->n, issuer->n_len, issuer->e)) return 0;
         } else {
-            if (!x509_verify_signature(c, root_n, root_n_len, root_e)) return 0;
-            break;          /* signed by the pinned key: chain complete */
+            for (j = 0; j < npins && used < 0; j++)          /* last certificate: signed by one of the pins? */
+                if (x509_verify_signature(c, pins[j].n, pins[j].n_len, pins[j].e)) used = j;
+            if (used < 0) return 0;
         }
     }
+    if (used < 0) return 0;
+    if (pin_used) *pin_used = used;
     return x509_match_host(&certs[0], host);
+}
+
+int x509_verify_chain(const x509_cert *certs, int count, const uint8_t *root_n, uint32_t root_n_len, uint32_t root_e,
+                      const char *host, const char *now)
+{
+    x509_pin p; p.n = root_n; p.n_len = root_n_len; p.e = root_e;
+    return x509_verify_chain_pins(certs, count, &p, 1, host, now, 0);
 }
 
 /* ---- certificate cache ------------------------------------------------------------- */
 static void u32_be(uint8_t b[4], uint32_t v) { b[0] = (uint8_t)(v >> 24); b[1] = (uint8_t)(v >> 16); b[2] = (uint8_t)(v >> 8); b[3] = (uint8_t)v; }
 
-void x509_cache_fingerprint(uint8_t fp[32], const uint8_t *root_n, uint32_t root_n_len, uint32_t root_e,
+void x509_cache_fingerprint(uint8_t fp[32], const x509_pin *pins, int npins,
                             const char *host, const uint8_t *leaf_der, uint32_t leaf_len)
 {
-    sha256_ctx h; uint8_t b[4]; uint32_t hl = 0;
+    sha256_ctx h; uint8_t b[4]; uint32_t hl = 0; int j;
     while (host[hl]) hl++;
     sha256_init(&h);
-    sha256_update(&h, (const uint8_t *)"WhatsA500 x509 cache v1", 23);  /* every field is length-prefixed: no boundary ambiguity */
-    u32_be(b, root_n_len); sha256_update(&h, b, 4); sha256_update(&h, root_n, root_n_len);
-    u32_be(b, root_e); sha256_update(&h, b, 4);
+    sha256_update(&h, (const uint8_t *)"WhatsA500 x509 cache v2", 23);  /* every field is length-prefixed: no boundary ambiguity */
+    u32_be(b, (uint32_t)npins); sha256_update(&h, b, 4);
+    for (j = 0; j < npins; j++) {
+        u32_be(b, pins[j].n_len); sha256_update(&h, b, 4); sha256_update(&h, pins[j].n, pins[j].n_len);
+        u32_be(b, pins[j].e); sha256_update(&h, b, 4);
+    }
     u32_be(b, hl); sha256_update(&h, b, 4); sha256_update(&h, (const uint8_t *)host, hl);
     u32_be(b, leaf_len); sha256_update(&h, b, 4); sha256_update(&h, leaf_der, leaf_len);
     sha256_final(&h, fp);
 }
 
-int x509_cache_match(const x509_cache *c, const uint8_t *root_n, uint32_t root_n_len, uint32_t root_e,
+int x509_cache_match(const x509_cache *c, const x509_pin *pins, int npins,
                      const char *host, const uint8_t *leaf_der, uint32_t leaf_len)
 {
     uint8_t fp[32]; uint32_t i, diff = 0;
     if (!c || !c->valid) return 0;
-    x509_cache_fingerprint(fp, root_n, root_n_len, root_e, host, leaf_der, leaf_len);
+    x509_cache_fingerprint(fp, pins, npins, host, leaf_der, leaf_len);
     for (i = 0; i < 32; i++) diff |= fp[i] ^ c->fp[i];
     return diff == 0;
 }
 
-void x509_cache_store(x509_cache *c, const uint8_t *root_n, uint32_t root_n_len, uint32_t root_e,
+void x509_cache_store(x509_cache *c, const x509_pin *pins, int npins,
                       const char *host, const uint8_t *leaf_der, uint32_t leaf_len)
 {
-    x509_cache_fingerprint(c->fp, root_n, root_n_len, root_e, host, leaf_der, leaf_len);
+    x509_cache_fingerprint(c->fp, pins, npins, host, leaf_der, leaf_len);
     c->valid = 1;
 }

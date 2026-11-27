@@ -197,7 +197,7 @@ int main(int argc, char **argv)
     const uint8_t *p, *end, *d; uint32_t f, wire, l; uint64_t v;
     noise_hs hs; noise_transport tr; heartbeat hb; tls13_keypair kp; static x509_cache cache;
     hmac_drbg rng;
-    x509_cert root;
+    x509_cert root, inter;
     char nowstr[16];
     time_t tt = time(0); struct tm *tm = gmtime(&tt);
     struct addrinfo hints, *ai = 0;
@@ -207,7 +207,7 @@ int main(int argc, char **argv)
     rng.instantiated = 0; drbg_instantiate(&rng, seed, 64);
     strftime(nowstr, sizeof nowstr, "%Y%m%d%H%M%SZ", tm);
     clock_gettime(CLOCK_MONOTONIC, &t0);
-    if (!x509_parse(&root, wa_cert2, sizeof wa_cert2)) { printf("root parse failed\n"); return 1; }
+    if (!x509_parse(&root, wa_cert2, sizeof wa_cert2) || !x509_parse(&inter, wa_cert1, sizeof wa_cert1)) { printf("root/intermediate parse failed\n"); return 1; }
 
     memset(&hints, 0, sizeof hints); hints.ai_socktype = SOCK_STREAM;
     tunnel = argc > 3 && strcmp(argv[3], "tunnel") == 0;
@@ -239,7 +239,7 @@ int main(int argc, char **argv)
          * must hit it and skip the chain - as a second A500 session would after storing the 36 bytes in ENVARC: */
         if (getenv("TLS_CACHE")) {
             if (!tls13_client_start(&t, "web.whatsapp.com", root.n, root.n_len, root.e, nowstr, &rng)) { printf("tls start failed\n"); return 1; }
-            tls13_set_cert_cache(&t, &cache);
+            tls13_set_cert_cache(&t, &cache); tls13_add_pin(&t, inter.n, inter.n_len, inter.e);
             if (!pump(TLS13_ST_CONNECTED, 0, 20) || !flush_tls()) { printf("RESULT: TLS handshake (cache priming) failed\n"); return 1; }
             logf_("tls: priming connection: %d certificates verified, leaf fingerprint cached (cert_cached %d)", t.chain_len, t.cert_cached);
             close(fd);
@@ -251,7 +251,10 @@ int main(int argc, char **argv)
         if (!tls13_keypair_generate(&kp, &rng)) { printf("keypair failed\n"); return 1; }
         if (!tls13_client_start_kp(&t, "web.whatsapp.com", root.n, root.n_len, root.e, nowstr, &rng, &kp)) { printf("tls start failed\n"); return 1; }
         if (getenv("TLS_CACHE")) tls13_set_cert_cache(&t, &cache);
+        tls13_add_pin(&t, inter.n, inter.n_len, inter.e);   /* pins: {G2 root, G2 TLS RSA 2020 CA1 intermediate} */
         if (!pump(TLS13_ST_CONNECTED, 0, 20)) { printf("RESULT: TLS handshake failed\n"); return 1; }
+        if (!t.cert_cached) logf_("tls: chain completed at pin %d (%s), %d RSA verification%s", t.cert_pin, t.cert_pin == 1 ? "CA1 intermediate" : "G2 root",
+                                  t.cert_pin == 1 ? 1 : 2, t.cert_pin == 1 ? "" : "s");
         if (getenv("TLS_CACHE")) {
             logf_("tls: certificate cache %s on the second connection", t.cert_cached ? "HIT - chain verification skipped, CertificateVerify checked" : "MISS (different leaf?)");
             if (!t.cert_cached) { printf("RESULT: certificate cache missed\n"); return 1; }
@@ -275,7 +278,7 @@ int main(int argc, char **argv)
             logf_("tls: server still silent after %.1f s, sending our Finished now", (now_ms() - start) / 1000.0);
         }
         if (!flush_tls()) { printf("RESULT: send failed\n"); return 1; }
-        logf_("tls: TLS 1.3 TLS_AES_128_GCM_SHA256 / X25519 connected, %d certificates %s the pinned G2 key, RSA-PSS CertificateVerify and Finished verified", t.chain_len, t.cert_cached ? "accepted from the cache under" : "verified against");
+        logf_("tls: TLS 1.3 TLS_AES_128_GCM_SHA256 / X25519 connected, %d certificates %s, RSA-PSS CertificateVerify and Finished verified", t.chain_len, t.cert_cached ? "accepted from the cache" : "verified against the pin set {G2 root, CA1 intermediate}");
     }
 
     /* WebSocket upgrade */

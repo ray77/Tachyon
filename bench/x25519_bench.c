@@ -585,6 +585,17 @@ int main(void)
         t1 = ticks_now();
         out(r ? "PASS " : "FAIL "); out("x509 chain web.whatsapp.com (RSA-2048 x2) verifies\n"); ok &= r;
         report("x509 parse + chain verify (2 RSA-2048 PKCS#1 verifies)", t1 - t0, 1);
+        {   /* pin set {intermediate CA1, root G2}: the live chain completes at the intermediate, one verification */
+            x509_pin pins[2]; int used = -1;
+            pins[0].n = xc[1].n; pins[0].n_len = xc[1].n_len; pins[0].e = xc[1].e;
+            pins[1].n = xc[2].n; pins[1].n_len = xc[2].n_len; pins[1].e = xc[2].e;
+            t0 = ticks_now();
+            r = x509_verify_chain_pins(xc, 2, pins, 2, "web.whatsapp.com", "20261126000000Z", &used);
+            t1 = ticks_now();
+            r &= used == 0;
+            out(r ? "PASS " : "FAIL "); out("x509 chain web.whatsapp.com completes at the pinned intermediate\n"); ok &= r;
+            report("x509 chain verify, intermediate pinned (1 RSA-2048 PKCS#1 verify)", t1 - t0, 1);
+        }
     }
 
     {   /* TLS 1.2 RSA client handshake replayed against a recorded Go server session (deterministic DRBG seed):

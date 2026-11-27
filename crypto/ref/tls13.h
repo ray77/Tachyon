@@ -65,6 +65,10 @@ typedef struct {
     /* server certificate chain (points into hs while the Certificate message is processed; kept for diagnostics) */
     x509_cert chain[4]; int chain_len;
     rsa_pub server_key;
+    /* trust anchors: pins[0] is the root key given to tls13_client_start*, tls13_add_pin appends more (e.g. the
+     * intermediate that signs the live leaf: one RSA verification instead of two); cert_pin = index of the pin
+     * that completed the chain, -1 when the certificate came from the cache */
+    x509_pin pins[X509_MAX_PINS]; int npins; int cert_pin;
     /* optional certificate cache (x509.h); cert_cached = 1 when the chain verification was skipped on a hit */
     x509_cache *cache; int cert_cached;
 } tls13;
@@ -77,6 +81,8 @@ int  tls13_client_start_kp(tls13 *t, const char *host, const uint8_t *root_n, ui
 /* Same, generating the key pair now (same shape as tls12_client_start). */
 int  tls13_client_start(tls13 *t, const char *host, const uint8_t *root_n, uint32_t root_n_len, uint32_t root_e,
                         const char *now, hmac_drbg *rng);
+/* Add a trust anchor by key (after tls13_client_start*, before the server flight arrives); 0 if the table is full. */
+int  tls13_add_pin(tls13 *t, const uint8_t *n, uint32_t n_len, uint32_t e);
 /* Attach a certificate cache (after tls13_client_start*, which clears the struct). On a hit the chain verification
  * is skipped (t->cert_cached = 1); after a full verification the leaf is stored in the cache. 0 detaches. */
 void tls13_set_cert_cache(tls13 *t, x509_cache *cache);
