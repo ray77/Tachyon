@@ -192,3 +192,57 @@ Hosttest (`make heartbeat-test`): gegen `tools/wsserver` (zählt Pongs per `OnPo
 **Ende-zu-Ende gegen `web.whatsapp.com` (`make wa-probe-tunnel GAP=30`, `tests/wa_probe.c`):** unser WebSocket-Client, unser Noise-XX (`noise.c`), Zertifikatskette aus dem ServerHello per XEdDSA gegen den einkompilierten WA-Root-Key geprüft (Zwischenzertifikat Serial 3, Blatt Serial 366, Blattschlüssel = Server-Static), 30 s Wartezeit mit echten X25519-Leitern (53 466 Stück auf dem Host) und Herzschlag alle 4 s → **7 Pongs, ClientFinish 30,0 s nach ServerHello angenommen**, erstes verschlüsseltes Server-Frame (694 Byte) mit den Transportschlüsseln entschlüsselt (678 Byte Binary-Node, das `pair-device`-IQ). Transport in diesem Lauf: `openssl s_client` mit den TLS-1.3-Parametern des A500-Plans, weil `tls13.c` da noch nicht existierte; seit dem Abend desselben Tages läuft `make wa-probe` mit unserem eigenen TLS 1.3 und wird ebenso angenommen (Abschnitt 7). Der Registrierungs-Payload (`tests/vectors/wa_client_payload.h`, aus `tools/watimeout -dump-payload`) ist eine Wegwerfidentität; kein Pairing wird abgeschlossen.
 
 Nebenbefund: `x509_verify_chain` akzeptiert jetzt Ketten, an deren Ende der Server sein kreuzsigniertes Wurzelzertifikat anhängt (der Vertrauensanker gilt per Schlüssel, das angehängte Zertifikat wird übersprungen, nicht geprüft) – die Live-Kette hat drei Zertifikate, der Hosttest bisher zwei. `tls12.c` bietet jetzt Extended Master Secret (RFC 7627) an und benutzt es, wenn der Server es bestätigt (Go- und OpenSSL-Loopback: ja).
+
+## 10. WABinary – das Knotenformat nach dem Handshake (2026-11-27, `proto/wabinary.c`)
+
+Alles nach dem Noise-Handshake sind „Binary Nodes“: ein XML-artiger Baum (Tag, Attribute, Inhalt) in einem kompakten Binärformat. Referenzen: whatsmeow `ae388b0` (2026-11-27 von GitHub, `binary/`), Baileys `bb0a87e` (`src/WABinary/`). Die Token-Tabellen beider Projekte sind identisch (`DictVersion` 3: 236 Ein-Byte-Token, davon Index 0 leer, 4 × 256 Zwei-Byte-Token, zusammen 1259 Strings, 10 663 Byte). `proto/wabinary_tokens.h` erzeugt `tools/gen_wab_tokens.py` aus beiden Quellen und bricht bei jeder Abweichung ab. Die Go-Referenzvektoren stammen aus der in `go.mod` festgelegten Version `c2ce5c3`; `token.go`, `decoder.go` und `encoder.go` sind in beiden whatsmeow-Ständen bytegleich.
+
+### Format
+
+Ein entschlüsselter Frame ist **1 Flag-Byte + 1 Knoten**. Flag-Bit 1 (Wert 2): der Rest ist zlib-komprimiert. Ein Knoten ist eine Liste aus `1 + 2·Attribute (+ 1 bei Inhalt)` Elementen: Tag, Schlüssel/Wert-Paare, Inhalt (ungerade Länge = ohne Inhalt).
+
+| Byte | Bedeutung |
+|---|---|
+| `00` | LIST_EMPTY: leere Liste, leerer Wert, JID ohne User |
+| `01`–`EB` | Ein-Byte-Token |
+| `EC`–`EF` | Zwei-Byte-Token: Wörterbuch 0–3, ein Index-Byte folgt |
+| `F5`, `F6` | Interop-JID (User, u16 Gerät, u16 Integrator, Server), FB-JID (User, u16 Gerät, Server) |
+| `F7` | AD_JID: Domain-Byte (0 `s.whatsapp.net`, 1 `lid`, 128 `hosted`, 129 `hosted.lid`), Geräte-Byte, User |
+| `F8`, `F9` | Liste mit 8-/16-Bit-Länge |
+| `FA` | JID_PAIR: User (oder `00`), Server |
+| `FB`, `FF` | HEX_8 (`0-9A-F`), NIBBLE_8 (`0-9 - .`): Längenbyte (Bit 7 = ungerade, Bits 0–6 = Bytes), 2 Zeichen je Byte, Füll-Nibble `F` |
+| `FC`, `FD`, `FE` | Rohbytes mit 8-, 20-, 32-Bit-Länge (Big Endian) |
+
+### API
+
+```c
+wab_arena_init(&arena, mem, size);                       /* Speicher stellt der Aufrufer, kein malloc */
+int e = wab_decode_frame(frame, len, &arena, &node);     /* WAB_OK oder Fehlercode, wab_errstr(e) */
+const wab_value *id = wab_get_attr(node, "id");          /* id->kind WAB_STR oder WAB_JID */
+const wab_node *pd  = wab_get_child(node, "pair-device");
+e = wab_encode_frame(node, out, cap, &outlen);           /* bei WAB_ERR_BUFFER ist outlen die nötige Größe */
+```
+
+Bauen: `wab_node_init`, `wab_text`, `wab_bytes`, `wab_jid_value`, dazu eigene Arrays für Attribute und Kinder. Freistehendes C, nur 32 Bit, keine Division.
+
+- **Strings sind (Zeiger, Länge) ohne Nullbyte.** Sie zeigen in die Token-Tabelle, in den Eingabepuffer (Rohstrings und Byte-Inhalt, ohne Kopie) oder in die Arena (entpackte Nibble-/Hex-Strings). Puffer und Arena müssen leben, solange der Baum benutzt wird.
+- **Grenzen:** jeder Lesezugriff geprüft, Längen und Anzahlen vor dem Reservieren gegen den Rest der Eingabe, Tiefe höchstens `WAB_MAX_DEPTH` = 16 Knoten (Rekursion nur dort, Stapelrahmen auf dem 68000 ≤ 60 Byte lokal), Fehlercode statt Abbruch.
+- **Wire-Form bleibt erhalten:** der Server wählt nicht immer die kürzeste Form (im pair-device-IQ steht die rein numerische `id` als HEX_8). Der Decoder merkt sich je String, JID und Liste die Form, jeder angenommene Knoten wird bytegleich zurückcodiert. Selbst gebaute Knoten (Formfelder 0) bekommen die Wahl von whatsmeow: Token, sonst Nibble, sonst Hex (bis 127 Zeichen), sonst Rohbytes; JIDs mit Gerät > 0 an `s.whatsapp.net`/`lid` und alle `hosted`-JIDs als AD_JID, `msgr`/`interop` als FB-/Interop-JID, der Rest als JID_PAIR.
+- **Abweichungen von den Vorlagen:** Attribute mit leerem Wert werden geschrieben (whatsmeow lässt sie weg). Strings, die wie JIDs aussehen, werden nicht umgedeutet (Baileys tut das) – JIDs übergibt der Aufrufer als JID. Rohe Inhalte decodieren als `WAB_BYTES`, Token und gepackte als `WAB_STR`. Strenger als die Vorlagen: Füll-Nibble muss `F` sein, `F` mitten im Nibble-String und gesetzte obere 4 Bit bei BINARY_20 sind Fehler.
+- **Kompression: nicht unterstützt.** `wab_decode_frame` meldet für Frames mit Flag-Bit 1 `WAB_ERR_COMPRESSED` („compressed: unsupported“). Der aufgezeichnete Frame ist unkomprimiert (Flag `00`), ein Inflate (stored/fixed/dynamic) kommt, sobald ein echter komprimierter Frame vorliegt – vor dem Betrieb nach dem Pairing nötig, da beide Vorlagen ihn behandeln.
+
+### Testergebnisse (`make wabinary-test`, ASan + UBSan)
+
+Testvektor `tests/vectors/pair_device_iq.bin`: erstes entschlüsseltes Frame eines Laufs gegen `web.whatsapp.com` (`make wa-capture GAP=6`; `tests/wa_probe_core.c` unverändert, nur für diesen Build ist sein Transport-Decrypt über `tests/wa_capture.c` geleitet). 679 Byte:
+
+```text
+<iq from="s.whatsapp.net" type="set" id="1613398979" xmlns="md">
+  <pair-device>
+    <ref>2@…102 Byte…</ref>            6 × (QR-Referenzen einer Wegwerf-Registrierung)
+  </pair-device>
+</iq>
+```
+
+41 704 Prüfungen, 0 Fehler: alle 1259 Token; der IQ-Baum wie oben, bytegleich zurückcodiert, jede Kürzung und jeder zu kleine Arena- bzw. Ausgabepuffer ergibt den passenden Fehler; 60 Vektoren aus whatsmeows Encoder (`make wabinary-vectors`, `tools/wabvectors`) – gleicher Baum wie whatsmeows Decoder, und unsere bevorzugte Codierung ist bytegleich mit der von whatsmeow; jede Codierungsart von Hand Byte für Byte; fehlerhafte Eingaben (übergroße Längen und Anzahlen, ungültige Token, Tiefe); 300 000 mutierte Frames, 33 975 angenommen, alle bytegleich zurückcodiert.
+
+Arena für den IQ: 736 Byte auf dem 68000, 1232 Byte auf dem 64-Bit-Host. Auf dem 68000 bisher nur ein Rauchtest unter vamos (nicht eingecheckt: IQ und 60 Vektoren bytegleich, alle Token gefunden); keine Zeitmessung, noch nicht Teil eines Amiga-Programms.

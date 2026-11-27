@@ -25,7 +25,7 @@ BENCH_SRC  := bench/x25519_bench.c
 UNITY_SRC  := bench/amiga/unity.c
 AMIGA_ASM  := build/amiga/x25519bench.s
 
-.PHONY: all host-test amiga run vamos vectors clean tls-test tls13-test ws-test heartbeat-test wa-probe wa-probe-tunnel run-blitaes run-blitgcm amiga-probe run-probe vamos-probe utility13 utility13-test sana2-probe run-sana2 sanafix
+.PHONY: all host-test amiga run vamos vectors clean tls-test tls13-test ws-test heartbeat-test wa-probe wa-probe-tunnel wa-capture wabinary-test wabinary-vectors run-blitaes run-blitgcm amiga-probe run-probe vamos-probe utility13 utility13-test sana2-probe run-sana2 sanafix
 
 all: host-test amiga
 
@@ -111,6 +111,17 @@ NOISE_CACHE ?= build/wa_noise_cache.bin
 wa-probe: build/wa_probe
 	NOISE_CACHE=$(NOISE_CACHE) ./build/wa_probe $(GAP) $(WAIP)
 
+# live capture of the first decrypted frame (pair-device IQ) for tests/wabinary_test.c: the same probe, with the
+# core's transport decryption routed through tests/wa_capture.c (network, manual; overwrites the vector)
+CAPTURE ?= tests/vectors/pair_device_iq.bin
+build/wa_capture: tests/wa_capture.c tests/wa_probe.c $(PROBE_CORE) $(CRYPTO_SRC) crypto/ref/heartbeat.h crypto/ref/tls13.h
+	@mkdir -p build
+	$(HOSTCC) $(HOST_CFLAGS) -Itests -Dnoise_transport_decrypt=wa_capture_decrypt -c tests/wa_probe_core.c -o build/wa_probe_core_capture.o
+	$(HOSTCC) $(HOST_CFLAGS) -Itests tests/wa_probe.c tests/wa_capture.c build/wa_probe_core_capture.o $(CRYPTO_SRC) -o $@
+
+wa-capture: build/wa_capture
+	WA_CAPTURE=$(CAPTURE) NOISE_CACHE=$(NOISE_CACHE) ./build/wa_capture $(GAP) $(WAIP)
+
 # same, with openssl s_client as the TLS 1.3/X25519 transport (reference run from before tls13.c existed)
 wa-probe-tunnel: build/wa_probe
 	./build/wa_probe $(GAP) $(WAIP) tunnel
@@ -133,6 +144,19 @@ build/drbg_test: tests/drbg_test.c crypto/ref/drbg.c crypto/ref/drbg.h crypto/re
 build/aes_test: tests/aes_test.c crypto/ref/aes.c crypto/ref/aes.h
 	@mkdir -p build
 	$(HOSTCC) $(HOST_CFLAGS) tests/aes_test.c crypto/ref/aes.c -o $@
+
+# WABinary codec (proto/, docs/PROTOCOL.md 10): captured pair-device IQ, whatsmeow reference vectors, hand built
+# and malformed input, under AddressSanitizer and UBSan
+SANITIZE := -fsanitize=address,undefined -fno-sanitize-recover=all -g
+build/wabinary_test: tests/wabinary_test.c proto/wabinary.c proto/wabinary.h proto/wabinary_tokens.h
+	@mkdir -p build
+	$(HOSTCC) -O1 -Wall -Wextra -std=c99 -Iproto $(SANITIZE) tests/wabinary_test.c proto/wabinary.c -o $@
+
+wabinary-test: build/wabinary_test
+	./build/wabinary_test tests/vectors/pair_device_iq.bin tests/vectors/wabinary_ref.bin
+
+wabinary-vectors:
+	go run ./tools/wabvectors > tests/vectors/wabinary_ref.bin
 
 host-test: build/x25519_test build/ed25519_test build/sha256_test build/aes_test build/drbg_test build/noise_test build/rsa_test build/x509_test build/blitaes_test build/blitgcm_test
 	./build/x25519_test tests/vectors/x25519_random.txt
