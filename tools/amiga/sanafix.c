@@ -6,8 +6,8 @@
  *
  * The wrapper opens the real device with a private request and sits in the path for the synchronous
  * control commands: S2_GETSTATIONADDRESS reports the default (ROM) address as current while the unit is
- * unconfigured, S2_CONFIGINTERFACE replaces a broadcast/zero address with the default one and treats
- * "already configured" as success. Data commands (CMD_READ, CMD_WRITE, multicast/broadcast, events,
+ * unconfigured, S2_CONFIGINTERFACE always configures the ROM address (the driver accepts no other; the
+ * address in effect is returned in ios2_SrcAddr) and treats "already configured" as success. Data commands (CMD_READ, CMD_WRITE, multicast/broadcast, events,
  * orphans) are handed to the real device with the request re-pointed at it, so they run at full speed
  * and later requests on that IORequest go to the driver directly. Kickstart 1.3, no utility.library needed
  * by the wrapper itself. Build: tools/amiga/sanafix.s + this file -> DEVS:Networks/a2065fix.device.
@@ -100,6 +100,9 @@ void fix_open(__reg("a6") struct Library *dev, __reg("a1") struct IOSana2Req *re
         FreeSignal(sig); FreeMem(u, sizeof *u); return;
     }
     u->real = (struct Library *)u->preq.ios2_Req.io_Device; u->realunit = u->preq.ios2_Req.io_Unit;
+    /* SANA-II: the driver replaces ios2_BufferManagement with a private per-opener pointer that every later request
+     * must carry; hand it on, or the driver's copy routines run from the raw tag list and no frame ever arrives */
+    req->ios2_BufferManagement = u->preq.ios2_BufferManagement;
     req->ios2_Req.io_Device = (struct Device *)dev; req->ios2_Req.io_Unit = (struct Unit *)u;
     req->ios2_Req.io_Error = 0;
     dev->lib_OpenCnt++;
@@ -136,8 +139,10 @@ void fix_beginio(__reg("a6") struct Library *dev, __reg("a1") struct IOSana2Req 
     u->preq.ios2_PacketType = req->ios2_PacketType; cp(u->preq.ios2_SrcAddr, req->ios2_SrcAddr, 16); cp(u->preq.ios2_DstAddr, req->ios2_DstAddr, 16);
     u->preq.ios2_DataLength = req->ios2_DataLength; u->preq.ios2_Data = req->ios2_Data; u->preq.ios2_StatData = req->ios2_StatData;
     if (cmd == S2_CONFIGINTERFACE) {
+        /* always the ROM address: the driver accepts no other, and the stack reads the address actually used back
+         * from ios2_SrcAddr (SANA-II: "the address in ios2_SrcAddr is the one in effect after the call") */
         learn_default(u);
-        if (u->have_dflt && is_bcast_or_zero(req->ios2_SrcAddr)) { cp(u->preq.ios2_SrcAddr, u->dflt, 6); }
+        if (u->have_dflt) cp(u->preq.ios2_SrcAddr, u->dflt, 6);
     }
     err = real_do(u, cmd);
     if (cmd == S2_CONFIGINTERFACE && err == S2ERR_BAD_STATE && u->preq.ios2_WireError == S2WERR_IS_CONFIGURED) {

@@ -25,6 +25,7 @@ A2065DEV=${A2065DEV:-$ROOT/build/a2065dev/a2065.device}
 WORK=${TACHYON_NET_WORK:-"$ROOT/build/fsuae-net"}
 DH0="$WORK/dh0"
 NET_DHCP=${NET_DHCP:-0}
+NET_RXBUF=${NET_RXBUF:-16384}  # socket_rx_buffer: TheWire13's TCP pool is max_tcp (12) x this; the default 40000 costs 480 KiB
 NET_LOG=${NET_LOG:-0}          # log_enabled in thewire13.conf
 NET_WAIT=${NET_WAIT:-8}        # seconds between starting the stack and the program
 NET_STACK=${NET_STACK:-50000}  # CLI stack for the stack task (Kickstart 1.3 default is 4000 bytes)
@@ -37,7 +38,7 @@ done
 rm -rf "$WORK"; mkdir -p "$DH0/S" "$DH0/C" "$DH0/Libs" "$DH0/Devs/Networks"
 cp "$EXE" "$DH0/test"
 # C: commands from the user's Workbench 1.3 disk (Kickstart 1.3 has none in ROM)
-for c in Run Wait Stack; do "$XDFTOOL" "$WBADF" read "c/$c" "$DH0/C/$c" >/dev/null; done
+for c in Run Wait Stack Echo ChangeTaskPri Avail; do "$XDFTOOL" "$WBADF" read "c/$c" "$DH0/C/$c" >/dev/null; done
 cp "$WIRE/c/TheWire13" "$WIRE/c/mini_ping" "$WIRE/c/mini_ntp" "$WIRE/c/mini_nslookup" "$DH0/C/" 2>/dev/null || cp "$WIRE/c/TheWire13" "$DH0/C/"
 cp "$WIRE/libs/bsdsocket.library" "$DH0/Libs/"
 # utility.library V37 for 1.3 (make utility13): the a2065.device opens it at init time
@@ -68,6 +69,9 @@ hostname=tachyon
 domain=lan
 mtu=1500
 
+socket_rx_buffer=$NET_RXBUF
+tcp_window=$NET_RXBUF
+
 log_enabled=$NET_LOG
 EOF
 head -c 64 /dev/urandom > "$DH0/seed.bin"
@@ -76,8 +80,14 @@ dig +short web.whatsapp.com 2>/dev/null | grep -E '^[0-9.]+$' | head -1 | tr -d 
 printf '%s' "$GAP" > "$DH0/gap.txt"
 # the redirection after the command name belongs to the started program (its banner, DHCP and SANA messages),
 # the one after Run only to Run's own "[CLI 2]" line
+# Order: the program first (it waits up to 60 s for the stack), then TheWire13, which sizes its TCP PCB pool
+# (12 x 40 KiB by default, no config key) from the memory that is left: with the stack first, Fast RAM is gone
+# (Avail: 464 bytes) and a 400 KiB program cannot load. NET_ORDER=stack-first restores the old order.
+NET_ORDER=${NET_ORDER:-probe-first}
 if [ "${NET_NOSTACK:-0}" = 1 ]; then printf 'stack %s\ntest\nendcli\n' "$NET_STACK" > "$DH0/S/Startup-Sequence"   # driver tests without the stack
-else printf "stack %s\n${HOLD_LINE}run >NIL: C:TheWire13 >SYS:stack.log\nwait %s\ntest\nendcli\n" "$NET_STACK" "$NET_WAIT" > "$DH0/S/Startup-Sequence"; fi
+elif [ "$NET_ORDER" = probe-first ]; then
+  printf "stack %s\n${HOLD_LINE}run >NIL: test\nwait 2\nrun >NIL: C:TheWire13 >SYS:stack.log\nwait %s\navail >SYS:avail.txt\nendcli\n" "$NET_STACK" "$NET_WAIT" > "$DH0/S/Startup-Sequence"
+else printf "stack %s\n${HOLD_LINE}run >NIL: C:TheWire13 >SYS:stack.log\nwait %s\navail >SYS:avail.txt\ntest\navail >SYS:avail2.txt\nendcli\n" "$NET_STACK" "$NET_WAIT" > "$DH0/S/Startup-Sequence"; fi
 
 "$FSUAE" "$HERE/fsuae/a500-1mb-fast-net.fs-uae" \
     --floppy_drive_0= \
@@ -92,6 +102,7 @@ while [ $i -lt "$TIMEOUT" ]; do
 done
 kill $PID 2>/dev/null || true
 [ -f "$DH0/sana2hold.log" ] && { echo "--- SYS:sana2hold.log ---"; cat "$DH0/sana2hold.log"; }
+[ -f "$DH0/avail.txt" ] && { echo "--- SYS:avail.txt (after both started) ---"; cat "$DH0/avail.txt"; }
 echo "--- SYS:stack.log ---"
 cat "$DH0/stack.log" 2>/dev/null || echo "(no stack.log)"
 echo "--- SYS:result.txt after ${i}s ---"
