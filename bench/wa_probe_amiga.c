@@ -14,6 +14,10 @@
  *              Noise computation on the 68000 already takes 25-40 s)
  *   noisecache.bin  optional, 32 bytes: fingerprint of WhatsApp's verified intermediate Noise certificate from
  *              an earlier run (host or Amiga); written back after a successful run (ENVARC: in the client)
+ *   chat.txt   present (with pair.txt): the interim chat (docs/SIGNAL.md). Line 1: the peer's number (JID user, digits; the
+ *              phone is device 0), line 2: a text to send once after <active/> (may be empty), line 3: seconds to stay
+ *              online (default 180). Typed lines in the console window go to the peer; incoming texts are printed.
+ *              Sessions live in SYS:tachyon.sessions (written as .tmp, then renamed).
  *   pair.txt   present: pairing / login mode (docs/PROTOCOL.md 11) instead of the plain probe. The credentials record
  *              SYS:tachyon.creds (proto/creds.c) is loaded when present (paired -> login, else the stored identity
  *              pairs); without it a new identity is generated. The QR codes are drawn on the client screen
@@ -33,6 +37,7 @@
 #include "../proto/creds.h"
 #include "../proto/prekeys.h"
 #include "../proto/nextkeys.h"
+#include "../proto/signal.h"
 #include "../ui/screen.h"
 
 struct ExecBase *SysBase;
@@ -115,6 +120,41 @@ static int clock_string(char *s)
 
 /* ---- pairing: credentials file and the QR screen ------------------------------------------------- */
 static wa_creds creds; static int pair_mode; static wa_prekeys prekeys; static wa_nextkeys nextkeys;
+static sig_store sessions; static uint8_t sessions_rec[SIG_STORE_MAX_SIZE];
+static char chat_peer[32], chat_text[200];
+
+/* the session store: SYS:tachyon.sessions.tmp first, then the old record is deleted and the new one renamed into place
+ * (AmigaDOS Rename does not overwrite), so a crash never leaves a torn record under the real name */
+static void write_sessions(void *ctx)
+{
+    uint32_t n; BPTR f; (void)ctx;
+    if (!(n = sig_store_write(sessions_rec, sizeof sessions_rec, &sessions))) return;
+    f = Open((STRPTR)"SYS:tachyon.sessions.tmp", MODE_NEWFILE);
+    if (!f) { log_line(0, "sessions: cannot write SYS:tachyon.sessions.tmp"); return; }
+    if (Write(f, sessions_rec, n) != (LONG)n) { Close(f); log_line(0, "sessions: short write"); return; }
+    Close(f);
+    DeleteFile((STRPTR)"SYS:tachyon.sessions");
+    if (!Rename((STRPTR)"SYS:tachyon.sessions.tmp", (STRPTR)"SYS:tachyon.sessions")) log_line(0, "sessions: rename failed");
+    else logf1("sessions: SYS:tachyon.sessions written (%s%u sessions)", "", sessions.n);
+}
+/* a typed line from the console window, without blocking (CON: hands over whole lines) */
+static int chat_input(void *ctx, char *line, uint32_t cap)
+{
+    LONG n; uint32_t i; (void)ctx;
+    if (!con || !WaitForChar(con, 1)) return 0;
+    n = Read(con, line, cap - 1);
+    if (n <= 0) return 0;
+    for (i = 0; i < (uint32_t)n && line[i] != '\n' && line[i] != '\r'; i++) ;
+    line[i] = 0;
+    return 1;
+}
+static void chat_recv(void *ctx, const char *from, const char *text)
+{
+    char l[260]; (void)ctx;
+    wa_fmt(l, sizeof l, "\n*** %s: %s\n\n", from, text);
+    if (con_dots) { if (con) Write(con, (APTR)"\n", 1); con_dots = 0; }
+    if (con) Write(con, (APTR)l, slen(l));
+}
 
 static void consume_nextkeys(void *ctx) { (void)ctx; DeleteFile((STRPTR)"SYS:tachyon.next"); log_line(0, "keys: SYS:tachyon.next consumed (deleted)"); }
 static void write_nextkeys(void *ctx)
@@ -275,6 +315,33 @@ int main(void)
                 logf1("prekeys: SYS:tachyon.prekeys loaded: %s%u keys", "", prekeys.n);
             }
         }
+        /* Signal sessions and the interim chat (docs/SIGNAL.md) */
+        {   static uint8_t srec[SIG_STORE_MAX_SIZE + 1]; static uint8_t ctext[300];
+            io.sessions = &sessions; io.sessions_loaded = 0; io.save_sessions = write_sessions; io.chat_recv = chat_recv;
+            n = read_file("SYS:tachyon.sessions", srec, sizeof srec);
+            if (n <= 0) n = read_file("SYS:tachyon.sessions.tmp", srec, sizeof srec);      /* a crash between the write and the rename */
+            if (n > 0) {
+                if (!sig_store_read(&sessions, srec, (uint32_t)n)) { out("RESULT: SYS:tachyon.sessions is not a valid record - refusing to continue (delete it to start without sessions)\n"); finish(); return 10; }
+                io.sessions_loaded = 1;
+                logf1("sessions: SYS:tachyon.sessions loaded: %s%u sessions", "", sessions.n);
+            }
+            n = read_file("SYS:chat.txt", ctext, sizeof ctext - 1);
+            if (n > 0) {
+                uint32_t i = 0, k = 0, secs = 0;
+                while (i < (uint32_t)n && ctext[i] != '\n' && k < sizeof chat_peer - 1) chat_peer[k++] = (char)ctext[i++];
+                chat_peer[k] = 0; if (i < (uint32_t)n) i++;
+                k = 0;
+                while (i < (uint32_t)n && ctext[i] != '\n' && k < sizeof chat_text - 1) chat_text[k++] = (char)ctext[i++];
+                chat_text[k] = 0; if (i < (uint32_t)n) i++;
+                while (i < (uint32_t)n && ctext[i] >= '0' && ctext[i] <= '9') secs = secs * 10 + (uint32_t)(ctext[i++] - '0');
+                if (chat_peer[0]) {
+                    io.chat_user = chat_peer; io.chat_device = 0; io.chat_lid = 0; io.chat_send = chat_text[0] ? chat_text : 0; io.chat_input = chat_input;
+                    io.linger_ms = (secs ? secs : 180) * 1000;
+                    logf1("chat: peer %s (the phone), online for %u s after <active/>; type a line + Return in this window to send it", chat_peer, io.linger_ms / 1000);
+                    if (chat_text[0]) logf1("chat: one text queued for after <active/>: \"%s\"", chat_text, 0);
+                }
+            }
+        }
     }
 
     /* offline part first: the three X25519 key pairs (~10 s on the 68000) while the stack starts in parallel */
@@ -323,6 +390,9 @@ int main(void)
             out(aline);
             wa_fmt(aline, sizeof aline, "LOGIN: server prekeys %u, uploaded %u, active %d at %u ms, stanzas %u, acks %u, messages %u, prekey generation %u ms\n",
                    io.server_prekeys, io.prekeys_uploaded, io.active_set, io.t_active, io.frames_after_login, io.acks_sent, io.messages_seen, io.d_prekeys);
+            out(aline);
+            wa_fmt(aline, sizeof aline, "MESSAGES: sent %u (server ack at %u ms, peer receipt at %u ms), received %u (last at %u ms), undecryptable %u, receipts %u, sessions started %u (last X3DH %u ms), encrypt %u ms, decrypt %u ms\n",
+                   io.msgs_sent, io.t_msg_ack, io.t_msg_receipt, io.msgs_received, io.t_msg_received, io.msgs_failed, io.receipts_sent, io.sessions_started, io.d_session, io.d_encrypt, io.d_decrypt);
             out(aline);
             if (io.prekeys_loaded) write_prekeys(0);
             if (io.creds_loaded) write_creds(0);

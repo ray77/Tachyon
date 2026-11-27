@@ -97,7 +97,11 @@ PAIR_PREKEYS=${PAIR_PREKEYS:-$ROOT/build/tachyon-a500.prekeys}      # the one-ti
 PAIR_NEXT=${PAIR_NEXT:-$ROOT/build/tachyon-a500.next}               # key material for the next connection (single use: the
                                                                      # Amiga deletes it before use; a missing file after the run deletes ours)
 rm -f "$DH0/tachyon.next"
-if [ "$PAIR" = 1 ]; then printf 'pair\n' > "$DH0/pair.txt"; [ -f "$PAIR_CREDS" ] && cp "$PAIR_CREDS" "$DH0/tachyon.creds"; [ -f "$PAIR_PREKEYS" ] && cp "$PAIR_PREKEYS" "$DH0/tachyon.prekeys"; [ -f "$PAIR_NEXT" ] && cp "$PAIR_NEXT" "$DH0/tachyon.next"; fi
+PAIR_SESSIONS=${PAIR_SESSIONS:-$ROOT/build/tachyon-a500.sessions}       # Signal sessions (docs/SIGNAL.md), copied both ways
+if [ "$PAIR" = 1 ]; then printf 'pair\n' > "$DH0/pair.txt"; [ -f "$PAIR_CREDS" ] && cp "$PAIR_CREDS" "$DH0/tachyon.creds"; [ -f "$PAIR_PREKEYS" ] && cp "$PAIR_PREKEYS" "$DH0/tachyon.prekeys"; [ -f "$PAIR_NEXT" ] && cp "$PAIR_NEXT" "$DH0/tachyon.next"; [ -f "$PAIR_SESSIONS" ] && cp "$PAIR_SESSIONS" "$DH0/tachyon.sessions"; fi
+# the interim chat (make run-chat): CHAT_TO = the peer's number (digits, device 0 = the phone), CHAT_SEND = one text sent
+# after <active/>, CHAT_LINGER = seconds online; lines typed in the emulated console window are sent too
+if [ -n "${CHAT_TO:-}" ]; then printf '%s\n%s\n%s\n' "$CHAT_TO" "${CHAT_SEND:-}" "${CHAT_LINGER:-180}" > "$DH0/chat.txt"; fi
 # the redirection after the command name belongs to the started program (its banner, DHCP and SANA messages),
 # the one after Run only to Run's own "[CLI 2]" line
 # Order: the program first (it waits up to 60 s for the stack), then TheWire13, which sizes its TCP PCB pool
@@ -132,6 +136,7 @@ if [ -f "$DH0/noisecache.bin" ] && [ -f "$DH0/done" ]; then cp "$DH0/noisecache.
 if [ -f "$DH0/tlscache.bin" ] && [ -f "$DH0/done" ]; then cp "$DH0/tlscache.bin" "$TCACHE" && echo "(tls certificate cache saved to $TCACHE)"; fi
 if [ "$PAIR" = 1 ] && [ -f "$DH0/tachyon.creds" ]; then cp "$DH0/tachyon.creds" "$PAIR_CREDS" && echo "(credentials saved to $PAIR_CREDS)"; fi
 if [ "$PAIR" = 1 ] && [ -f "$DH0/tachyon.prekeys" ]; then cp "$DH0/tachyon.prekeys" "$PAIR_PREKEYS" && echo "(prekeys saved to $PAIR_PREKEYS)"; fi
+if [ "$PAIR" = 1 ] && [ -f "$DH0/tachyon.sessions" ]; then cp "$DH0/tachyon.sessions" "$PAIR_SESSIONS" && echo "(signal sessions saved to $PAIR_SESSIONS)"; fi
 if [ "$PAIR" = 1 ]; then
   if [ -f "$DH0/tachyon.next" ] && [ -f "$DH0/done" ]; then cp "$DH0/tachyon.next" "$PAIR_NEXT" && echo "(next connection's keys saved to $PAIR_NEXT)";
   else rm -f "$PAIR_NEXT"; fi

@@ -31,6 +31,9 @@ import (
 	"go.mau.fi/libsignal/state/record"
 	"go.mau.fi/libsignal/tests"
 	"go.mau.fi/libsignal/util/optional"
+	"google.golang.org/protobuf/proto"
+
+	"go.mau.fi/whatsmeow/proto/waE2E"
 )
 
 var ctx = context.Background()
@@ -389,32 +392,64 @@ func vectors() {
 		comment("s3_pkmsg_unknown_opk names one-time prekey 999: rejected (no such prekey)")
 	}
 
+	// ---- wa: what the phone sends to the companion in the self chat: real waE2E.Message protobufs with WhatsApp's padding,
+	// a prekey message (fresh parties, so Alice's one-time prekey 5 is unused) and a second, plain one on the same session
+	comment("wa: the phone's messages to us as the probe core sees them (tests/wa_pair_sim.c): Message protobuf + padding, pkmsg then msg")
+	{
+		alice2, bob2, addrAlice2, addrBob2, aliceSig2, _ := setup()
+		_ = addrBob2
+		bundle := bundleOf(alice2, aliceSPKID, aliceSPK, aliceSig2, aliceOPKID, aliceOPK)
+		processBundleFixed("wa", bob2, addrAlice2, bundle, fixedPair(71, 59), fixedPair(73, 61))
+		dest := "4917612345678@s.whatsapp.net"
+		text1 := "Antwort vom Telefon: hallo Amiga!"
+		m1, err := proto.Marshal(&waE2E.Message{DeviceSentMessage: &waE2E.DeviceSentMessage{DestinationJID: &dest, Message: &waE2E.Message{Conversation: &text1}}})
+		must(err)
+		emit("wa_text1", []byte(text1))
+		encrypt("wa_pkmsg1", bob2, addrAlice2, append(m1, bytes.Repeat([]byte{4}, 4)...))
+		text2 := "zweite Nachricht, gleiche Sitzung \u00e4\u00f6\u00fc"
+		m2, err := proto.Marshal(&waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{Text: &text2}})
+		must(err)
+		emit("wa_text2", []byte(text2))
+		encrypt("wa_msg2", bob2, addrAlice2, append(m2, bytes.Repeat([]byte{9}, 9)...))
+	}
+
 	for _, l := range out {
 		fmt.Println(l)
 	}
 	fmt.Fprintf(os.Stderr, "%d lines\n", len(out))
 }
 
-// check-message: the phone's view of a <enc type=pkmsg> body the C core sent to Bob (device 0 of the test number):
-// Bob processes it with his fixed keys and prints the padded plaintext as hex (tests/wa_msg_sim.c compares)
-func checkMessage(path string) {
+// check-message: the phone's view of the <enc type=pkmsg> body the C core sent to Bob (device 0 of the test number) in
+// the simulator: Bob processes it with his fixed keys, strips WhatsApp's padding, parses the waE2E.Message (expected as
+// DeviceSentMessage for our own number) and compares the text with -want
+func checkMessage(path, want string) {
 	b, err := os.ReadFile(path)
 	must(err)
 	_, bob, addrAlice, _, _, _ := setup()
 	pt, err := decryptPK(bob, addrAlice, b)
 	must(err)
-	fmt.Printf("%x\n", pt)
+	check(len(pt) > 0, "plaintext")
+	pad := int(pt[len(pt)-1])
+	check(pad >= 1 && pad <= 15 && pad <= len(pt) && bytes.Equal(pt[len(pt)-pad:], bytes.Repeat([]byte{byte(pad)}, pad)), "whatsapp padding 1..15")
+	var msg waE2E.Message
+	must(proto.Unmarshal(pt[:len(pt)-pad], &msg))
+	dsm := msg.GetDeviceSentMessage()
+	check(dsm != nil, "DeviceSentMessage wrapper for our own number")
+	check(dsm.GetDestinationJID() == "4917612345678@s.whatsapp.net", "destination JID")
+	check(dsm.GetMessage().GetConversation() == want, "conversation text == "+want)
+	fmt.Printf("check-message: libsignal decrypted the probe's pkmsg (%d bytes): DeviceSentMessage to %s, conversation %q\n", len(b), dsm.GetDestinationJID(), dsm.GetMessage().GetConversation())
 }
 
 func main() {
 	mode := flag.String("mode", "vectors", "vectors | check-message")
 	in := flag.String("in", "", "check-message: the pkmsg body")
+	want := flag.String("want", "", "check-message: the expected text")
 	flag.Parse()
 	switch *mode {
 	case "vectors":
 		vectors()
 	case "check-message":
-		checkMessage(*in)
+		checkMessage(*in, *want)
 	default:
 		must(fmt.Errorf("unknown mode %q", *mode))
 	}

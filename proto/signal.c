@@ -162,7 +162,7 @@ static void mac_update_ident(hmac_sha256_ctx *c, const uint8_t pub[32]) { uint8_
 int sig_encrypt(sig_session *s, const sig_local *me, const uint8_t *pt, uint32_t len, uint8_t *out, uint32_t cap, uint32_t *outlen, int *is_pkmsg)
 {
     sig_state *st = &s->cur; uint8_t ckey[32], mkey[32], iv[16], key33[33]; hmac_sha256_ctx hc; pb_writer w; uint32_t i, pad, blen, n;
-    *outlen = 0; *is_pkmsg = 0;
+    *outlen = 0; *is_pkmsg = 0; (void)me;
     if (!st->valid) return SIG_ERR_NO_SESSION;
     pad = 16 - (len & 15); blen = len + pad;
     if (blen > SIG_BODY_MAX) return SIG_ERR_BUFFER;

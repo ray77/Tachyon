@@ -10,6 +10,7 @@
  * 401 and close; exhausted codes -> close without reconnect.
  *   wa_pair_sim <pair_device_iq.bin> <pair_success_iq.bin>
  */
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,6 +22,8 @@
 #include "noise.h"
 #include "prekeys.h"
 #include "inflate.h"
+#include "../proto/signal.h"
+#include "ed25519.h"
 
 int wa_probe_sim_pair(wa_probe_io *pio, const uint8_t *first_frame, uint32_t len);
 int wa_probe_sim_login(wa_probe_io *pio, const uint8_t *first_frame, uint32_t len);
@@ -51,7 +54,66 @@ static char err_code[8], err_text[32];
 static uint8_t arena_mem[16384];
 
 static void enqueue(const uint8_t *frame, uint32_t len) { memcpy(queue[qtail & 7], frame, len); qlen[qtail & 7] = len; qtail++; }
-static void enqueue_node(const wab_node *n) { uint8_t b[512]; uint32_t l; if (wab_encode_frame(n, b, sizeof b, &l) == WAB_OK) enqueue(b, l); }
+static void enqueue_node(const wab_node *n) { uint8_t b[1024]; uint32_t l; if (wab_encode_frame(n, b, sizeof b, &l) == WAB_OK) enqueue(b, l); else CHECK(!"encode (queue frame)"); }
+
+static void enqueue_result(const wab_value *id, const wab_node *child);
+/* ---- E: the Signal vectors (tests/vectors/signal_vectors.txt, name=hex) and the fake phone ---- */
+static char *vec_text; static uint32_t vec_len;
+static uint32_t vec(const char *name, uint8_t *out, uint32_t cap)
+{
+    const char *p = vec_text, *e; uint32_t n = 0, k = strlen(name);
+    while (p && p < vec_text + vec_len) {
+        if (strncmp(p, name, k) == 0 && p[k] == '=') {
+            p += k + 1;
+            while (n < cap && isxdigit((unsigned char)p[0]) && isxdigit((unsigned char)p[1])) { unsigned v; sscanf(p, "%2x", &v); out[n++] = (uint8_t)v; p += 2; }
+            return n;
+        }
+        e = strchr(p, '\n'); p = e ? e + 1 : 0;
+    }
+    return 0;
+}
+static int bundles, msgs, receipts, sessions_saved, phone_sent; static char msg_id[32]; static char rcpt_type[2][16], rcpt_id[2][16];
+static char recv_text[2][200]; static int recv_n; static uint8_t enc_out[1400]; static uint32_t enc_out_len; static int enc_is_pk;
+static sig_store sessions;
+static void save_sessions(void *ctx) { (void)ctx; sessions_saved++; }
+static void chat_recv(void *ctx, const char *from, const char *text)
+{
+    (void)ctx; CHECK(strcmp(from, "4917612345678:0") == 0);
+    if (recv_n < 2) snprintf(recv_text[recv_n], sizeof recv_text[0], "%s", text);
+    recv_n++;
+}
+/* Bob's (the phone's) prekey bundle as the server lists it: registration BE32, type 05, identity, skey{id BE24, value,
+ * signature}, key{id, value} */
+static void enqueue_bundle(const wab_value *iq_id)
+{
+    static wab_node list, usr, parts[5], sk[3], ok[2]; static wab_attr ua[1];
+    static uint8_t ident[32], spk[32], sig[64], opk[32]; static const uint8_t reg[4] = { 0, 0, 0xBE, 0xEF }, ty[1] = { 5 }, skid[3] = { 0, 0, 7 }, okid[3] = { 0, 0, 42 };
+    CHECK(vec("bob_ident_pub", ident, 32) == 32 && vec("bob_spk_pub", spk, 32) == 32 && vec("bob_spk_sig", sig, 64) == 64 && vec("bob_opk_pub", opk, 32) == 32);
+    wab_node_init(&parts[0], "registration"); parts[0].val = wab_bytes(reg, 4);
+    wab_node_init(&parts[1], "type"); parts[1].val = wab_bytes(ty, 1);
+    wab_node_init(&parts[2], "identity"); parts[2].val = wab_bytes(ident, 32);
+    wab_node_init(&sk[0], "id"); sk[0].val = wab_bytes(skid, 3); wab_node_init(&sk[1], "value"); sk[1].val = wab_bytes(spk, 32); wab_node_init(&sk[2], "signature"); sk[2].val = wab_bytes(sig, 64);
+    wab_node_init(&parts[3], "skey"); parts[3].val.kind = WAB_LIST; parts[3].children = sk; parts[3].n_children = 3;
+    wab_node_init(&ok[0], "id"); ok[0].val = wab_bytes(okid, 3); wab_node_init(&ok[1], "value"); ok[1].val = wab_bytes(opk, 32);
+    wab_node_init(&parts[4], "key"); parts[4].val.kind = WAB_LIST; parts[4].children = ok; parts[4].n_children = 2;
+    wab_node_init(&usr, "user"); ua[0].key = wab_s("jid"); ua[0].val = wab_jid_value("4917612345678", "s.whatsapp.net", 0); usr.attrs = ua; usr.n_attrs = 1;
+    usr.val.kind = WAB_LIST; usr.children = parts; usr.n_children = 5;
+    wab_node_init(&list, "list"); list.val.kind = WAB_LIST; list.children = &usr; list.n_children = 1;
+    enqueue_result(iq_id, &list);
+}
+/* <message from=phone id type=text t><enc v=2 type=pkmsg|msg>vector</enc></message> */
+static void enqueue_phone_message(const char *vector, const char *id, const char *type)
+{
+    static wab_node m, enc; static wab_attr ma[4], ea[2]; static uint8_t body[2][1024]; static int slot; uint32_t l;
+    uint8_t *b = body[slot & 1]; slot++;
+    l = vec(vector, b, 1024); CHECK(l > 50);
+    wab_node_init(&enc, "enc"); ea[0].key = wab_s("v"); ea[0].val = wab_text("2"); ea[1].key = wab_s("type"); ea[1].val = wab_text(type); enc.attrs = ea; enc.n_attrs = 2; enc.val = wab_bytes(b, l);
+    wab_node_init(&m, "message");
+    ma[0].key = wab_s("from"); ma[0].val = wab_jid_value("4917612345678", "s.whatsapp.net", 0);
+    ma[1].key = wab_s("id"); ma[1].val = wab_text(id); ma[2].key = wab_s("type"); ma[2].val = wab_text("text"); ma[3].key = wab_s("t"); ma[3].val = wab_text("1764300010");
+    m.attrs = ma; m.n_attrs = 4; m.val.kind = WAB_LIST; m.children = &enc; m.n_children = 1;
+    enqueue_node(&m);
+}
 
 /* <iq from=s.whatsapp.net type=result id=ID>[child]</iq> */
 static void enqueue_result(const wab_value *id, const wab_node *child)
@@ -128,14 +190,44 @@ static int io_send(void *ctx, const uint8_t *p, uint32_t n)
             CHECK(e == WAB_OK);
             if (e == WAB_OK) {
                 const wab_value *type = wab_get_attr(nd, "type"), *id = wab_get_attr(nd, "id"), *xmlns = wab_get_attr(nd, "xmlns");
-                CHECK(wab_str_eq(&nd->tag, "iq") || wab_str_eq(&nd->tag, "ack"));
-                if (wab_str_eq(&nd->tag, "ack")) {
+                CHECK(wab_str_eq(&nd->tag, "iq") || wab_str_eq(&nd->tag, "ack") || wab_str_eq(&nd->tag, "message") || wab_str_eq(&nd->tag, "receipt"));
+                if (wab_str_eq(&nd->tag, "message")) {
+                    /* our text to the phone: <message id type=text to><participants><to jid><enc v=2 type/></to></participants>[<device-identity/>]</message> */
+                    const wab_value *to = wab_get_attr(nd, "to"); const wab_node *parts = wab_get_child(nd, "participants"), *pto = parts ? wab_get_child(parts, "to") : 0, *enc = pto ? wab_get_child(pto, "enc") : 0, *di = wab_get_child(nd, "device-identity");
+                    const wab_value *v = enc ? wab_get_attr(enc, "v") : 0, *et = enc ? wab_get_attr(enc, "type") : 0, *pj = pto ? wab_get_attr(pto, "jid") : 0;
+                    wab_node ack; wab_attr aa[3];
+                    msgs++;
+                    CHECK(id && id->kind == WAB_STR && id->str.len == 22 && strncmp((const char *)id->str.p, "3EB0", 4) == 0);
+                    CHECK(type && wab_str_eq(&type->str, "text"));
+                    CHECK(to && to->kind == WAB_JID && wab_str_eq(&to->jid.user, "4917612345678") && wab_str_eq(&to->jid.server, "s.whatsapp.net") && to->jid.device == 0);
+                    CHECK(pj && pj->kind == WAB_JID && wab_str_eq(&pj->jid.user, "4917612345678") && pj->jid.device == 0);
+                    CHECK(v && wab_str_eq(&v->str, "2"));
+                    CHECK(et && (wab_str_eq(&et->str, "pkmsg") || wab_str_eq(&et->str, "msg")));
+                    enc_is_pk = et && wab_str_eq(&et->str, "pkmsg");
+                    CHECK(enc_is_pk ? di && di->val.kind == WAB_BYTES && di->val.str.len > 100 : di == 0);   /* the device identity rides along with a prekey message */
+                    if (enc && enc->val.kind == WAB_BYTES && enc->val.str.len <= sizeof enc_out) { memcpy(enc_out, enc->val.str.p, enc->val.str.len); enc_out_len = enc->val.str.len; }
+                    if (id && id->kind == WAB_STR) snprintf(msg_id, sizeof msg_id, "%.*s", (int)id->str.len, (const char *)id->str.p);
+                    /* the server's ack, then (first message only) the phone's two answers: a prekey message starting a new session, a plain one */
+                    wab_node_init(&ack, "ack"); aa[0].key = wab_s("class"); aa[0].val = wab_text("message"); aa[1].key = wab_s("id"); aa[1].val = *id; aa[2].key = wab_s("from"); aa[2].val = *to;
+                    ack.attrs = aa; ack.n_attrs = 3; enqueue_node(&ack);
+                    /* both answers are prekey messages: libsignal keeps sending those until it has seen a message of ours on the new session */
+                    if (!phone_sent) { phone_sent = 1; enqueue_phone_message("wa_pkmsg1", "PHONE0000000001", "pkmsg"); enqueue_phone_message("wa_msg2", "PHONE0000000002", "pkmsg"); }
+                }
+                else if (wab_str_eq(&nd->tag, "receipt")) {
+                    const wab_value *to = wab_get_attr(nd, "to"); int k = receipts < 2 ? receipts : 1;
+                    receipts++;
+                    CHECK(to && to->kind == WAB_JID && wab_str_eq(&to->jid.user, "4917612345678") && to->jid.device == 0);
+                    CHECK(wab_get_attr(nd, "participant") == 0 && wab_get_attr(nd, "recipient") == 0);
+                    if (type && type->kind == WAB_STR) snprintf(rcpt_type[k], sizeof rcpt_type[k], "%.*s", (int)type->str.len, (const char *)type->str.p);
+                    if (id && id->kind == WAB_STR) snprintf(rcpt_id[k], sizeof rcpt_id[k], "%.*s", (int)id->str.len, (const char *)id->str.p);
+                }
+                else if (wab_str_eq(&nd->tag, "ack")) {
                     const wab_value *cl = wab_get_attr(nd, "class"), *to = wab_get_attr(nd, "to"); int k = stanza_acks < 2 ? stanza_acks : 1;
                     stanza_acks++;
                     if (cl && cl->kind == WAB_STR) snprintf(ack_class[k], sizeof ack_class[k], "%.*s", (int)cl->str.len, (const char *)cl->str.p);
                     if (id && id->kind == WAB_STR) snprintf(ack_id[k], sizeof ack_id[k], "%.*s", (int)id->str.len, (const char *)id->str.p);
                     if (to && to->kind == WAB_JID) snprintf(ack_to[k], sizeof ack_to[k], "%.*s@%.*s", (int)to->jid.user.len, (const char *)to->jid.user.p, (int)to->jid.server.len, (const char *)to->jid.server.p);
-                    CHECK(wab_get_attr(nd, "type") != 0);              /* receipt type / notification type copied */
+                    CHECK((wab_get_attr(nd, "type") != 0) == (strcmp(ack_class[k], "message") != 0));   /* receipt / notification type copied, none for a message (whatsmeow) */
                 }
                 else if (xmlns && wab_str_eq(&xmlns->str, "w:p")) { keepalives++; CHECK(type && wab_str_eq(&type->str, "get")); CHECK(wab_get_child(nd, "ping") != 0); }
                 else if (xmlns && wab_str_eq(&xmlns->str, "encrypt") && wab_get_child(nd, "count")) {
@@ -143,6 +235,13 @@ static int io_send(void *ctx, const uint8_t *p, uint32_t n)
                     counts++; CHECK(type && wab_str_eq(&type->str, "get"));
                     wab_node_init(&c, "count"); ca[0].key = wab_s("value"); ca[0].val = wab_text(counts == 1 ? "0" : "3"); c.attrs = ca; c.n_attrs = 1;
                     enqueue_result(id, &c);
+                }
+                else if (xmlns && wab_str_eq(&xmlns->str, "encrypt") && wab_get_child(nd, "key")) {
+                    const wab_node *u = wab_get_child(wab_get_child(nd, "key"), "user"); const wab_value *uj = u ? wab_get_attr(u, "jid") : 0, *rs = u ? wab_get_attr(u, "reason") : 0;
+                    bundles++; CHECK(type && wab_str_eq(&type->str, "get"));
+                    CHECK(uj && uj->kind == WAB_JID && wab_str_eq(&uj->jid.user, "4917612345678") && wab_str_eq(&uj->jid.server, "s.whatsapp.net") && uj->jid.device == 0);
+                    CHECK(rs && wab_str_eq(&rs->str, "identity"));
+                    enqueue_bundle(id);
                 }
                 else if (xmlns && wab_str_eq(&xmlns->str, "encrypt") && wab_get_child(nd, "list")) {
                     const wab_node *reg = wab_get_child(nd, "registration"), *ty = wab_get_child(nd, "type"), *idn = wab_get_child(nd, "identity"), *list = wab_get_child(nd, "list"), *skey = wab_get_child(nd, "skey");
@@ -232,7 +331,8 @@ static void reset(wa_probe_io *io, wa_creds *creds)
 int main(int argc, char **argv)
 {
     static wa_probe_io io; static wa_creds creds; static uint8_t seed[64]; FILE *f; int r;
-    if (argc != 3) { printf("usage: wa_pair_sim <pair_device_iq.bin> <pair_success_iq.bin>\n"); return 2; }
+    if (argc != 3 && argc != 4) { printf("usage: wa_pair_sim <pair_device_iq.bin> <pair_success_iq.bin> [signal_vectors.txt]\n"); return 2; }
+    if (argc == 4) { f = fopen(argv[3], "rb"); if (!f) { printf("cannot open %s\n", argv[3]); return 2; } vec_text = malloc(65536); vec_len = (uint32_t)fread(vec_text, 1, 65535, f); vec_text[vec_len] = 0; fclose(f); }
     clock_gettime(CLOCK_MONOTONIC, &t0);
     f = fopen(argv[1], "rb"); pd_frame = malloc(4096); pd_len = (uint32_t)fread(pd_frame, 1, 4096, f); fclose(f);
     f = fopen(argv[2], "rb"); ps_frame = malloc(4096); ps_len = (uint32_t)fread(ps_frame, 1, 4096, f); fclose(f);
@@ -306,6 +406,47 @@ int main(int argc, char **argv)
         r = wa_probe_sim_login(&io, b, l);
         printf("%s\n", io.result);
         CHECK(r == 0 && !io.logged_in && strstr(io.result, "REJECTED") != 0);
+    }
+    /* ---- E: the interim chat (docs/SIGNAL.md): our text to the phone (bundle, X3DH, pkmsg + device identity), the
+     * phone's two answers (a prekey message that starts a session the other way round, then a plain message), receipts;
+     * a second connection reuses the stored session (plain msg, no bundle) ---- */
+    if (vec_text) {
+        wab_node n; wab_attr a[2]; uint8_t b[256]; uint32_t l; int i;
+        printf("--- E: chat: bundle, pkmsg out, two pkmsg in, receipts, session reuse ---\n");
+        reset(&io, &creds); creds.paired = 1; strcpy(creds.jid_user, "4917612345678"); creds.jid_device = 7; strcpy(creds.lid_user, "123456789012345"); creds.lid_device = 7;
+        creds.adv.details_len = 120; memset(creds.adv.details, 0x5a, 120); memset(creds.adv.account_sig_key, 1, 32); memset(creds.adv.account_sig, 2, 64); memset(creds.adv.device_sig, 3, 64);
+        { hmac_drbg prng; drbg_instantiate(&prng, seed, sizeof seed); wa_prekeys_generate(&prekeys, 3, &prng); }
+        /* the one-time prekey the phone used (tools/signalvectors: Alice's OPK 5), already uploaded */
+        { wa_prekey *k = &prekeys.k[prekeys.n++]; k->id = 5; for (i = 0; i < 32; i++) k->priv[i] = (uint8_t)(i * 37 + 23); k->priv[0] &= 248; k->priv[31] &= 127; k->priv[31] |= 64; x25519_base_comb(k->pub, k->priv); k->uploaded = 1; if (prekeys.next_id <= 5) prekeys.next_id = 6; }
+        io.sessions = &sessions; io.sessions_loaded = 0; io.save_sessions = save_sessions; io.chat_recv = chat_recv; io.chat_input = 0;
+        io.chat_user = "4917612345678"; io.chat_device = 0; io.chat_lid = 0; io.chat_send = "Hallo vom Amiga"; io.linger_ms = 3000;
+        bundles = msgs = receipts = sessions_saved = recv_n = 0; enc_out_len = 0; memset(rcpt_type, 0, sizeof rcpt_type); memset(rcpt_id, 0, sizeof rcpt_id); memset(recv_text, 0, sizeof recv_text);
+        wab_node_init(&n, "success"); a[0].key = wab_s("t"); a[0].val = wab_text("1764300000"); a[1].key = wab_s("lid"); a[1].val = wab_jid_value("123456789012345", "lid", 7); n.attrs = a; n.n_attrs = 2;
+        CHECK(wab_encode_frame(&n, b, sizeof b, &l) == WAB_OK);
+        r = wa_probe_sim_login(&io, b, l);
+        printf("%s\n", io.result);
+        CHECK(r == 1 && io.logged_in && uploads == 1 && actives == 1);
+        CHECK(bundles == 1 && msgs == 1 && enc_is_pk && enc_out_len > 100 && msg_id[0] == '3');
+        CHECK(io.msgs_sent == 1 && io.sessions_started == 1 && io.t_msg_ack > 0 && io.t_msg_sent > 0 && io.d_session > 0);
+        CHECK(io.msgs_received == 2 && io.msgs_failed == 0 && receipts == 2 && io.receipts_sent == 2);
+        CHECK(strcmp(rcpt_type[0], "sender") == 0 && strcmp(rcpt_id[0], "PHONE0000000001") == 0 && strcmp(rcpt_type[1], "sender") == 0 && strcmp(rcpt_id[1], "PHONE0000000002") == 0);
+        CHECK(recv_n == 2 && strcmp(recv_text[0], "Antwort vom Telefon: hallo Amiga!") == 0 && strcmp(recv_text[1], "zweite Nachricht, gleiche Sitzung \xe4\xf6\xfc") == 0);   /* UTF-8 -> Latin-1 for the console */
+        CHECK(wa_prekeys_find(&prekeys, 5) == 0 && prekeys.n == 6);          /* the one-time prekey is gone; 3 uploaded + 3 refilled remain */
+        CHECK(sessions.n == 1 && sessions_saved >= 3 && stanza_acks == 2);   /* no ack for decrypted messages: receipts only */
+        { f = fopen("build/msg_pkmsg.bin", "wb"); if (f) { fwrite(enc_out, 1, enc_out_len, f); fclose(f); } }
+        /* the store survives a write/read round trip and the next connection sends a plain message on the phone's session */
+        {   static uint8_t rec[SIG_STORE_MAX_SIZE]; uint32_t rl = sig_store_write(rec, sizeof rec, &sessions);
+            CHECK(rl > 0 && sig_store_read(&sessions, rec, rl) && sessions.n == 1);
+        }
+        reset(&io, &creds); creds.paired = 1; strcpy(creds.jid_user, "4917612345678"); creds.jid_device = 7; counts = 1;
+        io.sessions = &sessions; io.sessions_loaded = 1; io.save_sessions = save_sessions; io.chat_recv = chat_recv; io.chat_input = 0;
+        io.chat_user = "4917612345678"; io.chat_device = 0; io.chat_lid = 0; io.chat_send = "zweiter Text, bestehende Sitzung"; io.linger_ms = 1500;
+        bundles = msgs = receipts = recv_n = 0; enc_is_pk = -1;
+        wab_node_init(&n, "success"); a[0].key = wab_s("t"); a[0].val = wab_text("1764300000"); a[1].key = wab_s("lid"); a[1].val = wab_jid_value("123456789012345", "lid", 7); n.attrs = a; n.n_attrs = 2;
+        CHECK(wab_encode_frame(&n, b, sizeof b, &l) == WAB_OK);
+        r = wa_probe_sim_login(&io, b, l);
+        printf("%s\n", io.result);
+        CHECK(r == 1 && bundles == 0 && msgs == 1 && enc_is_pk == 0 && io.msgs_sent == 1 && io.sessions_started == 0 && io.msgs_received == 0 && receipts == 0);
     }
     printf("%s: %d checks, %d failures\n", fails ? "FAIL" : "PASS", checks, fails);
     return fails ? 1 : 0;

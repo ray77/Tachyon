@@ -25,7 +25,7 @@ BENCH_SRC  := bench/x25519_bench.c
 UNITY_SRC  := bench/amiga/unity.c
 AMIGA_ASM  := build/amiga/x25519bench.s
 
-.PHONY: all host-test amiga run vamos vectors clean tls-test tls13-test ws-test heartbeat-test wa-probe wa-pair wa-probe-tunnel wa-capture run-pair wabinary-test wabinary-vectors run-blitaes run-blitgcm amiga-probe run-probe vamos-probe utility13 utility13-test sana2-probe run-sana2 sanafix amiga-screen run-screen
+.PHONY: all host-test amiga run vamos vectors clean tls-test tls13-test ws-test heartbeat-test wa-probe wa-pair wa-probe-tunnel wa-capture run-pair run-chat wabinary-test wabinary-vectors run-blitaes run-blitgcm amiga-probe run-probe vamos-probe utility13 utility13-test sana2-probe run-sana2 sanafix amiga-screen run-screen
 
 all: host-test amiga
 
@@ -104,10 +104,10 @@ FAST ?= 1024   # Fast RAM of the emulated machine in KiB for run-probe (2048 = t
 WAIP ?= $(shell dig +short web.whatsapp.com | grep -E '^[0-9.]+$$' | head -1)
 PROBE_CORE := tests/wa_probe_core.c tests/wa_probe_core.h tests/certs/wa_rsa_chain.h tests/vectors/wa_client_payload.h
 # pairing (docs/PROTOCOL.md 11): the protocol modules and the QR encoder are part of the probe since the pair mode
-PROBE_PROTO := proto/wabinary.c proto/identity.c proto/clientpayload.c proto/pairing.c proto/creds.c proto/prekeys.c proto/inflate.c proto/nextkeys.c ui/qr.c
+PROBE_PROTO := proto/wabinary.c proto/identity.c proto/clientpayload.c proto/pairing.c proto/creds.c proto/prekeys.c proto/inflate.c proto/nextkeys.c proto/signal.c ui/qr.c
 PROBE_INC := -Itests -Iproto -Iui
 # every header the probe builds include: a changed constant (WA_PLATFORM_TYPE, 2026-11-27) must rebuild the A500 binary
-PROBE_HDR := tests/wa_probe_core.h proto/wabinary.h proto/identity.h proto/clientpayload.h proto/pairing.h proto/creds.h proto/prekeys.h proto/inflate.h proto/nextkeys.h proto/pb.h ui/qr.h
+PROBE_HDR := tests/wa_probe_core.h proto/wabinary.h proto/identity.h proto/clientpayload.h proto/pairing.h proto/creds.h proto/prekeys.h proto/inflate.h proto/nextkeys.h proto/signal.h proto/pb.h ui/qr.h
 build/wa_probe: tests/wa_probe.c $(PROBE_CORE) $(PROBE_PROTO) $(PROBE_HDR) $(CRYPTO_SRC) crypto/ref/heartbeat.h crypto/ref/tls13.h
 	@mkdir -p build
 	$(HOSTCC) $(HOST_CFLAGS) $(PROBE_INC) tests/wa_probe.c tests/wa_probe_core.c $(PROBE_PROTO) $(CRYPTO_SRC) -o $@
@@ -143,8 +143,9 @@ build/wa_pair_sim: tests/wa_pair_sim.c tests/clientpayload_test.c $(PROBE_CORE) 
 
 .PHONY: pair-sim
 pair-sim: build/wa_pair_sim
-	./build/wa_pair_sim tests/vectors/pair_device_iq.bin tests/vectors/pair_success_iq.bin
+	./build/wa_pair_sim tests/vectors/pair_device_iq.bin tests/vectors/pair_success_iq.bin tests/vectors/signal_vectors.txt
 	go run ./tools/pairvectors -mode verify-sign -in build/pair_sim_sign.bin -ref tests/vectors/pair_success_iq.bin
+	go run ./tools/signalvectors -mode check-message -in build/msg_pkmsg.bin -want 'Hallo vom Amiga'   # libsignal (the phone) decrypts what the core sent
 
 # same, with openssl s_client as the TLS 1.3/X25519 transport (reference run from before tls13.c existed)
 wa-probe-tunnel: build/wa_probe
@@ -362,6 +363,13 @@ run-probe: build/amiga/wa_probe build/amiga/utility.library build/amiga/sana2_ho
 # emulated screen, the phone scans the FS-UAE window; build/tachyon-a500.creds carries the credentials between runs
 run-pair: build/amiga/wa_probe build/amiga/utility.library build/amiga/sana2_hold build/amiga/a2065fix.device
 	PAIR=1 GAP=0 NET_FAST=$(FAST) tools/run-fsuae-net.sh $< 900
+
+# the interim chat on the emulated A500 (network, manual, PACED - docs/SIGNAL.md): login with the stored credentials, then
+# CHAT_SEND goes to CHAT_TO (the user's own phone for the first attempts), typed lines follow, incoming texts are printed
+CHAT_LINGER ?= 180
+run-chat: build/amiga/wa_probe build/amiga/utility.library build/amiga/sana2_hold build/amiga/a2065fix.device
+	@test -n "$(CHAT_TO)" || { echo "usage: make run-chat CHAT_TO=<number> [CHAT_SEND='text'] [CHAT_LINGER=180] FAST=2048"; exit 2; }
+	PAIR=1 GAP=0 NET_FAST=$(FAST) CHAT_TO=$(CHAT_TO) CHAT_SEND='$(CHAT_SEND)' CHAT_LINGER=$(CHAT_LINGER) tools/run-fsuae-net.sh $< $$(( $(CHAT_LINGER) + 400 ))
 
 # utility.library V37 for Kickstart 1.3 (tools/amiga/utility13.*): 2.0-era SANA-II drivers (a2065.device) need it
 build/amiga/utility13_c.s: tools/amiga/utility13.c

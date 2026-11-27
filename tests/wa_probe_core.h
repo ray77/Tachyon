@@ -23,7 +23,7 @@
 #include "tls13.h"
 #include "qr.h"
 
-struct wa_creds; struct wa_prekeys; struct wa_nextkeys;
+struct wa_creds; struct wa_prekeys; struct wa_nextkeys; struct sig_store;
 
 /* io->mode */
 #define WA_MODE_PROBE 0     /* the connection probe: handshake, first frame decrypted, close (unchanged behaviour) */
@@ -87,6 +87,22 @@ typedef struct wa_probe_io {
     int precompute_next;            /* 1 = compute the next record after <active/> */
     void (*consume_nextkeys)(void *ctx);                 /* the stored record is about to be used: delete the file */
     void (*save_nextkeys)(void *ctx);                    /* *nextkeys holds the record for the next start: persist it */
+
+    /* messages (docs/SIGNAL.md): Signal sessions and the interim chat. With `sessions` set, incoming <message> stanzas
+       are decrypted (pkmsg: X3DH as responder with the stored prekeys), printed, acknowledged with a <receipt> as
+       whatsmeow does, and the store is handed back through save_sessions after every change; text lines from
+       chat_input (and chat_send once, right after <active/>) are encrypted for chat_user:chat_device (a new session
+       fetches the prekey bundle first: ~50 s on the 68000) and sent as <message><participants><to><enc>. */
+    struct sig_store *sessions;     /* in/out, or 0 = messages are only counted (left unacknowledged) */
+    int sessions_loaded;            /* 1 = *sessions holds a stored record (else it is initialised) */
+    void (*save_sessions)(void *ctx);
+    const char *chat_user; uint32_t chat_device; int chat_lid;   /* the peer: JID user (digits), device (the phone is 0), @lid? */
+    const char *chat_send;          /* text to send once after <active/>, or 0 */
+    int (*chat_input)(void *ctx, char *line, uint32_t cap);      /* optional: 1 = a typed line is ready (no newline) */
+    void (*chat_recv)(void *ctx, const char *from, const char *text);   /* optional: a decrypted text (also logged) */
+    uint32_t msgs_sent, msgs_received, msgs_failed, receipts_sent, sessions_started;
+    uint32_t d_session, d_encrypt, d_decrypt;   /* durations: last X3DH, last encrypt, last decrypt */
+    uint32_t t_msg_sent, t_msg_ack, t_msg_receipt, t_msg_received;   /* our last message out, the server's ack, the peer's receipt; the last text in */
 
     /* pairing results, milliseconds since wa_probe_run started unless noted (0 = not reached) */
     int paired_now;             /* pairing completed in this run (pair-device-sign sent) */

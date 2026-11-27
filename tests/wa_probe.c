@@ -44,11 +44,37 @@
 #include "creds.h"
 #include "prekeys.h"
 #include "nextkeys.h"
+#include "signal.h"
 
 static int fd = -1, tunnel, tun_in = -1, tun_out = -1;
 static wa_creds creds; static const char *creds_path;
 static wa_prekeys prekeys; static const char *prekeys_path;
 static wa_nextkeys nextkeys; static const char *nextkeys_path;
+static sig_store sessions; static const char *sessions_path; static uint8_t sessions_rec[SIG_STORE_MAX_SIZE];
+
+/* the session store: written to <path>.tmp and renamed over the old record, so a crash never leaves a torn file */
+static void write_sessions(void *ctx)
+{
+    uint32_t n; FILE *f; char tmp[300]; (void)ctx;
+    if (!sessions_path || !(n = sig_store_write(sessions_rec, sizeof sessions_rec, &sessions))) return;
+    snprintf(tmp, sizeof tmp, "%s.tmp", sessions_path);
+    f = fopen(tmp, "wb");
+    if (!f || fwrite(sessions_rec, 1, n, f) != n) { printf("sessions: cannot write %s\n", tmp); if (f) fclose(f); return; }
+    fclose(f);
+    if (rename(tmp, sessions_path) != 0) printf("sessions: rename failed\n");
+    else printf("sessions: %s written (%u bytes, %u sessions)\n", sessions_path, n, sessions.n);
+}
+/* a typed line, without blocking: select() on stdin */
+static int chat_input(void *ctx, char *line, uint32_t cap)
+{
+    fd_set rf; struct timeval tv; size_t n; (void)ctx;
+    FD_ZERO(&rf); FD_SET(0, &rf); tv.tv_sec = 0; tv.tv_usec = 0;
+    if (select(1, &rf, 0, 0, &tv) <= 0) return 0;
+    if (!fgets(line, (int)cap, stdin)) { strcpy(line, "/quit"); return 1; }
+    n = strcspn(line, "\r\n"); line[n] = 0;
+    return 1;
+}
+static void chat_recv(void *ctx, const char *from, const char *text) { (void)ctx; printf("\n*** %s: %s\n\n", from, text); fflush(stdout); }
 
 /* the stored record is about to be used: delete it first (single use) */
 static void consume_nextkeys(void *ctx) { (void)ctx; if (nextkeys_path) { remove(nextkeys_path); printf("keys: %s consumed (deleted)\n", nextkeys_path); } }
@@ -217,6 +243,26 @@ int main(int argc, char **argv)
             }
         }
         io.linger_ms = getenv("LINGER") ? (uint32_t)(atof(getenv("LINGER")) * 1000) : 15000;
+        /* Signal sessions (SESSIONS file, default build/tachyon.sessions) and the interim chat: CHAT_TO=<digits> is the peer's
+         * JID user (CHAT_DEVICE, default 0 = the phone; CHAT_LID=1 for a @lid user), CHAT_SEND a text sent once after
+         * <active/>, further lines are read from stdin while online (LINGER seconds, "/quit" ends it early) */
+        sessions_path = getenv("SESSIONS") && *getenv("SESSIONS") ? getenv("SESSIONS") : "build/tachyon.sessions";
+        io.sessions = &sessions; io.sessions_loaded = 0; io.save_sessions = write_sessions; io.chat_recv = chat_recv;
+        {   static uint8_t srec[SIG_STORE_MAX_SIZE + 1]; FILE *sf = fopen(sessions_path, "rb");
+            if (sf) {
+                size_t n = fread(srec, 1, sizeof srec, sf); fclose(sf);
+                if (!sig_store_read(&sessions, srec, (uint32_t)n)) { printf("sessions: %s is not a valid session record (%zu bytes) - refusing to continue; delete it to start without sessions\n", sessions_path, n); return 1; }
+                io.sessions_loaded = 1;
+                { char l[200]; snprintf(l, sizeof l, "sessions: %s loaded: %u sessions", sessions_path, sessions.n); log_line(0, l); }
+            }
+        }
+        if (getenv("CHAT_TO") && *getenv("CHAT_TO")) {
+            io.chat_user = getenv("CHAT_TO"); io.chat_device = getenv("CHAT_DEVICE") ? (uint32_t)atoi(getenv("CHAT_DEVICE")) : 0; io.chat_lid = getenv("CHAT_LID") && atoi(getenv("CHAT_LID"));
+            io.chat_send = getenv("CHAT_SEND") && *getenv("CHAT_SEND") ? getenv("CHAT_SEND") : 0;
+            io.chat_input = chat_input;
+            { char l[200]; snprintf(l, sizeof l, "chat: peer %s:%u@%s, %s; type a line + Return to send, /quit to end (online for %u s)", io.chat_user, io.chat_device, io.chat_lid ? "lid" : "s.whatsapp.net",
+                                   io.chat_send ? "one text queued for after <active/>" : "nothing queued", io.linger_ms / 1000); log_line(0, l); }
+        }
         {   static uint8_t prec[WA_PREKEYS_MAX_SIZE + 1]; FILE *pf = fopen(prekeys_path, "rb");
             if (pf) {
                 size_t n = fread(prec, 1, sizeof prec, pf); fclose(pf);
@@ -253,6 +299,8 @@ int main(int argc, char **argv)
                    io.qr_shown, io.t_qr_shown, io.t_pair_success, io.d_verify, io.d_sign, io.t_sign_sent, io.t_515, io.t_login_connect, io.t_login_accepted, io.pongs);
             printf("LOGIN: server prekeys %u (answered %d), uploaded %u, active %d at %u ms, stanzas %u, acks %u, messages %u, prekey generation %u ms\n",
                    io.server_prekeys, io.have_server_prekeys, io.prekeys_uploaded, io.active_set, io.t_active, io.frames_after_login, io.acks_sent, io.messages_seen, io.d_prekeys);
+            printf("MESSAGES: sent %u (server ack at %u ms, peer receipt at %u ms), received %u (last at %u ms), undecryptable %u, receipts sent %u, sessions started %u (last X3DH %u ms), encrypt %u ms, decrypt %u ms\n",
+                   io.msgs_sent, io.t_msg_ack, io.t_msg_receipt, io.msgs_received, io.t_msg_received, io.msgs_failed, io.receipts_sent, io.sessions_started, io.d_session, io.d_encrypt, io.d_decrypt);
             if (io.creds_loaded) write_creds(0);     /* identity (so a second attempt reuses it), JID after pairing, Noise cache fingerprint */
             if (io.prekeys_loaded) write_prekeys(0);
         }

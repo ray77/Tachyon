@@ -16,6 +16,7 @@
 #include "prekeys.h"
 #include "inflate.h"
 #include "nextkeys.h"
+#include "../proto/signal.h"      /* not "signal.h": vbcc would take the C library header of the same name first */
 
 /* whatsmeow socket/constants.go */
 static const uint8_t wa_header[4] = { 'W', 'A', 6, 3 };
@@ -660,12 +661,37 @@ static const wab_node *recv_node(uint32_t timeout_ms, int *gone)
     return decode(plain, plen);
 }
 
+static int handle_message(const wab_node *n);
+static char last_msg_id[24];
+
 /* a server stanza that arrives while we wait for something else; 1 = keep going, 0 = the stream ended */
 static int handle_async(const wab_node *n)
 {
     if (wab_str_eq(&n->tag, "stream:error") || wab_str_eq(&n->tag, "xmlstreamend") || wab_str_eq(&n->tag, "failure")) { logl("login: the server ended the stream"); return 0; }
-    if (wab_str_eq(&n->tag, "receipt") || wab_str_eq(&n->tag, "notification")) return send_ack(n);
-    if (wab_str_eq(&n->tag, "message")) { io->messages_seen++; logl("login: an encrypted message waits for us (left unacknowledged: no Signal session layer yet)"); }
+    if (wab_str_eq(&n->tag, "receipt")) {
+        const wab_value *id = wab_get_attr(n, "id"); char ty[24], fr[64];
+        if (last_msg_id[0] && id && id->kind == WAB_STR && wab_str_eq(&id->str, last_msg_id)) {
+            io->t_msg_receipt = ms();
+            wa_fmt(line, sizeof line, "msg: receipt for our message %s from %s: %s (%T s after sending)", last_msg_id, attr_cstr(n, "from", fr, sizeof fr),
+                   wab_get_attr(n, "type") ? attr_cstr(n, "type", ty, sizeof ty) : "delivered", io->t_msg_receipt - io->t_msg_sent); logl(line);
+        }
+        return send_ack(n);
+    }
+    if (wab_str_eq(&n->tag, "notification")) return send_ack(n);
+    if (wab_str_eq(&n->tag, "ack")) {
+        const wab_value *id = wab_get_attr(n, "id"), *cl = wab_get_attr(n, "class"); char er[16];
+        if (last_msg_id[0] && id && id->kind == WAB_STR && wab_str_eq(&id->str, last_msg_id) && cl && cl->kind == WAB_STR && wab_str_eq(&cl->str, "message")) {
+            io->t_msg_ack = ms();
+            wa_fmt(line, sizeof line, "msg: the server acknowledged our message %s %T s after sending%s%s", last_msg_id, io->t_msg_ack - io->t_msg_sent,
+                   wab_get_attr(n, "error") ? ", ERROR " : "", wab_get_attr(n, "error") ? attr_cstr(n, "error", er, sizeof er) : ""); logl(line);
+        }
+        return 1;
+    }
+    if (wab_str_eq(&n->tag, "message")) {
+        io->messages_seen++;
+        if (io->sessions) return handle_message(n);
+        logl("login: an encrypted message waits for us (left unacknowledged: no session store in this run)");
+    }
     if (wab_str_eq(&n->tag, "ib") && n->val.kind == WAB_LIST) { uint32_t i; for (i = 0; i < n->n_children; i++) log_node("  ib: ", &n->children[i]); }
     return 1;                                   /* ib (offline_preview, offline, dirty, edge_routing), iq from the server, ...: logged only */
 }
@@ -698,6 +724,292 @@ static uint32_t dec_value(const wab_value *v)
 }
 
 static int iq_is_result(const wab_node *r) { const wab_value *ty = r ? wab_get_attr(r, "type") : 0; return ty && ty->kind == WAB_STR && wab_str_eq(&ty->str, "result"); }
+
+/* ---- messages: Signal sessions, <message> in and out (docs/SIGNAL.md; whatsmeow send.go, message.go, receipt.go) ---- */
+static sig_local me_local;
+static uint8_t msg_pt[1024], msg_ct[1400], msg_plain[WA_PROBE_MSG_MAX], msg_devid[600];
+static char chat_line[256];
+
+static void core_random(void *ctx, uint8_t *out, uint32_t n) { (void)ctx; drbg_generate(&rng, out, n); }
+static void local_init(void)
+{
+    const wa_identity *id = &io->creds->id;
+    me_local.ident_priv = id->ident_priv; me_local.ident_pub = id->ident_pub; me_local.reg_id = id->reg_id;
+    me_local.spk_id = id->spk_id; me_local.spk_priv = id->spk_priv; me_local.spk_pub = id->spk_pub;
+    me_local.prekeys = io->prekeys; me_local.random = core_random; me_local.rctx = 0;
+}
+static int user_is_ours(const char *user)
+{
+    uint32_t i;
+    for (i = 0; user[i] && io->creds->jid_user[i] && user[i] == io->creds->jid_user[i]; i++) ;
+    if (!user[i] && !io->creds->jid_user[i]) return 1;
+    for (i = 0; user[i] && io->creds->lid_user[i] && user[i] == io->creds->lid_user[i]; i++) ;
+    return !user[i] && !io->creds->lid_user[i] && io->creds->lid_user[0];
+}
+static void save_sessions(void) { if (io->save_sessions) io->save_sessions(io->ctx); }
+
+/* <iq xmlns=encrypt type=get to=s.whatsapp.net><key><user jid=user[:device]@server reason=identity/></key></iq> -> the bundle */
+static int fetch_bundle(const char *user, uint32_t device, int lid, sig_bundle *b)
+{
+    static wab_node iq, key, usr; static wab_attr a[4], ua[2]; char id[32]; const wab_node *r, *list; uint32_t i;
+    next_iq_id(id, sizeof id);
+    wab_node_init(&usr, "user");
+    ua[0].key = wab_s("jid"); ua[0].val = wab_jid_value(user, lid ? "lid" : WA_SERVER_JID, device);
+    ua[1].key = wab_s("reason"); ua[1].val = wab_text("identity");
+    usr.attrs = ua; usr.n_attrs = 2;
+    wab_node_init(&key, "key"); key.val.kind = WAB_LIST; key.children = &usr; key.n_children = 1;
+    wab_node_init(&iq, "iq");
+    a[0].key = wab_s("id"); a[0].val = wab_text(id);
+    a[1].key = wab_s("xmlns"); a[1].val = wab_text("encrypt");
+    a[2].key = wab_s("type"); a[2].val = wab_text("get");
+    a[3].key = wab_s("to"); a[3].val = wab_jid_value("", WA_SERVER_JID, 0);
+    iq.attrs = a; iq.n_attrs = 4; iq.val.kind = WAB_LIST; iq.children = &key; iq.n_children = 1;
+    if (!send_node(&iq, "prekey bundle query")) return 0;
+    r = wait_result(id, 30000);
+    if (!iq_is_result(r)) { logl("signal: no prekey bundle (no result or an error IQ, see recv: line)"); return 0; }
+    list = wab_get_child(r, "list");
+    if (!list || list->val.kind != WAB_LIST) { logl("signal: bundle result without <list>"); return 0; }
+    for (i = 0; i < list->n_children; i++) {
+        const wab_node *u = &list->children[i];
+        if (!wab_str_eq(&u->tag, "user")) continue;
+        if (sig_bundle_from_node(b, u)) {
+            wa_fmt(line, sizeof line, "signal: bundle for %s:%u: registration id %u, signed prekey id %u, one-time prekey %s%u", user, device, b->reg_id, b->spk_id,
+                   b->has_opk ? "id " : "none", b->has_opk ? b->opk_id : 0u); logl(line);
+            return 1;
+        }
+        log_node("signal: unusable bundle: ", u);
+    }
+    return 0;
+}
+
+/* whatsmeow GenerateMessageID: "3EB0" + 18 upper-case hex digits of SHA-256(time || user@c.us || 16 random bytes) */
+static void new_message_id(char *id)
+{
+    static const char hx[] = "0123456789ABCDEF"; uint8_t buf[8 + 32 + 16], h[32]; uint32_t n = 0, i, t = ms(); const char *u = io->creds->jid_user;
+    for (i = 0; i < 4; i++) buf[n++] = 0; buf[n++] = (uint8_t)(t >> 24); buf[n++] = (uint8_t)(t >> 16); buf[n++] = (uint8_t)(t >> 8); buf[n++] = (uint8_t)t;
+    for (i = 0; u[i] && n < 8 + 24; i++) buf[n++] = (uint8_t)u[i];
+    for (i = 0; i < 5; i++) buf[n++] = (uint8_t)"@c.us"[i];
+    drbg_generate(&rng, buf + n, 16); n += 16;
+    sha256(h, buf, n);
+    id[0] = '3'; id[1] = 'E'; id[2] = 'B'; id[3] = '0';
+    for (i = 0; i < 9; i++) { id[4 + 2 * i] = hx[h[i] >> 4]; id[5 + 2 * i] = hx[h[i] & 15]; }
+    id[22] = 0;
+}
+
+/* Message{conversation} (waE2E field 1), for our own devices wrapped as Message{deviceSentMessage(31){destinationJID(1), message(2)}} */
+static uint32_t build_message(uint8_t *out, uint32_t cap, const char *text, const char *dest_user, int for_own_device)
+{
+    static uint8_t inner[600], dsm[700]; pb_writer w, wi, wd; char dest[64];
+    pb_w_init(&wi, inner, sizeof inner); pb_w_str(&wi, 1, text); if (!wi.ok) return 0;
+    pb_w_init(&w, out, cap);
+    if (for_own_device) {
+        wa_fmt(dest, sizeof dest, "%s@%s", dest_user, WA_SERVER_JID);
+        pb_w_init(&wd, dsm, sizeof dsm); pb_w_str(&wd, 1, dest); pb_w_bytes(&wd, 2, inner, wi.len); if (!wd.ok) return 0;
+        pb_w_bytes(&w, 31, dsm, wd.len);
+    } else pb_w_raw(&w, inner, wi.len);
+    return w.ok ? w.len : 0;
+}
+
+/* whatsmeow padMessage: 1..15 copies of the pad length (a random nibble, 0 -> 15) */
+static uint32_t wa_pad(uint8_t *p, uint32_t len, uint32_t cap)
+{
+    uint8_t r; uint32_t i;
+    drbg_generate(&rng, &r, 1); r &= 0x0f; if (!r) r = 0x0f;
+    if (len + r > cap) return 0;
+    for (i = 0; i < r; i++) p[len + i] = r;
+    return len + r;
+}
+static int wa_unpad(const uint8_t *p, uint32_t *len)
+{
+    uint32_t i, n = *len, pad;
+    if (!n) return 0;
+    pad = p[n - 1];
+    if (!pad || pad > n) return 0;
+    for (i = 0; i < pad; i++) if (p[n - 1 - i] != pad) return 0;
+    *len = n - pad;
+    return 1;
+}
+
+/* UTF-8 -> printable Latin-1 for the log and the console (anything else becomes '?') */
+static uint32_t text_latin1(char *dst, uint32_t cap, const uint8_t *s, uint32_t n)
+{
+    uint32_t i = 0, o = 0;
+    while (i < n && o + 1 < cap) {
+        uint8_t c = s[i];
+        if (c < 0x80) { dst[o++] = c >= 32 ? (char)c : c == '\n' ? ' ' : '?'; i++; }
+        else if ((c & 0xe0) == 0xc0 && i + 1 < n) { uint32_t cp = ((uint32_t)(c & 0x1f) << 6) | (s[i + 1] & 0x3f); dst[o++] = cp < 256 ? (char)cp : '?'; i += 2; }
+        else if ((c & 0xf0) == 0xe0) { dst[o++] = '?'; i += 3; }
+        else if ((c & 0xf8) == 0xf0) { dst[o++] = '?'; i += 4; }
+        else { dst[o++] = '?'; i++; }
+    }
+    dst[o] = 0;
+    return o;
+}
+
+/* the text of a decrypted Message: conversation(1), extendedTextMessage(6).text(1), deviceSentMessage(31).message(2) (recursive);
+ * protocolMessage(12) and senderKeyDistributionMessage(2) are named; 1 = text found */
+static int message_text(const uint8_t *p, uint32_t len, char *out, uint32_t cap, int depth)
+{
+    const uint8_t *end = p + len, *d; uint32_t f, wire, v, l; char fields[64]; uint32_t fo = 0; int proto_type = -1;
+    while (pb_next(&p, end, &f, &wire, &v, &d, &l)) {
+        if (f == 1 && wire == PB_BYTES) { text_latin1(out, cap, d, l); return 1; }
+        if (f == 6 && wire == PB_BYTES) {
+            const uint8_t *q = d, *qe = d + l; uint32_t f2, w2, v2, l2; const uint8_t *d2;
+            while (pb_next(&q, qe, &f2, &w2, &v2, &d2, &l2)) if (f2 == 1 && w2 == PB_BYTES) { text_latin1(out, cap, d2, l2); return 1; }
+        }
+        if (f == 31 && wire == PB_BYTES && depth < 2) {
+            const uint8_t *q = d, *qe = d + l; uint32_t f2, w2, v2, l2; const uint8_t *d2;
+            while (pb_next(&q, qe, &f2, &w2, &v2, &d2, &l2)) if (f2 == 2 && w2 == PB_BYTES && message_text(d2, l2, out, cap, depth + 1)) return 1;
+        }
+        if (f == 12 && wire == PB_BYTES) {
+            const uint8_t *q = d, *qe = d + l; uint32_t f2, w2, v2, l2; const uint8_t *d2; proto_type = 0;
+            while (pb_next(&q, qe, &f2, &w2, &v2, &d2, &l2)) if (f2 == 2 && w2 == PB_VARINT) proto_type = (int)v2;
+        }
+        if (fo + 6 < sizeof fields) fo += wa_fmt(fields + fo, sizeof fields - fo, "%s%u", fo ? "," : "", f);
+    }
+    if (proto_type >= 0) wa_fmt(out, cap, "[protocol message, type %d]", proto_type);
+    else wa_fmt(out, cap, "[no text; message fields %s]", fields);
+    return 0;
+}
+
+/* <receipt id to=from [recipient] [participant] [type=sender|inactive]/> (whatsmeow sendMessageReceipt: the ack of a decrypted message) */
+static int send_receipt(const wab_node *n, const char *sender_user)
+{
+    static wab_node rc; static wab_attr a[5]; uint32_t k = 0;
+    const wab_value *id = wab_get_attr(n, "id"), *from = wab_get_attr(n, "from"), *rcp = wab_get_attr(n, "recipient"), *part = wab_get_attr(n, "participant");
+    if (!id || !from) return 1;
+    wab_node_init(&rc, "receipt");
+    a[k].key = wab_s("id"); a[k].val = *id; k++;
+    a[k].key = wab_s("to"); a[k].val = *from; k++;
+    if (rcp) { a[k].key = wab_s("recipient"); a[k].val = *rcp; k++; }
+    if (part) { a[k].key = wab_s("participant"); a[k].val = *part; k++; }
+    a[k].key = wab_s("type"); a[k].val = wab_text(user_is_ours(sender_user) ? "sender" : "inactive"); k++;   /* inactive: no presence sent */
+    rc.attrs = a; rc.n_attrs = k;
+    io->receipts_sent++;
+    return send_node(&rc, "receipt");
+}
+
+static void jid_user(char *dst, uint32_t cap, const wab_jid *j) { uint32_t i; for (i = 0; i < j->user.len && i + 1 < cap; i++) dst[i] = (char)j->user.p[i]; dst[i] = 0; }
+
+/* an incoming <message>: decrypt the <enc> child with the sender's session, print the text, answer with a receipt */
+static int handle_message(const wab_node *n)
+{
+    const wab_value *from = wab_get_attr(n, "from"), *part = wab_get_attr(n, "participant"), *enc_type; const wab_node *enc = 0; uint32_t i, plen = 0, used = 0, elen;
+    char user[32], idb[32], ty[16]; int lid, is_pk, r; sig_session *s; static heartbeat hb; uint32_t t0;
+    if (!from || from->kind != WAB_JID) { logl("msg: <message> without a from JID, acknowledged"); return send_ack(n); }
+    if (wab_str_eq(&from->jid.server, "g.us") || wab_str_eq(&from->jid.server, "broadcast") || wab_str_eq(&from->jid.server, "newsletter")) {
+        wa_fmt(line, sizeof line, "msg: %s message id %s from %s (sender keys are out of scope): acknowledged, not decrypted", wab_str_eq(&from->jid.server, "g.us") ? "group" : "broadcast/newsletter",
+               attr_cstr(n, "id", idb, sizeof idb), attr_cstr(n, part ? "participant" : "from", user, sizeof user)); logl(line);
+        return send_ack(n);
+    }
+    jid_user(user, sizeof user, &from->jid); lid = wab_str_eq(&from->jid.server, "lid");
+    if (n->val.kind == WAB_LIST) for (i = 0; i < n->n_children; i++) if (wab_str_eq(&n->children[i].tag, "enc")) { enc = &n->children[i]; break; }
+    if (!enc) {
+        wa_fmt(line, sizeof line, "msg: message %s from %s:%u without <enc>%s: acknowledged", attr_cstr(n, "id", idb, sizeof idb), user, (uint32_t)from->jid.device, wab_get_child(n, "unavailable") ? " (unavailable)" : ""); logl(line);
+        return send_ack(n);
+    }
+    enc_type = wab_get_attr(enc, "type");
+    if (!enc_type || enc_type->kind != WAB_STR || !(wab_str_eq(&enc_type->str, "pkmsg") || wab_str_eq(&enc_type->str, "msg"))) {
+        wa_fmt(line, sizeof line, "msg: message %s from %s:%u with <enc type=%s>: not a pairwise message, acknowledged", attr_cstr(n, "id", idb, sizeof idb), user, (uint32_t)from->jid.device, attr_cstr(enc, "type", ty, sizeof ty)); logl(line);
+        return send_ack(n);
+    }
+    is_pk = wab_str_eq(&enc_type->str, "pkmsg");
+    if (enc->val.kind != WAB_BYTES && enc->val.kind != WAB_STR) { logl("msg: <enc> without content, acknowledged"); return send_ack(n); }
+    elen = enc->val.str.len;
+    s = sig_store_get(io->sessions, user, from->jid.device, lid, is_pk);
+    if (!s) { wa_fmt(line, sizeof line, "msg: message %s from %s:%u is a plain msg but we have no session with that device: acknowledged, lost", attr_cstr(n, "id", idb, sizeof idb), user, (uint32_t)from->jid.device); logl(line); io->msgs_failed++; return send_ack(n); }
+    wa_fmt(line, sizeof line, "msg: message %s from %s:%u@%s, <enc type=%s v=%s> %u bytes%s", attr_cstr(n, "id", idb, sizeof idb), user, (uint32_t)from->jid.device, lid ? "lid" : WA_SERVER_JID,
+           is_pk ? "pkmsg" : "msg", attr_cstr(enc, "v", ty, sizeof ty), elen, sig_session_has_state(s) ? "" : " (new session: X3DH as responder)"); logl(line);
+    t0 = ms();
+    heartbeat_init(&hb, &w, io->now_ms, 4000, hb_send, 0);
+    heartbeat_arm(&hb);
+    r = sig_decrypt(s, &me_local, is_pk, enc->val.str.p, elen, msg_plain, sizeof msg_plain, &plen, &used);
+    heartbeat_disarm(); io->pongs += hb.sent;
+    io->d_decrypt = ms() - t0;
+    if (r != SIG_OK) {
+        wa_fmt(line, sizeof line, "msg: DECRYPTION FAILED (%s) after %T s: acknowledged without a retry receipt (pacing rule), the message is lost", sig_errstr(r), io->d_decrypt); logl(line);
+        io->msgs_failed++;
+        return send_ack(n);
+    }
+    save_sessions();
+    if (used) { wa_fmt(line, sizeof line, "msg: one-time prekey %u consumed, %u left in the record", used, io->prekeys ? io->prekeys->n : 0u); logl(line); if (io->save_prekeys) io->save_prekeys(io->ctx); }
+    if (!wa_unpad(msg_plain, &plen)) { logl("msg: decrypted, but the WhatsApp padding is invalid: acknowledged"); io->msgs_failed++; return send_ack(n); }
+    {
+        char text[200], fromstr[48];
+        int have = message_text(msg_plain, plen, text, sizeof text, 0);
+        wa_fmt(fromstr, sizeof fromstr, "%s:%u", user, (uint32_t)from->jid.device);
+        wa_fmt(line, sizeof line, "msg: %s in %T s (%u bytes plaintext): %s%s%s", have ? "TEXT" : "decrypted", io->d_decrypt, plen, have ? "\"" : "", text, have ? "\"" : ""); logl(line);
+        if (have && io->chat_recv) io->chat_recv(io->ctx, fromstr, text);
+        io->msgs_received++; io->t_msg_received = ms();
+    }
+    return send_receipt(n, user);
+}
+
+/* a text to user:device: session from the store or a new one from the prekey bundle (X3DH), Message protobuf, WhatsApp
+ * padding, Signal encryption, <message id type=text to><participants><to jid><enc v=2 type=pkmsg|msg/></to></participants>
+ * [<device-identity/>]</message>; the server's <ack> and the peer's <receipt> are reported by handle_async */
+static int send_text(const char *user, uint32_t device, int lid, const char *text)
+{
+    static wab_node msg, parts, to, enc, devid; static wab_attr ma[3], ta[1], ea[2]; static wab_node children[2];
+    static heartbeat hb; sig_session *s; uint32_t t0, plen, clen, dlen = 0; int is_pk, r;
+    s = sig_store_get(io->sessions, user, device, lid, 0);
+    if (!s || !sig_session_has_state(s)) {
+        sig_bundle b;
+        wa_fmt(line, sizeof line, "signal: no session with %s:%u yet: fetching the prekey bundle", user, device); logl(line);
+        if (!fetch_bundle(user, device, lid, &b)) return 0;
+        s = sig_store_get(io->sessions, user, device, lid, 1);
+        t0 = ms();
+        heartbeat_init(&hb, &w, io->now_ms, 4000, hb_send, 0);
+        heartbeat_arm(&hb);
+        r = sig_session_start(s, &me_local, &b);
+        heartbeat_disarm(); io->pongs += hb.sent;
+        io->d_session = ms() - t0;
+        if (r != SIG_OK) { wa_fmt(line, sizeof line, "signal: session setup REJECTED: %s", sig_errstr(r)); logl(line); sig_session_init(s); return 0; }
+        io->sessions_started++;
+        wa_fmt(line, sizeof line, "signal: session with %s:%u established in %T s (XEdDSA of the signed prekey, X3DH with %u ladders, 2 key pairs, 1 ratchet ladder; %u pongs)", user, device, io->d_session, b.has_opk ? 4u : 3u, hb.sent); logl(line);
+        save_sessions();
+    }
+    plen = build_message(msg_pt, sizeof msg_pt - 16, text, user, user_is_ours(user));
+    if (!plen) { logl("msg: text too long"); return 0; }
+    plen = wa_pad(msg_pt, plen, sizeof msg_pt);
+    t0 = ms();
+    heartbeat_init(&hb, &w, io->now_ms, 4000, hb_send, 0);
+    heartbeat_arm(&hb);
+    r = sig_encrypt(s, &me_local, msg_pt, plen, msg_ct, sizeof msg_ct, &clen, &is_pk);
+    heartbeat_disarm(); io->pongs += hb.sent;
+    io->d_encrypt = ms() - t0;
+    if (r != SIG_OK) { wa_fmt(line, sizeof line, "msg: encryption failed: %s", sig_errstr(r)); logl(line); return 0; }
+    save_sessions();
+    new_message_id(last_msg_id);
+    wab_node_init(&enc, "enc");
+    ea[0].key = wab_s("v"); ea[0].val = wab_text("2");
+    ea[1].key = wab_s("type"); ea[1].val = wab_text(is_pk ? "pkmsg" : "msg");
+    enc.attrs = ea; enc.n_attrs = 2; enc.val = wab_bytes(msg_ct, clen);
+    wab_node_init(&to, "to");
+    ta[0].key = wab_s("jid"); ta[0].val = wab_jid_value(user, lid ? "lid" : WA_SERVER_JID, device);
+    to.attrs = ta; to.n_attrs = 1; to.val.kind = WAB_LIST; to.children = &enc; to.n_children = 1;
+    wab_node_init(&parts, "participants"); parts.val.kind = WAB_LIST; parts.children = &to; parts.n_children = 1;
+    children[0] = parts;
+    if (is_pk) {
+        /* ADVSignedDeviceIdentity{details, accountSignatureKey, accountSignature, deviceSignature}: the phone verifies our device */
+        pb_writer w2; const wa_adv_identity *adv = &io->creds->adv;
+        pb_w_init(&w2, msg_devid, sizeof msg_devid);
+        pb_w_bytes(&w2, 1, adv->details, adv->details_len); pb_w_bytes(&w2, 2, adv->account_sig_key, 32); pb_w_bytes(&w2, 3, adv->account_sig, 64); pb_w_bytes(&w2, 4, adv->device_sig, 64);
+        dlen = w2.ok ? w2.len : 0;
+        wab_node_init(&devid, "device-identity"); devid.val = wab_bytes(msg_devid, dlen);
+        children[1] = devid;
+    }
+    wab_node_init(&msg, "message");
+    ma[0].key = wab_s("id"); ma[0].val = wab_text(last_msg_id);
+    ma[1].key = wab_s("type"); ma[1].val = wab_text("text");
+    ma[2].key = wab_s("to"); ma[2].val = wab_jid_value(user, lid ? "lid" : WA_SERVER_JID, 0);
+    msg.attrs = ma; msg.n_attrs = 3; msg.val.kind = WAB_LIST; msg.children = children; msg.n_children = is_pk ? 2 : 1;
+    if (!send_node(&msg, "message")) return 0;
+    io->msgs_sent++; io->t_msg_sent = ms(); io->t_msg_ack = 0; io->t_msg_receipt = 0;
+    wa_fmt(line, sizeof line, "msg: sent message %s to %s:%u as %s (%u bytes Signal, %u bytes padded plaintext, encrypt %T s%s)", last_msg_id, user, device, is_pk ? "pkmsg + device-identity" : "msg", clen, plen, io->d_encrypt,
+           user_is_ours(user) ? ", DeviceSentMessage for our own number" : ""); logl(line);
+    return 1;
+}
 
 /* after <success>: whatsmeow handleConnectSuccess - prekey count, upload when the server runs low, <active/>, then
  * linger_ms online (receipts and notifications acknowledged, keepalive every 25 s), then close. 1 = done. */
@@ -765,11 +1077,18 @@ static int post_login(void)
     if (io->prekeys && wa_prekeys_pending(io->prekeys) < io->prekeys_wanted && io->prekeys->n < WA_PREKEYS_MAX) {
         if (!make_prekeys(io->prekeys_wanted - wa_prekeys_pending(io->prekeys), "while online, for the next upload")) { close_ws(); return 1; }
     }
-    /* 5. linger */
+    /* 5. linger / chat: incoming stanzas (messages decrypted when a session store is set), typed lines sent to the peer */
+    if (io->sessions && io->chat_user && io->chat_send) { if (!send_text(io->chat_user, io->chat_device, io->chat_lid, io->chat_send)) logl("msg: the initial text was not sent"); }
     t_end = ms() + io->linger_ms; last_ka = ms();
     while (ms() < t_end) {
         const wab_node *n; uint32_t now = ms(), left = t_end - now;
         if (now - last_ka >= 25000) { if (!send_keepalive()) break; last_ka = now; }
+        if (io->sessions && io->chat_input && io->chat_input(io->ctx, chat_line, sizeof chat_line)) {
+            if (chat_line[0] == '/' && chat_line[1] == 'q') { logl("chat: /quit"); break; }
+            if (!io->chat_user) logl("chat: no peer configured (chat_user), line dropped");
+            else if (chat_line[0] && !send_text(io->chat_user, io->chat_device, io->chat_lid, chat_line)) logl("chat: the line was not sent");
+            continue;
+        }
         n = recv_node(left < 1000 ? left : 1000, &gone);
         if (gone) { logl("login: connection closed by the server"); break; }
         if (n && !handle_async(n)) break;
@@ -780,9 +1099,9 @@ static int post_login(void)
 
 static const char *post_summary(void)
 {
-    static char s[120];
-    wa_fmt(s, sizeof s, "; server prekeys %u + %u uploaded, %s, %u stanzas, %u acks%s", io->server_prekeys, io->prekeys_uploaded,
-           io->active_set ? "active" : "not active", io->frames_after_login, io->acks_sent, io->messages_seen ? ", messages waiting" : "");
+    static char s[160];
+    wa_fmt(s, sizeof s, "; server prekeys %u + %u uploaded, %s, %u stanzas, %u acks, %u texts sent, %u received, %u undecryptable%s", io->server_prekeys, io->prekeys_uploaded,
+           io->active_set ? "active" : "not active", io->frames_after_login, io->acks_sent, io->msgs_sent, io->msgs_received, io->msgs_failed, io->messages_seen && !io->sessions ? ", messages waiting" : "");
     return s;
 }
 
@@ -970,6 +1289,10 @@ int wa_probe_run(wa_probe_io *pio)
     io->paired_now = io->logged_in = 0; io->t_qr_shown = io->t_pair_success = io->d_verify = io->d_sign = io->t_sign_sent = io->t_515 = io->t_login_connect = io->t_login_accepted = 0; io->qr_shown = 0;
     io->server_prekeys = io->prekeys_uploaded = io->t_active = io->frames_after_login = io->acks_sent = io->messages_seen = 0; io->have_server_prekeys = io->active_set = 0;
     iq_counter = 0; iq_prefix[0] = 0;
+    io->msgs_sent = io->msgs_received = io->msgs_failed = io->receipts_sent = io->sessions_started = 0; io->d_session = io->d_encrypt = io->d_decrypt = 0;
+    io->t_msg_sent = io->t_msg_ack = io->t_msg_receipt = io->t_msg_received = 0; last_msg_id[0] = 0;
+    if (io->sessions && !io->sessions_loaded) { sig_store_init(io->sessions); io->sessions_loaded = 1; }
+    if (io->mode == WA_MODE_PAIR && io->creds) local_init();
 
     if (io->mode == WA_MODE_PAIR) {
         if (io->creds->paired) pl = wa_clientpayload_login(payload, sizeof payload, io->creds->jid_user, io->creds->jid_device);
@@ -1008,6 +1331,10 @@ static void sim_open(wa_probe_io *pio)
     io->server_prekeys = io->prekeys_uploaded = io->t_active = io->frames_after_login = io->acks_sent = io->messages_seen = 0; io->have_server_prekeys = io->active_set = 0;
     iq_counter = 0; iq_prefix[0] = 0;
     if (!rng.instantiated) drbg_instantiate(&rng, io->seed, io->seed_len);
+    io->msgs_sent = io->msgs_received = io->msgs_failed = io->receipts_sent = io->sessions_started = 0; io->d_session = io->d_encrypt = io->d_decrypt = 0;
+    io->t_msg_sent = io->t_msg_ack = io->t_msg_receipt = io->t_msg_received = 0; last_msg_id[0] = 0;
+    if (io->sessions && !io->sessions_loaded) { sig_store_init(io->sessions); io->sessions_loaded = 1; }
+    if (io->mode == WA_MODE_PAIR && io->creds) local_init();
     ws_client_start(&w, io->host, "/ws/chat", "https://web.whatsapp.com", msgbuf, sizeof msgbuf, &rng, out, sizeof out);
     w.state = WS_OPEN;
     for (i = 0; i < sizeof tr; i++) ((uint8_t *)&tr)[i] = 0;
