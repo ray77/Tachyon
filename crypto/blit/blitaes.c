@@ -78,3 +78,62 @@ void ba_encrypt_soft(const aes_key *k, uint8_t *arena, const uint8_t *in, uint8_
     ba_exec_soft(arena, ba_prog + BA_SEC_TOUT, BA_NTOUT, 0);
     for (i = 0; i < BA_BLOCKS * 16; i++) out[i] = arena[BA_STATE + i];
 }
+
+/* lane (bit b of byte y) lives in row t = (y&1)*8 + (7-b), words at (y>>1)*2 + 16*w (w = 0..63);
+ * bit 15-k of word w belongs to block 64k + w */
+#define LANE_ROW(b, y) (BA_STATE + (((y) & 1) * 8 + (7 - (b))) * 1024 + ((y) >> 1) * 2)
+
+static void fill_lane(uint8_t *arena, int b, int y, uint16_t v)
+{
+    uint8_t *p = arena + LANE_ROW(b, y), hi = (uint8_t)(v >> 8), lo = (uint8_t)v;
+    int w;
+    for (w = 0; w < 64; w++, p += 16) { p[0] = hi; p[1] = lo; }
+}
+
+void ba_ctr_lanes(const aes_key *k, uint8_t *arena, const uint8_t j0[12], uint32_t ctr)
+{
+    uint16_t tab[2][26];            /* word over k of bit n+6 of (u + k), for u = u0 and u0 + 1 */
+    uint32_t u0 = ctr >> 6;
+    int y, b, w, n, t;
+    /* nonce bytes 0..11: constant lanes (nonce bit XOR key bit) */
+    for (y = 0; y < 12; y++) {
+        uint8_t v = (uint8_t)(j0[y] ^ k->rk[y]);
+        for (b = 0; b < 8; b++) fill_lane(arena, b, y, (v >> b) & 1 ? 0xffff : 0);
+    }
+    /* counter bits 6..31 depend only on u = (ctr + w) >> 6 in {u0, u0 + 1} */
+    for (t = 0; t < 2; t++) {
+        uint32_t u = u0 + (uint32_t)t;
+        for (n = 0; n < 26; n++) {
+            uint16_t wv = 0; int kk;
+            for (kk = 0; kk < 16; kk++) wv |= (uint16_t)((((u + (uint32_t)kk) >> n) & 1) << (15 - kk));
+            tab[t][n] = wv;
+        }
+    }
+    for (w = 0; w < 64; w++) {
+        uint32_t c = ctr + (uint32_t)w;
+        const uint16_t *tb = tab[(c >> 6) != u0];
+        for (n = 0; n < 32; n++) {
+            uint16_t wv = n < 6 ? ((c >> n) & 1 ? 0xffff : 0) : tb[n - 6];
+            int yy = 15 - (n >> 3), bb = n & 7;
+            uint8_t *p;
+            if ((k->rk[yy] >> bb) & 1) wv = (uint16_t)~wv;
+            p = arena + LANE_ROW(bb, yy) + 16 * w;
+            p[0] = (uint8_t)(wv >> 8); p[1] = (uint8_t)wv;
+        }
+    }
+}
+
+void ba_keystream_soft(const aes_key *k, uint8_t *arena, const uint8_t j0[12], uint32_t ctr, uint8_t *out)
+{
+    int rnd, i;
+    ba_setup(k, arena);
+    ba_ctr_lanes(k, arena, j0, ctr);
+    for (rnd = 1; rnd < k->rounds; rnd++) {
+        ba_exec_soft(arena, ba_prog + BA_SEC_SBOX, BA_NSBOX, rnd);
+        ba_exec_soft(arena, ba_prog + BA_SEC_MIX, BA_NMIX, rnd);
+    }
+    ba_exec_soft(arena, ba_prog + BA_SEC_SBOX, BA_NSBOX, rnd);
+    ba_exec_soft(arena, ba_prog + BA_SEC_FINAL, BA_NFINAL, rnd);
+    ba_exec_soft(arena, ba_prog + BA_SEC_TOUT, BA_NTOUT, 0);
+    for (i = 0; i < BA_BLOCKS * 16; i++) out[i] = arena[BA_STATE + i];
+}

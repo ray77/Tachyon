@@ -20,4 +20,11 @@ void ba_exec_soft(uint8_t *arena, const ba_blit *p, int n, int round);
 /* full encryption of BA_BLOCKS blocks through the software model; in/out may alias */
 void ba_encrypt_soft(const aes_key *k, uint8_t *arena, const uint8_t *in, uint8_t *out);
 
+/* CTR mode without transposition: writes the lanes of the BA_BLOCKS counter blocks
+ * j0[0..11] || BE32(ctr + i), already XORed with the round-0 key, straight into the transposed
+ * STATE layout. The chain then starts at SBOX (no WHITE, no TIN, no copy in). */
+void ba_ctr_lanes(const aes_key *k, uint8_t *arena, const uint8_t j0[12], uint32_t ctr);
+/* keystream of BA_BLOCKS counter blocks through the software model */
+void ba_keystream_soft(const aes_key *k, uint8_t *arena, const uint8_t j0[12], uint32_t ctr, uint8_t *out);
+
 #endif

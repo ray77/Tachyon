@@ -49,6 +49,28 @@ int main(void)
         if (bad) { printf("  first block %d\n  got  ", first); for (i = 0; i < 16; i++) printf("%02x", out[16 * first + i]); aes_encrypt_block_c(&k, in + 16 * first, want); printf("\n  want "); for (i = 0; i < 16; i++) printf("%02x", want[i]); printf("\n"); }
         result(bad == 0, bits == 128 ? "bit-sliced AES-128 (Blitter program v2, software model) == reference" : "bit-sliced AES-256 == reference");
     }
+    /* CTR lanes: keystream for counter blocks written straight into the transposed layout */
+    {
+        static const uint32_t ctrs[5] = { 0, 1, 0x12345677u, 0xfffffc00u, 0xfffffff5u };   /* aligned, odd, random, wrap at block 1024, wrap inside the first 64 */
+        uint8_t j0[12], blk[16];
+        int c;
+        aes_set_key(&k, key, 256);
+        for (i = 0; i < 12; i++) { st = st * 1103515245u + 12345u; j0[i] = (uint8_t)(st >> 16); }
+        for (c = 0; c < 5; c++) {
+            uint32_t v;
+            ba_keystream_soft(&k, arena, j0, ctrs[c], out);
+            bad = 0;
+            memcpy(blk, j0, 12);
+            for (i = 0; i < BA_BLOCKS; i++) {
+                v = ctrs[c] + i;
+                blk[12] = (uint8_t)(v >> 24); blk[13] = (uint8_t)(v >> 16); blk[14] = (uint8_t)(v >> 8); blk[15] = (uint8_t)v;
+                aes_encrypt_block_c(&k, blk, want);
+                if (memcmp(out + 16 * i, want, 16)) bad++;
+            }
+            printf("  CTR lanes, ctr=0x%08x: %d of %d blocks wrong\n", ctrs[c], bad, BA_BLOCKS);
+            result(bad == 0, "CTR keystream via direct lanes (no WHITE/TIN) == reference");
+        }
+    }
     printf(failures ? "\n%d FAILURE(S)\n" : "\nALL PASSED\n", failures);
     return failures ? 1 : 0;
 }
