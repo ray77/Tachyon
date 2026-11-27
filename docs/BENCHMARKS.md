@@ -288,3 +288,15 @@ Hochrechnung auf die Live-Kette (`*.whatsapp.net` ← DigiCert G2 TLS RSA CA1 �
 Nebenbefund und Korrektur: `x509_verify_chain` prüfte seit der Vertrauensanker-Änderung jedes Zertifikat zuerst unter dem gepinnten Wurzelschlüssel – für das Blatt eine vergeblich verbrauchte RSA-Operation (Kette 19,5 s → 29,5 s im ersten Lauf dieses Schritts). Jetzt eine Prüfung je Zertifikat (Aussteller als Nächstes in der Kette → dessen Schlüssel; letztes Zertifikat → gepinnter Schlüssel). Außerdem war `bench/tls_vector.h` nach der Neuaufzeichnung der TLS-1.2-Session (Extended Master Secret) veraltet, das Wiederabspielen scheiterte auf dem Ziel mit `finished mismatch`; der Header wird jetzt per Make-Regel aus `tests/vectors/tls_session.bin` erzeugt (`tools/gen_tls_vector.py`). Beide TLS-Replays erreichen CONNECTED (vamos und FS-UAE, Lauf 3: `RESULT: all vectors passed`).
 
 Einordnung: Der A500-Verbindungsaufbau liegt mit TLS 1.3 bei ≈ 37 s TLS + 25 s Noise + Pairing-Signaturen, also ≈ 60–65 s ohne Caches. Die großen Hebel bleiben unverändert: Zertifikatscache (−19,5 s), gepinntes Zwischenzertifikat, Karatsuba/Entrollen in `rsa_mont_mul` (−25 % auf alle vier RSA-Schritte), und ein in Ruhe vorberechnetes X25519-Schlüsselpaar (bereits so gebaut: `tls13_client_start_kp`).
+
+## 2026-11-27 – Schritt 15: Zertifikatscache im TLS-1.3-Handshake
+
+A500/FS-UAE, dieselbe aufgezeichnete Session wie in Schritt 14, zweimal abgespielt: einmal mit leerem Cache (volle Kettenprüfung), einmal mit dem Fingerabdruck des Blatts im Cache (`x509_cache`, PROTOCOL.md Abschnitt 7). Alle Vektoren bestanden.
+
+| Operation | Zeit |
+|---|---:|
+| TLS-1.3-Handshake online, Kette geprüft (Schritt 14) | 29,4 s |
+| **TLS-1.3-Handshake online, Zertifikat im Cache** (X25519 + `rsa_pub_set` Blatt + RSA-PSS-CertificateVerify + HKDF + GCM) | **19,8 s** |
+| Ersparnis = eine Zertifikatsprüfung (`rsa_pub_set` 1,9 s + öffentliche Operation 7,7 s) | −9,6 s |
+
+Hochrechnung Live-Kette (2 Prüfungen gespart): 37 s → **≈ 18 s** (X25519 8,1 s + Blattschlüssel 1,9 s + RSA-PSS 7,7 s + ≈ 0,5 s Rest); mit dem 60-s-Fenster (Abschnitt 8) bleiben 42 s Reserve. Übrig als RSA-Posten: `rsa_pub_set` des Blattschlüssels (R² mod n, 1,9 s – könnte mit dem Fingerabdruck mitgespeichert werden) und die eine PSS-Prüfung (7,7 s, Karatsuba/Entrollen ≈ −25 %). Der Verbindungsaufbau mit warmem Cache liegt damit bei ≈ 18 s TLS + 25 s Noise.
