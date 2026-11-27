@@ -1,4 +1,6 @@
-# AmigaWhats – Native WhatsApp für den Amiga 500
+<p align="center"><img src="docs/img/tachyon.png" alt="Tachyon" width="220"></p>
+
+# Tachyon – Native WhatsApp für den Amiga 500
 
 ## Ziel und verbindliche Hardware
 
