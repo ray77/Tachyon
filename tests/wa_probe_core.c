@@ -35,6 +35,8 @@ static noise_cert_cache ncache;
 static int prepared;
 static noise_transport tr;            /* transport keys of the current connection */
 static int pump_quiet;                /* suppress the "timeout" log line (QR wait loop) */
+static uint32_t msg_off, msg_have;    /* one WebSocket message may carry several WA frames (3-byte length each,
+                                         whatsmeow socket/framesocket.go processData): the ones not taken yet */
 
 /* ---- freestanding helpers ------------------------------------------------------------------------ */
 static void cp(uint8_t *d, const uint8_t *s, uint32_t n) { while (n--) *d++ = *s++; }
@@ -273,6 +275,8 @@ int wa_probe_prepare(wa_probe_io *pio)
     return 1;
 }
 
+static int recv_frame(uint32_t timeout_ms, uint8_t *plain, uint32_t *plen);
+
 /* TCP is connected: TLS -> WebSocket -> Noise XX with `payload` as the ClientPayload; the first decrypted server
  * frame lands in plain[0..*plain_len). Shared by the probe, the pairing connection and the login connection. */
 static int handshake(const uint8_t *payload, uint32_t payload_len, uint8_t *plain, uint32_t *plain_len)
@@ -284,7 +288,7 @@ static int handshake(const uint8_t *payload, uint32_t payload_len, uint8_t *plai
     uint32_t server_static_ct_len = 0, cert_ct_len = 0, n, ladders = 0;
     const uint8_t *p, *end, *d; uint32_t f, wire, l, v;
 
-    pend_len = 0; pump_quiet = 0;
+    pend_len = 0; pump_quiet = 0; msg_have = 0; msg_off = 0;
     if (payload_len + 16 > sizeof payload_ct) return fail("RESULT: ClientPayload too long", 0, 0);
     if (!io->tunnel) {
         /* use_cache: a first connection fills the certificate cache (full chain verification), then the real one
@@ -417,15 +421,13 @@ static int handshake(const uint8_t *payload, uint32_t payload_len, uint8_t *plai
         io->t_finish = ms();
         wa_fmt(line, sizeof line, "noise: ClientFinish sent %T s after ServerHello (%u-byte ClientPayload)", ms() - t_hello, payload_len); logl(line);
     }
-    if (!pump(-1, 1, 20000)) { wa_fmt(io->result, sizeof io->result, "RESULT: handshake REJECTED (no encrypted frame after ClientFinish, gap %T s)", io->gap_ms); return 0; }
+    msg_have = 0; msg_off = 0;
     {
-        uint32_t flen = ((uint32_t)w.msg[0] << 16) | ((uint32_t)w.msg[1] << 8) | w.msg[2];
-        if (w.msg_len < 3 + 16 || flen != w.msg_len - 3 || flen - 16 > WA_PROBE_MSG_MAX) return fail("RESULT: bad encrypted frame", 0, 0);
-        if (!noise_transport_decrypt(&tr, w.msg + 3, flen, plain)) return fail("RESULT: first server frame does not decrypt", 0, 0);
-        *plain_len = flen - 16;
-        w.msg_ready = 0;
+        int r = recv_frame(20000, plain, plain_len);
+        if (r == 0) { wa_fmt(io->result, sizeof io->result, "RESULT: handshake REJECTED (no encrypted frame after ClientFinish, gap %T s)", io->gap_ms); return 0; }
+        if (r < 0) return fail("RESULT: first server frame rejected (see log)", 0, 0);
         wa_fmt(line, sizeof line, "noise: first encrypted server frame: %u bytes ciphertext -> %u bytes plaintext, first bytes %02x %02x %02x %02x (binary node)",
-               flen, flen - 16, (uint32_t)plain[0], (uint32_t)plain[1], (uint32_t)plain[2], (uint32_t)plain[3]); logl(line);
+               *plain_len + 16, *plain_len, (uint32_t)plain[0], (uint32_t)plain[1], (uint32_t)plain[2], (uint32_t)plain[3]); logl(line);
     }
     io->t_accepted = ms();
     return 1;
@@ -451,18 +453,27 @@ static int send_node(const wab_node *n, const char *what)
     return ws_send(ct, len + 16 + 3);
 }
 
-/* next frame: 1 = decrypted into plain (*plen), 0 = nothing within timeout_ms, -1 = connection gone */
+/* next WA frame: 1 = decrypted into plain (*plen), 0 = nothing within timeout_ms, -1 = connection gone or a malformed
+ * frame. A WebSocket message holds one or more frames (3-byte big-endian length each; the server sends e.g.
+ * <stream:error code=515> and <xmlstreamend> in one message), so the frames not taken yet are served first. */
 static int recv_frame(uint32_t timeout_ms, uint8_t *plain, uint32_t *plen)
 {
     uint32_t flen;
-    pump_quiet = 1;
-    if (!pump(-1, 1, timeout_ms)) { pump_quiet = 0; return w.state == WS_CLOSED || w.state == WS_ERROR || t.error ? -1 : 0; }
-    pump_quiet = 0;
-    flen = ((uint32_t)w.msg[0] << 16) | ((uint32_t)w.msg[1] << 8) | w.msg[2];
-    w.msg_ready = 0;
-    if (w.msg_len < 3 + 16 || flen != w.msg_len - 3 || flen - 16 > WA_PROBE_MSG_MAX) { logl("wab: bad encrypted frame"); return -1; }
-    if (!noise_transport_decrypt(&tr, w.msg + 3, flen, plain)) { logl("wab: frame does not decrypt"); return -1; }
+    if (!msg_have) {
+        pump_quiet = 1;
+        if (!pump(-1, 1, timeout_ms)) { pump_quiet = 0; return w.state == WS_CLOSED || w.state == WS_ERROR || t.error ? -1 : 0; }
+        pump_quiet = 0;
+        w.msg_ready = 0; msg_off = 0; msg_have = 1;
+        if (io->debug && w.msg_len) { wa_fmt(line, sizeof line, "  ws message %u bytes", w.msg_len); logl(line); }
+    }
+    if (w.msg_len - msg_off < 3 + 16) { logl("wab: bad encrypted frame (short)"); msg_have = 0; return -1; }
+    flen = ((uint32_t)w.msg[msg_off] << 16) | ((uint32_t)w.msg[msg_off + 1] << 8) | w.msg[msg_off + 2];
+    if (flen < 16 || flen > w.msg_len - msg_off - 3 || flen - 16 > WA_PROBE_MSG_MAX) { wa_fmt(line, sizeof line, "wab: bad encrypted frame (length %u in a %u-byte message at %u)", flen, w.msg_len, msg_off); logl(line); msg_have = 0; return -1; }
+    if (!noise_transport_decrypt(&tr, w.msg + msg_off + 3, flen, plain)) { logl("wab: frame does not decrypt"); msg_have = 0; return -1; }
     *plen = flen - 16;
+    msg_off += 3 + flen;
+    if (msg_off >= w.msg_len) msg_have = 0;
+    else { wa_fmt(line, sizeof line, "ws: %u more bytes of frames in this message", w.msg_len - msg_off); logl(line); }
     return 1;
 }
 
@@ -745,7 +756,7 @@ int wa_probe_run(wa_probe_io *pio)
 static void sim_open(wa_probe_io *pio)
 {
     static uint8_t out[1024]; uint32_t i;
-    io = pio; t_start = io->now_ms(); pend_len = 0; io->tunnel = 1; io->result[0] = 0;
+    io = pio; t_start = io->now_ms(); pend_len = 0; io->tunnel = 1; io->result[0] = 0; msg_have = 0; msg_off = 0;
     io->paired_now = io->logged_in = 0; io->pongs = 0; io->qr_shown = 0;
     io->t_qr_shown = io->t_pair_success = io->d_verify = io->d_sign = io->t_sign_sent = io->t_515 = io->t_login_connect = io->t_login_accepted = 0;
     iq_counter = 0; iq_prefix[0] = 0;

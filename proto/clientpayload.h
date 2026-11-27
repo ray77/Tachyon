@@ -21,9 +21,10 @@
 #define WA_VERSION_STRING    "2.3000.1054751086"
 #define WA_DEVICE_OS         "Amiga 500"
 /* DeviceProps.platformType and the matching QR client id (whatsmeow getQRClientType): 0 UNKNOWN -> "0" (the whatsmeow
- * default, byte-checked), 1 CHROME -> "1", 2 FIREFOX -> "3", 5 SAFARI -> "6", 6 EDGE -> "2". The phone shows the Os
- * string under "linked devices"; posing as a browser would clash with Os "Amiga 500" and the non-browser UserAgent. */
-#define WA_PLATFORM_TYPE     0u
+ * default), 1 CHROME -> "1", 2 FIREFOX -> "3", 5 SAFARI -> "6", 6 EDGE -> "2". With UNKNOWN the phone lists the
+ * companion as "other device" (seen 2026-11-27); FIREFOX makes it "Firefox (Amiga 500)" like an ordinary web session,
+ * which is what the user wants shown. The value is sent at registration only, so a change needs a new pairing. */
+#define WA_PLATFORM_TYPE     2u
 #if WA_PLATFORM_TYPE == 0
 #define WA_PAIR_CLIENT_ID    "0"
 #elif WA_PLATFORM_TYPE == 1

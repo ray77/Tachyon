@@ -38,7 +38,8 @@ static void log_line(void *ctx, const char *s) { (void)ctx; printf("+%7.2fs  %s\
 /* ---- the fake server ------------------------------------------------------------------------- */
 static uint8_t *pd_frame, *ps_frame; static uint32_t pd_len, ps_len;
 static uint8_t queue[8][4096]; static uint32_t qlen[8], qhead, qtail;           /* server -> client frames (decrypted node frames) */
-static int closed_by_server, stage, codes_shown, ticks, pongs, keepalives, acks, signs, errors, closes;
+static int coalesce;                                                              /* deliver the next two queued frames in ONE WebSocket message */
+static int closed_by_server, closed_after_queue, stage, codes_shown, ticks, pongs, keepalives, acks, signs, errors, closes;
 static uint32_t scan_at_code;                                                     /* which code the "phone" scans (1-based); 0 = never */
 static uint32_t exp_first_ms = 3000, exp_next_ms = 1500;
 static uint8_t sign_frame[2048]; static uint32_t sign_len;
@@ -60,16 +61,21 @@ static int32_t io_recv(void *ctx, uint8_t *p, uint32_t cap, uint32_t timeout_ms)
 {
     (void)ctx;
     if (closed_by_server) return -1;
+    if (qhead == qtail && closed_after_queue) { closed_by_server = 1; return -1; }
     if (qhead == qtail) { usleep(timeout_ms * 1000 > 200000 ? 200000 : timeout_ms * 1000); return 0; }
     {
-        uint32_t len = qlen[qhead & 7], flen = len + 16, o = 0;
-        const uint8_t *f = queue[qhead & 7];
-        qhead++;
-        if (cap < flen + 3 + 4) return -1;
+        uint32_t o = 0, total = 0, k, n = coalesce && qtail - qhead >= 2 ? 2 : 1;
+        for (k = 0; k < n; k++) total += 3 + qlen[(qhead + k) & 7] + 16;
+        if (coalesce) coalesce = 0;
+        if (cap < total + 4) return -1;
         p[o++] = 0x82;
-        if (flen + 3 < 126) p[o++] = (uint8_t)(flen + 3); else { p[o++] = 126; p[o++] = (uint8_t)((flen + 3) >> 8); p[o++] = (uint8_t)(flen + 3); }
-        p[o++] = (uint8_t)(flen >> 16); p[o++] = (uint8_t)(flen >> 8); p[o++] = (uint8_t)flen;
-        memcpy(p + o, f, len); o += len; memset(p + o, 0xee, 16); o += 16;
+        if (total < 126) p[o++] = (uint8_t)total; else { p[o++] = 126; p[o++] = (uint8_t)(total >> 8); p[o++] = (uint8_t)total; }
+        for (k = 0; k < n; k++) {
+            uint32_t len = qlen[qhead & 7], flen = len + 16; const uint8_t *f = queue[qhead & 7];
+            qhead++;
+            p[o++] = (uint8_t)(flen >> 16); p[o++] = (uint8_t)(flen >> 8); p[o++] = (uint8_t)flen;
+            memcpy(p + o, f, len); o += len; memset(p + o, 0xee, 16); o += 16;
+        }
         return (int32_t)o;
     }
 }
@@ -104,7 +110,7 @@ static int io_send(void *ctx, const uint8_t *p, uint32_t n)
                     CHECK(di && di->val.kind == WAB_BYTES && di->val.str.len > 100);
                     ki = di ? wab_get_attr(di, "key-index") : 0; CHECK(ki && wab_str_eq(&ki->str, "3"));
                     memcpy(sign_frame, pl + 3, flen - 16); sign_len = flen - 16;
-                    if (stage == 3) { stage = 4; enqueue_stream_error("515"); }
+                    if (stage == 3) { wab_node end; stage = 4; enqueue_stream_error("515"); wab_node_init(&end, "xmlstreamend"); enqueue_node(&end); coalesce = 1; closed_after_queue = 1; }
                 }
                 else if (type && wab_str_eq(&type->str, "error")) {
                     const wab_node *er = wab_get_child(nd, "error"); const wab_value *c, *t;
@@ -141,7 +147,7 @@ static int saved; static void save_creds(void *ctx) { (void)ctx; saved++; }
 
 static void reset(wa_probe_io *io, wa_creds *creds)
 {
-    qhead = qtail = 0; closed_by_server = 0; stage = 1; codes_shown = ticks = pongs = keepalives = acks = signs = errors = closes = 0; sign_len = 0; saved = 0;
+    qhead = qtail = 0; closed_by_server = 0; closed_after_queue = 0; coalesce = 0; stage = 1; codes_shown = ticks = pongs = keepalives = acks = signs = errors = closes = 0; sign_len = 0; saved = 0;
     err_code[0] = err_text[0] = 0;
     memset(creds, 0, sizeof *creds); test_identity(&creds->id);
     io->creds = creds; io->creds_loaded = 1; io->paired_now = 0;
@@ -172,7 +178,7 @@ int main(int argc, char **argv)
     CHECK(strcmp(creds.jid_user, "4917612345678") == 0 && creds.jid_device == 7 && strcmp(creds.lid_user, "123456789012345") == 0);
     CHECK(strcmp(creds.platform, "android") == 0 && strcmp(creds.business, "Amiga Test") == 0);
     CHECK(creds.adv.key_index == 3 && creds.adv.signed_by_us && wa_pair_check_device_sig(&creds.adv, &creds.id));
-    CHECK(io.t_515 && io.t_sign_sent && io.t_pair_success && io.t_qr_shown && io.d_verify && io.qr_shown == 2);
+    CHECK(io.t_515 && io.t_sign_sent && io.t_pair_success && io.t_qr_shown && io.d_verify && io.qr_shown == 2);   /* the 515 was the first of two frames in one message */
     { f = fopen("build/pair_sim_sign.bin", "wb"); if (f) { fwrite(sign_frame, 1, sign_len, f); fclose(f); } }
 
     /* ---- B: wrong ADV secret in the identity: error IQ 401 hmac-mismatch, close, no sign ---- */

@@ -29,6 +29,7 @@ import (
 
 	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/proto/waAdv"
+	"go.mau.fi/whatsmeow/proto/waCompanionReg"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/util/keys"
@@ -71,6 +72,7 @@ func testDevice_() *store.Device {
 	var sig [64]byte
 	copy(sig[:], spkSig)
 	store.DeviceProps.Os = proto.String("Amiga 500")
+	store.DeviceProps.PlatformType = waCompanionReg.DeviceProps_FIREFOX.Enum() // proto/clientpayload.h WA_PLATFORM_TYPE
 	return &store.Device{
 		NoiseKey:       noiseKey,
 		IdentityKey:    identityKey,
