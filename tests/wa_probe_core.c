@@ -1225,9 +1225,53 @@ static uint32_t make_prekeys(uint32_t count, const char *when)
     return hb.error ? 0 : 1;
 }
 
+/* a typed line, from the chat interface or the console, sent right away - from the offline batch as well as from the
+ * chat loop (whatsmeow sends at any time; live attempt 9: "senden dauert sehr lange" - the first line waited for the
+ * batch's quiet window and the precomputation, 60-105 s after <active/>). 1 = a line was taken, -1 = /quit, 0 = none */
+static uint32_t last_activity;
+static int send_typed_line(void)
+{
+    const char *cu; uint32_t cd; int cl;
+    if (!io->sessions || !next_chat_line(&cu, &cd, &cl)) return 0;
+    last_activity = ms();
+    if (chat_line[0] == '/' && chat_line[1] == 'q') { logl("chat: /quit"); return -1; }
+    if (!cu) logl("chat: no peer configured (chat_user), line dropped");
+    else if (chat_line[0] && !send_text(cu, cd, cl, chat_line)) logl("chat: the line was not sent");
+    return 1;
+}
+/* the idle work: key material for the next start (two key pairs, es with the server static just verified) and the
+ * next one-time prekey batch, each once per run, with the heartbeat (pongs, pings, socket poll) running. Done when the
+ * chat has been idle for 15 s, or at the latest 90 s before the linger ends. 0 = connection lost. */
+static int idle_work(void)
+{
+    static heartbeat hb;
+    if (io->precompute_next && io->nextkeys && !io->nextkeys_ready) {
+        uint32_t t0 = ms();
+        heartbeat_init(&hb, &w, io->now_ms, 4000, hb_send, 0); hb.poll = drain_poll;
+        heartbeat_arm(&hb);
+        wa_nextkeys_compute(io->nextkeys, &rng, have_cached_static ? cached_static : 0);
+        heartbeat_disarm(); io->pongs += hb.sent;
+        io->t_nextkeys = ms() - t0; io->nextkeys_ready = 1;
+        wa_fmt(line, sizeof line, "keys: next connection's TLS + Noise ephemeral key pairs%s computed in %T s while online (%u pongs)",
+               have_cached_static ? " and es" : "", io->t_nextkeys, hb.sent); logl(line);
+        if (io->save_nextkeys) io->save_nextkeys(io->ctx);
+        if (hb.error) { logl("login: connection lost during the precomputation"); return 0; }
+    }
+    if (io->prekeys && wa_prekeys_pending(io->prekeys) < io->prekeys_wanted && io->prekeys->n < WA_PREKEYS_MAX) {
+        if (!make_prekeys(io->prekeys_wanted - wa_prekeys_pending(io->prekeys), "while online, for the next upload")) return 0;
+    }
+    return 1;
+}
+static int idle_work_due(uint32_t left)
+{
+    int pending = (io->precompute_next && io->nextkeys && !io->nextkeys_ready) ||
+                  (io->prekeys && wa_prekeys_pending(io->prekeys) < io->prekeys_wanted && io->prekeys->n < WA_PREKEYS_MAX);
+    return pending && (left <= 90000 || ms() - last_activity >= 15000);
+}
+
 static int post_login(void)
 {
-    char id[32]; const wab_node *r; uint32_t t_end, last_ka, cd; int gone, cl; const char *cu;
+    char id[32]; const wab_node *r; uint32_t t_end, last_ka; int gone, typed;
     /* 1. how many one-time prekeys of ours does the server hold */
     next_iq_id(id, sizeof id);
     if (!send_iq1(id, "encrypt", "get", "count", "prekey count query")) return fail("RESULT: logged in, but sending the prekey count query failed", 0, 0);
@@ -1290,45 +1334,32 @@ static int post_login(void)
              * attempt 8: the batch phase lasted the full 15 minutes on 45 pong results) */
             if (io->rx_bytes != rx_seen) { rx_seen = io->rx_bytes; if (long_total) last = ms(); }
             if (offline_done || ms() - last >= quiet || ms() - t0 > 900000) break;
+            typed = send_typed_line();                                       /* a typed line does not wait for the batch */
+            if (typed < 0) { close_ws(); return 1; }
+            if (typed) continue;
             n = recv_node(1000, &gone);
             if (gone) { logl("login: connection closed by the server during the offline batch"); close_ws(); return 1; }
-            if (n) { if (!is_ping_result(n)) last = ms(); if (!handle_async(n)) { close_ws(); return 1; } }
+            if (n) { if (!is_ping_result(n)) { last = ms(); last_activity = ms(); } if (!handle_async(n)) { close_ws(); return 1; } }
         }
         wa_fmt(line, sizeof line, "login: offline batch: %u stanzas in %T s%s", io->frames_after_login - before, ms() - t0, offline_done ? ", <offline> marker seen" : offline_preview ? ", NO <offline> marker (line quiet for 45 s)" : ", nothing announced (quiet for 8 s)"); logl(line);
     }
-    /* 4. idle time: the key material for the next start (two key pairs, es with the server static just verified),
-          pongs from the heartbeat keep the WebSocket alive meanwhile; the record goes to the caller right away */
-    if (io->precompute_next && io->nextkeys) {
-        static heartbeat hb; uint32_t t0 = ms();
-        heartbeat_init(&hb, &w, io->now_ms, 4000, hb_send, 0); hb.poll = drain_poll;
-        heartbeat_arm(&hb);
-        wa_nextkeys_compute(io->nextkeys, &rng, have_cached_static ? cached_static : 0);
-        heartbeat_disarm(); io->pongs += hb.sent;
-        io->t_nextkeys = ms() - t0; io->nextkeys_ready = 1;
-        wa_fmt(line, sizeof line, "keys: next connection's TLS + Noise ephemeral key pairs%s computed in %T s while online (%u pongs)",
-               have_cached_static ? " and es" : "", io->t_nextkeys, hb.sent); logl(line);
-        if (io->save_nextkeys) io->save_nextkeys(io->ctx);
-        if (hb.error) { logl("login: connection lost during the precomputation"); close_ws(); return 1; }
-    }
-    if (io->prekeys && wa_prekeys_pending(io->prekeys) < io->prekeys_wanted && io->prekeys->n < WA_PREKEYS_MAX) {
-        if (!make_prekeys(io->prekeys_wanted - wa_prekeys_pending(io->prekeys), "while online, for the next upload")) { close_ws(); return 1; }
-    }
-    /* 5. linger / chat: incoming stanzas (messages decrypted when a session store is set), typed lines sent to the peer */
+    /* 4. + 5. chat: incoming stanzas (messages decrypted when a session store is set), typed lines sent to the peer
+          right away; the idle work (key material for the next start, the next prekey batch) runs when the chat has been
+          quiet for 15 s or 90 s before the end, never in front of a typed line */
     if (io->sessions && io->chat_user && io->chat_send && !io->msgs_sent) { if (!send_text(io->chat_user, io->chat_device, io->chat_lid, io->chat_send)) logl("msg: the initial text was not sent (second try, after <active/>)"); }
     t_end = ms() + io->linger_ms; last_ka = ms();
     while (ms() < t_end) {
         const wab_node *n; uint32_t now = ms(), left = t_end - now;
         if (!keepalive_due()) break; (void)last_ka;
-        if (io->sessions && next_chat_line(&cu, &cd, &cl)) {
-            if (chat_line[0] == '/' && chat_line[1] == 'q') { logl("chat: /quit"); break; }
-            if (!cu) logl("chat: no peer configured (chat_user), line dropped");
-            else if (chat_line[0] && !send_text(cu, cd, cl, chat_line)) logl("chat: the line was not sent");
-            continue;
-        }
+        typed = send_typed_line();
+        if (typed < 0) break;
+        if (typed) continue;
+        if (idle_work_due(left)) { if (!idle_work()) break; continue; }
         n = recv_node(left < 1000 ? left : 1000, &gone);
         if (gone) { logl("login: connection closed by the server"); break; }
-        if (n && !handle_async(n)) break;
+        if (n) { if (!is_ping_result(n)) last_activity = ms(); if (!handle_async(n)) break; }
     }
+    if (idle_work_due(0) && w.state == WS_OPEN) idle_work();                   /* the linger ended before the idle work: now, before the close */
     close_ws();
     return 1;
 }
@@ -1366,7 +1397,7 @@ static int expect_success(const uint8_t *plain, uint32_t plen)
     if (!n) return fail("RESULT: login: first frame undecodable", 0, 0);
     if (wab_str_eq(&n->tag, "success")) {
         io->logged_in = 1; io->t_login_accepted = ms();
-        server_time(n); state(WA_CONN_LOGIN, "logged in"); ka_last = ms();
+        server_time(n); state(WA_CONN_LOGIN, "logged in"); ka_last = ms(); last_activity = ms();
         wa_fmt(line, sizeof line, "login: <success> - logged in as %s:%u@%s (lid %s, server time %s)", io->creds->jid_user, io->creds->jid_device, WA_SERVER_JID,
                attr_cstr(n, "lid", b1, sizeof b1), attr_cstr(n, "t", b2, sizeof b2)); logl(line);
         return 1;
