@@ -197,6 +197,7 @@ static UBYTE chat_named[GUI_MAX_CHATS];                              /* 1 = the 
 /* lines composed in the GUI wait here for the core's chat_input_to (one per linger-loop iteration, at most 1 s later) */
 struct out_line { char user[32]; int lid; ULONG gui_id; int len; char text[504]; };
 static struct out_line outq[4]; static int outq_head, outq_n; static ULONG sending_gui_id;
+static uint32_t outq_pushed, outq_woken;                                 /* lines queued / early returns from io_recv (one per line) */
 /* our message ids on the wire -> GUI message ids, for the server's <ack> and the peer's <receipt> */
 struct sent_ref { char msg_id[24]; ULONG gui_id; }; static struct sent_ref sent[8]; static int sent_next;
 
@@ -247,7 +248,7 @@ static void queue_outgoing(void)
     utf8[n] = 0;
     id = gui_add_message(chat, 1, now_unix(), utf8, n, GUI_ST_PENDING);
     if (outq_n >= 4) { gui_set_status(chat, id, GUI_ST_FAILED); log_line(0, "chat: outgoing queue full, line dropped"); return; }
-    o = &outq[(outq_head + outq_n) & 3]; outq_n++;
+    o = &outq[(outq_head + outq_n) & 3]; outq_n++; outq_pushed++;
     for (i = 0; jid[i] && jid[i] != '@' && i + 1 < (int)sizeof o->user; i++) o->user[i] = jid[i];
     o->user[i] = 0; o->lid = jid[i] == '@' && jid[i + 1] == 'l'; o->gui_id = id; o->len = n;
     for (i = 0; i <= n; i++) o->text[i] = utf8[i];
@@ -364,7 +365,7 @@ static int gui_start(void)
     if (creds.jid_user[0]) gui_add_chat(self_jid, "Du");
     if (chat_peer[0]) chat_for(chat_peer, 0, 0);
     if (sessions) for (i = 0; i < sessions->n; i++) chat_for(sessions->e[i].user, sessions->e[i].lid, 0);
-    gui_set_connection(GUI_CONN_CONNECTING, "Schl\xFCssel werden berechnet ...");
+    gui_set_connection(GUI_CONN_CONNECTING, "Schl\xC3\xBCssel werden berechnet ...");   /* UTF-8: gui_set_connection converts to Latin-1 (live run 9 showed "Schl?ssel") */
     gui_redraw_all();
     fast_after_gui = AvailMem(MEMF_FAST);
     wa_fmt(l, sizeof l, "gui: screen + chat interface up in %u ms: %u chats, arena 32 KiB in %s RAM, text %s, Fast RAM %u -> %u bytes free", now_ms() - t0, (uint32_t)gui_chat_count(),
@@ -377,7 +378,7 @@ static void gui_end(int ok, const char *result)
 {
     uint32_t t0; char l[64];
     if (!gui_on) return;
-    wa_fmt(l, sizeof l, "%s - Taste schlie\xDFt", ok ? "Ende" : "Abbruch");
+    wa_fmt(l, sizeof l, "%s - Taste schlie\xC3\x9Ft", ok ? "Ende" : "Abbruch");
     gui_set_connection(ok ? GUI_CONN_OFFLINE : GUI_CONN_ERROR, l);
     gui_redraw_dirty();
     (void)result;
@@ -481,6 +482,8 @@ static int32_t io_recv(void *ctx, uint8_t *p, uint32_t cap, uint32_t timeout_ms)
         if (r < 0) return r;
         if (r > 0) { if (now_ms() - gui_last_tick >= 200) gui_tick(); return r; }
         gui_tick();                                              /* a key (woken) or the slice's end */
+        if (outq_pushed != outq_woken) { outq_woken = outq_pushed; return 0; }   /* a line was typed: back to the core once, so the chat loop sends it
+                                                                                  * before its next wait (outside the chat loop the core just waits again) */
         used = now_ms() - t0;
         if (used >= timeout_ms) return 0;
         left = timeout_ms - used;
