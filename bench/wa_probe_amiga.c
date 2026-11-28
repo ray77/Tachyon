@@ -182,7 +182,7 @@ static void chat_recv(void *ctx, const char *from, const char *text)
 
 
 /* ---- the chat interface (ui/gui.c): the core's event callbacks feed the model, the ticks paint and read keys ---------- */
-#define GUI_ARENA_SIZE (48UL * 1024UL)
+#define GUI_ARENA_SIZE (32UL * 1024UL)       /* 512 descriptors + 24 KiB text; 48 KiB left no Chip RAM for the staging buffer (live attempt 7) */
 static UBYTE *gui_arena; static int gui_arena_chip;                 /* Fast RAM when the stack left enough, else Chip */
 static ULONG fast_before_gui, fast_after_gui;
 static char self_jid[GUI_JID_MAX];                                   /* "<own number>@s.whatsapp.net": the self chat */
@@ -352,7 +352,7 @@ static int gui_start(void)
     if (AvailMem(MEMF_FAST | MEMF_LARGEST) >= 1024UL * 1024UL) gui_arena = (UBYTE *)AllocMem(GUI_ARENA_SIZE, MEMF_FAST | MEMF_CLEAR);
     if (!gui_arena) { gui_arena = (UBYTE *)AllocMem(GUI_ARENA_SIZE, MEMF_CHIP | MEMF_CLEAR); gui_arena_chip = 1; }
     if (!gui_arena) { gui_arena = (UBYTE *)AllocMem(GUI_ARENA_SIZE, MEMF_PUBLIC | MEMF_CLEAR); gui_arena_chip = 0; }
-    if (!gui_arena || gui_init(gui_arena, GUI_ARENA_SIZE) != 0) { log_line(0, "gui: no memory for the 48 KiB arena - running without the GUI"); scr_close(); screen_open = 0; return -1; }
+    if (!gui_arena || gui_init(gui_arena, GUI_ARENA_SIZE) != 0) { log_line(0, "gui: no memory for the 32 KiB arena - running without the GUI"); scr_close(); screen_open = 0; return -1; }
     gui_on = 1;
     gui_set_tz(3600);                                                    /* CET; summer time would need +7200 */
     if (!now_unix() && host_now[0] && (unix_base = clockstr_to_unix(host_now)) != 0) unix_base_ms = now_ms();   /* the Amiga clock is unset: host time */
@@ -364,7 +364,7 @@ static int gui_start(void)
     gui_set_connection(GUI_CONN_CONNECTING, "Schl\xFCssel werden berechnet ...");
     gui_redraw_all();
     fast_after_gui = AvailMem(MEMF_FAST);
-    wa_fmt(l, sizeof l, "gui: screen + chat interface up in %u ms: %u chats, arena 48 KiB in %s RAM, text %s, Fast RAM %u -> %u bytes free", now_ms() - t0, (uint32_t)gui_chat_count(),
+    wa_fmt(l, sizeof l, "gui: screen + chat interface up in %u ms: %u chats, arena 32 KiB in %s RAM, text %s, Fast RAM %u -> %u bytes free", now_ms() - t0, (uint32_t)gui_chat_count(),
            gui_arena_chip ? "Chip" : "Fast", gui_text_mode() == GUI_TEXT_FAST ? "own renderer" : "OS Text()", fast_before_gui, fast_after_gui);
     log_line(0, l);
     return 0;
@@ -601,7 +601,7 @@ int main(void)
     crypto_yield_hook = progress_tick; prog_last = now_ms();     /* dots while computing; the heartbeat chains to it */
     if (!wa_probe_prepare(&io)) { out(io.result); out("\n"); gui_end(0, io.result); finish(); return 10; }
     t_prep = now_ms() - t_prep;
-    { char l[120]; wa_fmt(l, sizeof l, "mem: after the buffers (%u Chip blocks): Chip %u KB free, Fast %u KB free (before the stack starts)", (uint32_t)chip_n, (uint32_t)AvailMem(MEMF_CHIP) / 1024, (uint32_t)AvailMem(MEMF_FAST) / 1024); log_line(0, l); }
+    { char l[120]; wa_fmt(l, sizeof l, "mem: after the buffers (%u Chip blocks, staging %u KB): Chip %u KB free, Fast %u KB free (before the stack starts)", (uint32_t)chip_n, chip_n ? (uint32_t)chip_sizes[chip_n - 1] / 1024 : 0, (uint32_t)AvailMem(MEMF_CHIP) / 1024, (uint32_t)AvailMem(MEMF_FAST) / 1024); log_line(0, l); }
     if (gui_on) { gui_set_connection(GUI_CONN_CONNECTING, "Warte auf den TCP/IP-Stack ..."); gui_tick(); }
 
     /* the stack: TheWire13 is started by the Startup-Sequence just after us and needs a few seconds */

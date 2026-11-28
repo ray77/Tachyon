@@ -32,9 +32,12 @@ static ws_client w;
  * io->alloc, so they live in Chip RAM (~410 KB free on the A500 after the screen; Fast RAM is the scarce one: the stack's
  * TCP pool and the code). Otherwise static. */
 #define WA_PROBE_ARENA 12288
-#define WA_PROBE_STAGE 98304        /* the heartbeat poll's staging buffer: the rest of the offline batch (33 stanzas,
+#define WA_PROBE_STAGE 65536        /* the heartbeat poll's staging buffer: the rest of the offline batch (33 stanzas,
                                        ~4 KB without the history frame) must fit while the 68000 computes an X3DH (54 s)
-                                       - live attempt 6 lost the connection with 8 KB here (window closed for a minute) */
+                                       - live attempt 6 lost the connection with 8 KB here (window closed for a minute).
+                                       WA_PROBE_ALLOC: the largest of 64/32/16/8 KB that Chip RAM still gives (96 KB did
+                                       not fit next to the screen and the GUI arena in live attempt 7), stage_cap says which */
+static uint32_t stage_cap = WA_PROBE_STAGE;
 #ifdef WA_PROBE_ALLOC
 static uint8_t *msgbuf, *pend, *inflated, *arena_mem, *stage;
 static int big_buffers(wa_probe_io *pio)
@@ -42,7 +45,8 @@ static int big_buffers(wa_probe_io *pio)
     if (msgbuf) return 1;
     if (!pio->alloc) return 0;
     msgbuf = pio->alloc(pio->ctx, WA_PROBE_MSGBUF); pend = pio->alloc(pio->ctx, WA_PROBE_MSG_MAX); inflated = pio->alloc(pio->ctx, WA_PROBE_MSG_MAX);
-    arena_mem = pio->alloc(pio->ctx, WA_PROBE_ARENA); stage = pio->alloc(pio->ctx, WA_PROBE_STAGE);
+    arena_mem = pio->alloc(pio->ctx, WA_PROBE_ARENA);
+    for (stage_cap = WA_PROBE_STAGE; stage_cap >= 8192 && !(stage = pio->alloc(pio->ctx, stage_cap)); stage_cap >>= 1) ;
     return msgbuf && pend && inflated && arena_mem && stage;
 }
 #else
@@ -60,11 +64,11 @@ static void drain_poll(void *hio)
 {
     int32_t r; (void)hio;
     if (in_pump || !io) return;
-    if (stage_len >= WA_PROBE_STAGE) {                /* the window stays closed from here on: say so once per fill (live attempt 6 lost the line this way) */
+    if (stage_len >= stage_cap) {                /* the window stays closed from here on: say so once per fill (live attempt 6 lost the line this way) */
         if (!stage_full_noted) { stage_full_noted = 1; wa_fmt(line, sizeof line, "ws: staging buffer full (%u bytes) while computing: the socket is not read until the pump runs", stage_len); logl(line); }
         return;
     }
-    r = io->recv(io->ctx, stage + stage_len, WA_PROBE_STAGE - stage_len, 0);
+    r = io->recv(io->ctx, stage + stage_len, stage_cap - stage_len, 0);
     if (r > 0) { stage_len += (uint32_t)r; io->rx_bytes += (uint32_t)r; if (stage_len > stage_peak) stage_peak = stage_len; }
 }
 static uint8_t rdbuf[8192];
@@ -566,7 +570,7 @@ static void close_ws(void)
     uint8_t cl[16]; uint32_t n = ws_frame_close(&w, 1000, cl, sizeof cl);
     if (n) app_send(cl, n);
     state(WA_CONN_CLOSED, "closed");
-    if (stage_peak) { wa_fmt(line, sizeof line, "ws: the staging buffer held at most %u of %u bytes while the 68000 computed", stage_peak, (uint32_t)WA_PROBE_STAGE); logl(line); }
+    if (stage_peak) { wa_fmt(line, sizeof line, "ws: the staging buffer held at most %u of %u bytes while the 68000 computed", stage_peak, stage_cap); logl(line); }
     /* tickets arrive after the handshake, interleaved with application data: report the final count here */
     if (!io->tunnel) { io->tls_tickets = t.tickets; wa_fmt(line, sizeof line, "tls: %u NewSessionTicket(s) received during the connection (PSK resumption not implemented)", t.tickets); logl(line); }
 }
