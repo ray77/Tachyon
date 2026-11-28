@@ -513,30 +513,6 @@ Vierter Live-Chat-Versuch (SIGNAL.md 6, `make run-chat … FAST=2048`, FS-UAE zy
 
 Der erste Text eines Amiga 500 an WhatsApp, auf dem Telefon angekommen (Selbst-Chat, vom Nutzer bestätigt): 129 s nach dem Programmstart liegt die Server-Bestätigung vor, davon 64 s X3DH auf dem 68000 (Erwartung aus dem Vektor-Runner war ~54 s; live kommt die XEdDSA-Prüfung der Prekey-Signatur dazu, 9,4 s). Beim zweiten Text an dasselbe Gerät entfällt X3DH (Sitzung im Datensatz): Verschlüsseln 0,3 s, Ack ~0,5 s. Die Antwort des Telefons kam nicht mehr an – nach `<active/>` gab die Stapel-Schleife mitten im 166-KB-History-Frame auf (SIGNAL.md 6, Versuche 4 und 5; Versuch 5 misst den Empfang auf dem 68000 mit **~3,2 KB/s**: TLS-Entschlüsselung, 166 KB ≈ 52 s); Schritt 25 ist der Empfang. Signal-Zeiten des Vektor-Runners unter FS-UAE (`make run`) stehen noch aus; unter vamos (nicht zyklengenau) laufen alle Vektoren durch.
 
-## 2026-11-28 – Schritt 25: Chat-Oberfläche in der Probe, Live-Lauf 6 (Empfangspfad)
-
-Sechster Live-Chat-Versuch, der erste mit der eingebauten Oberfläche (`ui/gui.c` in `bench/wa_probe_amiga.c`, UI.md „Einbindung in die Probe“; `make run-chat … CHAT_SEND='' CHAT_LINGER=300 FAST=2048`, Empfangslauf ohne Skripttext). Log `build/chat6.log`.
-
-| Phase | Lauf 6 |
-|---|---:|
-| Programmstart → Schirm + GUI gemalt (1 Chat, Arena im Chip-RAM) | 1,48 s (bei 3,1 s) |
-| Programmstart → `<success>` / `<active/>` | 50,9 s / 54,7 s (TLS 21,0 s, Noise-Handshake 22,6 s mit gespeichertem `es`) |
-| `offline_preview`: 33 Stanzas (3 Nachrichten, 1 Quittung, 6 Benachrichtigungen, 23 Status) | 56,7 s |
-| 166 587-Byte-Frame: Beginn → 164,5 KB | 58,0 s → 116,8 s (**2,8 KB/s**, wie Lauf 5) |
-| die letzten 2 025 Byte des Frames | **39 s** (116,8 → 155,9 s; kein Byte dazwischen, Stall wie in Lauf 4) |
-| Frame dekodieren (166 487-Byte-`pkmsg` des eigenen Telefons, zu lang: **bestätigt**, verworfen) | 17,8 s (173,7 s) |
-| zweite Offline-Nachricht (613-Byte-`pkmsg`, `@lid`): X3DH als Responder + Entschlüsseln | **53,6 s** → `[protocol message, type 5]`, 454 Byte Klartext |
-| Quittung senden | **fehlgeschlagen** (Verbindung weg), WebSocket geschlossen bei 234,5 s |
-| GUI: Ticks / Mittel / Maximum / über 100 ms | 143 / 19 ms / 300 ms / 2 |
-| Speicher nach Start beider Programme (SYS:avail.txt) | Fast 62 KB frei, Chip 255 KB frei |
-
-Was zu sehen war: Kopfzeile mit grünem Punkt „online“, Uhr nach der Serverzeit, der Selbst-Chat „Du“; die vom Nutzer getippte Zeile als ausstehende Blase (Uhr-Symbol) mit Listeneintrag und Nachrichtenzahl in der Kopfzeile. Die Zeile wurde **nicht** gesendet: die Linger-Schleife, in der der Core getippte Zeilen abholt, wurde nie erreicht, weil die Verbindung im Offline-Stapel endete. Zwei Mängel der Oberfläche aus dem Lauf, beide behoben: das Tippen kroch (ein Zeichen je 200-ms-Tick, während der 68000 rechnet; jetzt holt ein Tick alle wartenden Tasten), und die Uhr sprang auf 16:03 des Vortags (das `t=` einer Offline-Nachricht wurde als Serveruhr genommen; jetzt zählen nur Stanzas ohne `offline` und nur vorwärts).
-
-### Einordnung
-
-Der Empfangspfad ist zwei Schritte weiter als in Lauf 5: die 166-KB-History-Stanza des Telefons ist zum ersten Mal **bestätigt** (sie sollte beim nächsten Login nicht mehr kommen), und eine echte Offline-Nachricht des Telefons wurde mit X3DH als Responder **entschlüsselt** (eine Protokollnachricht, Typ 5 – App-State-Schlüssel, kein Text). Dann wiederholt sich das Muster der Läufe 4 und 5: nach einer langen Rechenphase, in der der Socket kaum gelesen wird (17 s Decode ohne Lesen, 53 s X3DH mit 8-KB-Staging-Puffer), ist die Verbindung weg; dazu der 39-s-Stall am Frame-Ende. Verdacht: Nullfenster über eine Minute (8-KiB-Fenster + 8 KB Staging) gegen slirp/Server. Nächster Hebel liegt im Core (Signal-Sitzung): Staging-Puffer im Chip-RAM auf ~128 KB (frei: 255 KB) und ein Lesen auch in der Decode-Schleife. Die Oberfläche selbst war unauffällig: 19 ms je Tick, 300 ms Maximum, kein verlorenes Zeichen, Haken/Uhr/Zähler wie vorgesehen.
-
-
 ## 2026-11-28 – Schritt 25: Offline-Stapel empfangen – 166-KB-Frame, X3DH als Responder (Live-Versuch 6)
 
 Empfangslauf mit der Chat-GUI auf dem Schirm (SIGNAL.md 6, Versuch 6). Zeiten seit Programmstart.
@@ -552,3 +528,26 @@ Empfangslauf mit der Chat-GUI auf dem Schirm (SIGNAL.md 6, Versuch 6). Zeiten se
 ### Einordnung
 
 Der Weg herein ist langsamer als der hinaus: 166 KB kosten eine Minute Empfang (TLS-Entschlüsselung, Chip-Bus mit dem Schirm geteilt) und 37 s Noise-Entschlüsselung – zusammen mehr als der ganze Login. Der History-Frame ist jetzt bestätigt und kommt nicht wieder; die laufenden Kosten sind die Offline-Nachrichten (je ~54 s für ein neues Gerät, danach ~1 s je Nachricht). Die GCM-Zeiten sind Software (`crypto/ref/aes.c`); der Blitter-AES/GCM (`crypto/blit`, Schritt 12) ist in der Probe noch nicht eingehängt – dort liegt der nächste Faktor 2–3.
+
+## 2026-11-28 – Schritt 26: Chat-Oberfläche in der Probe (Live-Lauf 6, die Sicht der Oberfläche)
+
+Derselbe Lauf wie Schritt 25 (dort der Empfangspfad), hier die Oberfläche: der erste Live-Lauf mit der eingebauten GUI (`ui/gui.c` in `bench/wa_probe_amiga.c`, UI.md „Einbindung in die Probe“; `make run-chat … CHAT_SEND='' CHAT_LINGER=300 FAST=2048`, Empfangslauf ohne Skripttext). Log `build/chat6.log`.
+
+| Phase | Lauf 6 |
+|---|---:|
+| Programmstart → Schirm + GUI gemalt (1 Chat, Arena im Chip-RAM) | 1,48 s (bei 3,1 s) |
+| Programmstart → `<success>` / `<active/>` | 50,9 s / 54,7 s (TLS 21,0 s, Noise-Handshake 22,6 s mit gespeichertem `es`) |
+| `offline_preview`: 33 Stanzas (3 Nachrichten, 1 Quittung, 6 Benachrichtigungen, 23 Status) | 56,7 s |
+| 166 587-Byte-Frame: erstes → letztes Byte | 58,0 s → 116,8 s (164,5 KB in 58,8 s = **2,8 KB/s**; Lauf 5 ohne Schirm 3,2 KB/s: der Schirm kostet ≈ 12 %) |
+| Noise-Entschlüsselung des Frames an Ort und Stelle (davor stand der 68000 nicht an der Leitung) | 39 s (116,8 → 155,9 s) |
+| Frame dekodieren (166 487-Byte-`pkmsg` des eigenen Telefons, zu lang: **bestätigt**, verworfen) | 17,8 s (173,7 s) |
+| zweite Offline-Nachricht (613-Byte-`pkmsg`, `@lid`): X3DH als Responder + Entschlüsseln | **53,6 s** → `[protocol message, type 5]`, 454 Byte Klartext |
+| Quittung senden | **fehlgeschlagen** (Verbindung weg), WebSocket geschlossen bei 234,5 s |
+| GUI: Ticks / Mittel / Maximum / über 100 ms | 143 / 19 ms / 300 ms / 2 |
+| Speicher nach Start beider Programme (SYS:avail.txt) | Fast 62 KB frei, Chip 255 KB frei |
+
+Was zu sehen war: Kopfzeile mit grünem Punkt „online“, Uhr nach der Serverzeit, der Selbst-Chat „Du“; die vom Nutzer getippte Zeile als ausstehende Blase (Uhr-Symbol) mit Listeneintrag und Nachrichtenzahl in der Kopfzeile. Die Zeile wurde **nicht** gesendet: die Linger-Schleife, in der der Core getippte Zeilen abholt, wurde nie erreicht, weil die Verbindung im Offline-Stapel endete. Zwei Mängel der Oberfläche aus dem Lauf, beide behoben: das Tippen kroch (ein Zeichen je 200-ms-Tick, während der 68000 rechnet; jetzt holt ein Tick alle wartenden Tasten), und die Uhr sprang auf 16:03 des Vortags (das `t=` einer Offline-Nachricht wurde als Serveruhr genommen; jetzt zählen nur Stanzas ohne `offline` und nur vorwärts).
+
+### Einordnung
+
+Der Empfangspfad ist zwei Schritte weiter als in Lauf 5: die 166-KB-History-Stanza des Telefons ist zum ersten Mal **bestätigt** (sie sollte beim nächsten Login nicht mehr kommen), und eine echte Offline-Nachricht des Telefons wurde mit X3DH als Responder **entschlüsselt** (eine Protokollnachricht, Typ 5 – App-State-Schlüssel, kein Text). Dann wiederholt sich das Muster der Läufe 4 und 5: nach einer langen Rechenphase, in der der Socket kaum gelesen wird (17 s Decode ohne Lesen, 53 s X3DH mit 8-KB-Staging-Puffer), ist die Verbindung weg; dazu der 39-s-Stall am Frame-Ende. Verdacht: Nullfenster über eine Minute (8-KiB-Fenster + 8 KB Staging) gegen slirp/Server. Nächster Hebel liegt im Core (Signal-Sitzung): Staging-Puffer im Chip-RAM auf ~128 KB (frei: 255 KB) und ein Lesen auch in der Decode-Schleife. Die Oberfläche selbst war unauffällig: 19 ms je Tick, 300 ms Maximum, kein verlorenes Zeichen, Haken/Uhr/Zähler wie vorgesehen.
