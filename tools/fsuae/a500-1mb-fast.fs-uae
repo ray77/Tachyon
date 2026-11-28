@@ -14,3 +14,6 @@ window_height = 512
 fullscreen = 0
 video_sync = 0
 zoom = auto
+# no keyboard joystick in port 1: the Amiga must see the cursor keys (see a500-1mb-fast-net.fs-uae)
+joystick_port_1 = none
+joystick_port_1_mode = nothing

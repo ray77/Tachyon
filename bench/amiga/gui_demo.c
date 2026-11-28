@@ -34,6 +34,7 @@ static void out(const char *s)
     if (logfile) Write(logfile, (APTR)s, n);
 }
 static void out_dec(ULONG u) { char b[12]; int i = 11; b[i] = 0; do { b[--i] = (char)('0' + u % 10); u /= 10; } while (u); out(b + i); }
+static void out_hex(ULONG u, int digits) { char b[9]; int i = digits; b[i] = 0; while (i > 0) { ULONG d = u & 15; b[--i] = (char)(d < 10 ? '0' + d : 'A' + d - 10); u >>= 4; } out(b); }
 static void out_frac(ULONG tenths) { out_dec(tenths / 10); out("."); out_dec(tenths % 10); }
 
 static ULONG ticks_now(void)
@@ -263,6 +264,10 @@ int main(void)
             if (t - t_loop >= 60 * 50) break;
             key = scr_wait_key(5);                                     /* 100 ms poll keeps the echo under 50 ms + 100 */
             k0 = ticks_now();
+            if (key != SCR_KEY_TIMEOUT) {                              /* every key is logged: live run 15 (2026-11-28) saw no cursor keys */
+                out(key & SCR_KEY_RAW ? "key: raw 0x" : key == SCR_KEY_MOUSE ? "key: mouse 0x" : "key: char 0x");
+                out_hex((ULONG)(key & 0xFF), 2); out("\n");
+            }
             act = gui_pump(key);
             if (act == GUI_ACT_SEND) {
                 char utf8[2 * GUI_INPUT_MAX + 4];

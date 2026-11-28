@@ -92,7 +92,7 @@ int scr_open(void)
 
     for (i = 0; i < (int)sizeof nw; i++) ((UBYTE *)&nw)[i] = 0;
     nw.LeftEdge = 0; nw.TopEdge = 0; nw.Width = SCR_W; nw.Height = SCR_H; nw.DetailPen = 0; nw.BlockPen = 1;
-    nw.IDCMPFlags = IDCMP_RAWKEY | IDCMP_VANILLAKEY | IDCMP_MOUSEBUTTONS;
+    nw.IDCMPFlags = IDCMP_RAWKEY | IDCMP_MOUSEBUTTONS;   /* no VANILLAKEY: under 1.3 it swallows the cursor and F keys (offline test 2026-11-28); RawKeyConvert does the mapping */
     nw.Flags = WFLG_BACKDROP | WFLG_BORDERLESS | WFLG_ACTIVATE | WFLG_RMBTRAP | WFLG_SIMPLE_REFRESH | WFLG_NOCAREREFRESH;
     nw.Screen = scr_scr; nw.Type = CUSTOMSCREEN;
     scr_win = __int_OpenWindow(Intui, &nw);
