@@ -465,18 +465,25 @@ static void qr_hide(void *ctx, const char *status)
 }
 
 static int io_send(void *ctx, const uint8_t *p, uint32_t n) { (void)ctx; return bsdsock_send(&net, p, n); }
-/* the socket read; while the GUI is up a wait is cut into 200-ms slices with a GUI tick between them, so a typed key
- * echoes within ~0.2 s even though the core waits up to a second per call (polls with timeout 0 pass straight through) */
+/* the socket read while the GUI is up: the window's IDCMP signal is in the wait's wake mask, so a keypress ends the
+ * WaitSelect at once and is echoed before the wait resumes; the wait is also cut into 200-ms slices (stacks without
+ * sigmask support), and a tick runs every 200 ms even while data streams in (live runs 6-7b: during the 60-s receive of
+ * the offline batch every recv returned data, so no tick ran and typed keys piled up until the stream paused).
+ * Polls with timeout 0 pass straight through. */
 static int32_t io_recv(void *ctx, uint8_t *p, uint32_t cap, uint32_t timeout_ms)
 {
-    (void)ctx;
+    uint32_t t0, left; (void)ctx;
     if (!gui_on || timeout_ms < 100) return (int32_t)bsdsock_recv(&net, p, cap, timeout_ms);
+    net.wake_mask = scr_wake_mask();
+    t0 = now_ms(); left = timeout_ms;
     for (;;) {
-        uint32_t slice = timeout_ms < 200 ? timeout_ms : 200; int32_t r = (int32_t)bsdsock_recv(&net, p, cap, slice);
-        if (r != 0) return r;
-        timeout_ms -= slice;
-        gui_tick();
-        if (!timeout_ms) return 0;
+        uint32_t slice = left < 200 ? left : 200, used; int32_t r = (int32_t)bsdsock_recv(&net, p, cap, slice);
+        if (r < 0) return r;
+        if (r > 0) { if (now_ms() - gui_last_tick >= 200) gui_tick(); return r; }
+        gui_tick();                                              /* a key (woken) or the slice's end */
+        used = now_ms() - t0;
+        if (used >= timeout_ms) return 0;
+        left = timeout_ms - used;
     }
 }
 static int io_reconnect(void *ctx) { (void)ctx; return bsdsock_connect(&net, wa_addr, 443); }

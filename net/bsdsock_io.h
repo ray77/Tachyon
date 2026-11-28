@@ -20,6 +20,8 @@ typedef struct {
     LONG sock;                  /* descriptor, -1 when no connection */
     LONG err;                   /* bsdsocket Errno() of the last failed call */
     const char *fail;           /* name of the last failed call ("connect", "recv", ...) */
+    ULONG wake_mask;            /* task signals that end a bsdsock_recv wait early (the GUI window's port); 0 = none */
+    ULONG woken;                /* the signals that ended the last wait (0 after a timeout or data) */
 } bsdsock_io;
 
 int   bsdsock_open(bsdsock_io *io);                 /* 1 = library open (TheWire13 opens only while the stack runs) */

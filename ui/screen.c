@@ -442,6 +442,8 @@ static LONG scr_translate_event(UWORD code, UWORD qual, ULONG deadkeys)
 
 LONG scr_translate_raw(UWORD code, UWORD qualifier) { return scr_translate_event(code, qualifier, 0); }
 
+ULONG scr_wake_mask(void) { return scr_win ? 1UL << scr_win->UserPort->mp_SigBit : 0; }
+
 LONG scr_wait_key(ULONG timeout_ticks)
 {
     struct IntuiMessage *msg;

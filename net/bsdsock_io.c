@@ -115,7 +115,19 @@ LONG bsdsock_recv(bsdsock_io *io, uint8_t *p, uint32_t cap, uint32_t timeout_ms)
     if (io->sock < 0) return -1;
     BS_FD_ZERO(&rf); BS_FD_SET(io->sock, &rf);
     tv.tv_secs = (LONG)(timeout_ms / 1000); tv.tv_micro = (LONG)(timeout_ms % 1000) * 1000;
-    r = __bs_WaitSelect(io->base, io->sock + 1, &rf, 0, 0, &tv, 0);
+    /* the wake mask lets a keypress (Intuition's IDCMP signal) end the wait at once instead of after the timeout;
+     * WaitSelect returns 0 then and leaves the signals that fired in the mask (bsdsocket.library semantics) */
+    io->woken = 0;
+    if (io->wake_mask) {
+        ULONG sig = io->wake_mask;
+        r = __bs_WaitSelect(io->base, io->sock + 1, &rf, 0, 0, &tv, &sig);
+        if (r == 0) { io->woken = sig & io->wake_mask; return 0; }
+        if (r < 0) {                     /* a stack that rejects the mask: never use it again, wait plainly */
+            io->wake_mask = 0; io->fail = "WaitSelect(sigmask)"; io->err = 0;
+            BS_FD_ZERO(&rf); BS_FD_SET(io->sock, &rf);
+            r = __bs_WaitSelect(io->base, io->sock + 1, &rf, 0, 0, &tv, 0);
+        }
+    } else r = __bs_WaitSelect(io->base, io->sock + 1, &rf, 0, 0, &tv, 0);
     if (r == 0) return 0;
     if (r < 0) { bs_errno(io, "WaitSelect"); return -1; }
     r = __bs_recv(io->base, io->sock, p, (LONG)cap, 0);

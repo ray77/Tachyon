@@ -86,6 +86,7 @@ int  scr_bitmap_1bpp_rects_ex(int x, int y, int w_modules, int h_modules, const 
  * the ISO-8859-1 code for umlauts etc. under a national keymap), SCR_KEY_RAW | code for keys without a
  * character, SCR_KEY_TIMEOUT when nothing arrived. Key releases and pure qualifier presses are skipped. */
 LONG scr_wait_key(ULONG timeout_ticks);
+ULONG scr_wake_mask(void);                             /* the window's IDCMP signal: ends a WaitSelect() early on a keypress; 0 when no window */
 
 /* which translation produced the last key: 'V' IDCMP VANILLAKEY (Intuition's keymap), 'C' console.device
  * RawKeyConvert with the system keymap, 'T' the built-in US table (console.device unavailable), 0 none */
