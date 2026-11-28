@@ -31,6 +31,20 @@ struct wa_creds; struct wa_prekeys; struct wa_nextkeys; struct sig_store;
                                515 restart and the login connection; creds with a JID -> login only. Done = <success>. */
 #define WA_QR_REFS_MAX 8
 
+/* io->on_state: the connection's progress, for a status line (the glue adds DNS/TCP itself) */
+#define WA_CONN_TLS    1      /* TLS 1.3 handshake running */
+#define WA_CONN_WS     2      /* TLS up, WebSocket upgrade / Noise handshake running */
+#define WA_CONN_NOISE  3      /* Noise accepted: pairing or login follows */
+#define WA_CONN_LOGIN  4      /* <success>: logged in, still passive */
+#define WA_CONN_ONLINE 5      /* <active/> accepted */
+#define WA_CONN_CLOSED 6      /* WebSocket close sent */
+#define WA_CONN_ERROR  7      /* the run failed; detail = io->result */
+/* io->on_ack: the status of one of our messages */
+#define WA_MSG_SENT      1    /* the server's <ack class=message> */
+#define WA_MSG_DELIVERED 2    /* the peer's <receipt> (no type) */
+#define WA_MSG_READ      3    /* <receipt type=read> */
+#define WA_MSG_FAILED    4    /* <ack error=...> */
+
 #define WA_PROBE_MSG_MAX 16384      /* pending TLS plaintext, inflated node (handshake frames are < 1 KiB) */
 #define WA_PROBE_MSGBUF  180224     /* the WebSocket message buffer: one WA frame must fit whole (the offline batch's
                                        history/app-state stanza was 166 587 bytes in the live chat attempts); frames are
@@ -105,6 +119,17 @@ typedef struct wa_probe_io {
     const char *chat_send;          /* text to send once after <active/>, or 0 */
     int (*chat_input)(void *ctx, char *line, uint32_t cap);      /* optional: 1 = a typed line is ready (no newline) */
     void (*chat_recv)(void *ctx, const char *from, const char *text);   /* optional: a decrypted text (also logged) */
+    /* the chat interface (ui/gui.c on the A500, docs/UI.md "Client-Oberfläche"): optional event callbacks, each may be 0.
+       They only report, nothing in the protocol depends on them; the host glue leaves them unset. */
+    void (*on_state)(void *ctx, int state, const char *detail);             /* WA_CONN_*; detail: the log's short English note */
+    void (*on_time)(void *ctx, uint32_t unix_seconds);                      /* the server's clock: a stanza's t= attribute */
+    void (*on_text)(void *ctx, const char *user, uint32_t device, int lid, const char *pushname, uint32_t ts, const char *utf8, uint32_t len);
+                                                                            /* a decrypted text as received (UTF-8, not NUL terminated); pushname = notify attribute or "" */
+    void (*on_sent)(void *ctx, const char *user, uint32_t device, int lid, const char *text, const char *msg_id, int ok);
+                                                                            /* send_text finished: ok = <message> on the wire (msg_id set), 0 = not sent */
+    void (*on_ack)(void *ctx, const char *msg_id, int status);              /* WA_MSG_*: every <ack class=message> and <receipt> with an id */
+    int (*chat_input_to)(void *ctx, char *user, uint32_t ucap, uint32_t *device, int *lid, char *line, uint32_t cap);
+                                                                            /* like chat_input, with the destination (user "" = chat_user); preferred when set */
     uint32_t msgs_sent, msgs_received, msgs_failed, msgs_deferred, receipts_sent, sessions_started;   /* deferred = too long for this build, acknowledged */
     uint32_t rx_bytes;              /* raw bytes taken from the socket (TLS records) in this run: a stall diagnostic */
     uint32_t d_session, d_encrypt, d_decrypt;   /* durations: last X3DH, last encrypt, last decrypt */

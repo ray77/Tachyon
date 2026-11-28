@@ -554,7 +554,7 @@ ULONG gui_add_message(int chat, int from_me, ULONG ts, const char *utf8, int len
     set_preview(c, m, (const UBYTE *)utf8, len);
     if (!from_me && chat != cur_chat) c->unread++;
     c->dirty = 1;
-    if (chat == cur_chat) conv_dirty = 1;
+    if (chat == cur_chat) { conv_dirty = 1; hdr_dirty = 1; }         /* the header shows the message count */
     list_follow_selection();
     return m->id;
 }

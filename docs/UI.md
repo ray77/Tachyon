@@ -234,41 +234,28 @@ Umlaute: `scr_wait_key` liefert unter deutscher Keymap ISO-8859-1-Codes, die Ein
 | `gui_stats(&s)` | Nachrichten, Slots, Textring, Verworfenes, gezeichnete Zeilen, Scrolls |
 | `gui_utf8_to_latin1`, `gui_latin1_to_utf8` | die Konvertierungen, auch einzeln nutzbar |
 
-**Einbindung in die Probe** (`bench/wa_probe_amiga.c`, Sache der Signal-Sitzung): die GUI braucht drei Stellen.
+### Einbindung in die Probe (Stand 2026-11-28)
 
-```c
-static UBYTE gui_arena[48 * 1024];                      /* Fast RAM, BSS */
+Seit dem 2026-11-28 ist die Oberfläche in die A500-Probe eingebaut (`bench/wa_probe_amiga.c`; Unity-Build `bench/amiga/wa_probe_unity.c` zieht `ui/font8.c`, `ui/ftext.c`, `ui/gui.c` nach `ui/screen.c`). Im Pairing-/Login-Modus (`SYS:pair.txt`, also `make run-pair` und `make run-chat`) gehört der Hires-Schirm der GUI vom Programmstart bis 20 s nach dem Ende; der reine Verbindungstest (`make run-probe`) läuft weiter ohne Schirm. Die beiden Statuszeilen und das Konsolenfenster als Eingabe sind damit abgelöst (das CON:-Fenster bleibt als Fallback für getippte Zeilen und für das Log).
 
-/* 1. Start: nach scr_open(), vor dem Connect */
-gui_init(gui_arena, sizeof gui_arena);
-gui_set_tz(3600);                                        /* oder aus der Konfiguration */
-gui_set_connection(GUI_CONN_CONNECTING, "TLS 1.3 zu web.whatsapp.com ...");
-for (jeden bekannten Chat) gui_add_chat(jid, name);     /* aus der Kontaktdatei / den Sitzungen */
-gui_redraw_all();
+**Der Core meldet, die GUI zeigt.** `tests/wa_probe_core.c` kennt die GUI nicht; sein `wa_probe_io` hat sechs optionale Callbacks, alle nur berichtend (Protokollverhalten unverändert, Host-Glue und Simulator setzen sie nicht bzw. nur zum Mitzählen):
 
-/* 2. Herzschlag-Hook (einmal je Sekunde, auch während X25519/RSA): nie blockierend */
-static void heartbeat_gui(void)
-{
-    char utf8[2 * GUI_INPUT_MAX + 4];
-    int act = gui_pump(scr_wait_key(0));                /* 0 = nur abfragen */
-    if (act == GUI_ACT_SEND) {
-        int n = gui_take_outgoing(utf8, sizeof utf8);
-        ULONG id = gui_add_message(gui_action_chat(), 1, now_unix(), utf8, n, GUI_ST_PENDING);
-        queue_outgoing(gui_chat_jid(gui_action_chat()), utf8, n, id);   /* Signal-Schicht verschlüsselt später */
-    } else if (act == GUI_ACT_QUIT) request_shutdown();
-    gui_set_time(now_unix());
-    gui_redraw_dirty();                                 /* < 100 ms, meist einstellige ms */
-}
+| Callback | wann | A500-Glue daraus |
+|---|---|---|
+| `on_state(state, detail)` | TLS beginnt, WebSocket offen, Noise angenommen, `<success>`, `<active/>`, Close, Fehler (`WA_CONN_*`) | `gui_set_connection` mit deutschem Kurztext; DNS und TCP meldet das Glue selbst |
+| `on_time(unix)` | jedes Stanza mit `t=` (`<success>`, `<message>`, `<receipt>`, `<notification>`) | Uhr und „Heute“ laufen ab dann mit der Serverzeit (`now_ms`-Anker), vorher mit der Amiga-Uhr, wenn sie gestellt ist |
+| `on_text(user, device, lid, pushname, ts, utf8, len)` | entschlüsselter Text, UTF-8 wie empfangen, `notify`-Attribut als Pushname | Chat anlegen oder finden (eigene Nummer/LID → Selbst-Chat „Du“, sonst `nummer@s.whatsapp.net` bzw. `lid@lid`, Name = Pushname, sonst Nummer), `gui_add_message(…, 0, ts, …)` |
+| `on_sent(user, device, lid, text, msg_id, ok)` | `send_text` fertig (auch für das Skript-`CHAT_SEND` und Konsolenzeilen) | Nachrichten-ID ↔ GUI-ID merken (8 Einträge); Skripttext bekommt eine eigene Blase; `ok = 0` → `!` |
+| `on_ack(msg_id, status)` | `<ack class=message>` (SENT, mit `error` FAILED), `<receipt>` (DELIVERED, `type=read` READ) | `gui_set_status` über die gemerkte ID; fremde IDs werden ignoriert |
+| `chat_input_to(user, device, lid, line)` | einmal je Durchlauf der Linger-Schleife (≤ 1 s) | die nächste Zeile aus der GUI-Warteschlange mit dem Ziel des gewählten Chats, sonst eine Konsolenzeile an `chat_user`; Esc Esc / Amiga-Q → `/quit` |
 
-/* 3. Ereignisse der Signal-Schicht */
-on_text_received(jid, name, ts, utf8, len):  chat = gui_add_chat(jid, name); gui_add_message(chat, 0, ts, utf8, len, GUI_ST_READ);
-on_server_ack(id):                           gui_set_status(-1, id, GUI_ST_SENT);
-on_receipt(id, "delivery" | "read"):         gui_set_status(-1, id, GUI_ST_DELIVERED | GUI_ST_READ);
-on_send_failed(id):                          gui_set_status(-1, id, GUI_ST_FAILED);
-on_connection(state, text):                  gui_set_connection(state, text);
-```
+**Takt.** Der Core blockt in `io->recv` bis zu 1 s; das Glue zerlegt jedes Warten in 200-ms-Scheiben und ruft dazwischen `gui_tick()` (`scr_wait_key(0)`, `gui_pump`, Uhr, `gui_redraw_dirty`). Während der 68000 rechnet (X3DH ≈ 1 min) kommt derselbe Tick alle 200 ms aus dem `CRYPTO_YIELD`-Hook, der schon die Fortschrittspunkte druckt. Polls mit Timeout 0 (Heartbeat-Drain) laufen ungebremst durch; ein Wiedereintrittsschutz verhindert einen Tick im Tick, und solange ein QR-Code steht, zeichnet die GUI nicht (danach `gui_redraw_all`). Eine getippte Zeile wird sofort als ausstehende Blase (Uhr) gezeigt, in eine Warteschlange (4 Zeilen, 500 Byte UTF-8) gestellt und vom Core über `chat_input_to` abgeholt; Senden heißt dann wie bisher Bundle/X3DH bei neuer Sitzung (≈ 54 s, die GUI bleibt bedienbar), Verschlüsseln, `<message>`; der Haken kommt mit dem Server-Ack.
 
-Die Netzschicht darf `scr_wait_key(0)` nur hier aufrufen; der Tastaturpuffer gehört der GUI. Zeichnet fremder Code auf den Schirm (QR-Code beim Pairing), danach `gui_redraw_all()`.
+**Speicher.** Die Arena (48 KiB) liegt im **Chip-RAM**: auf der 2-MiB-Maschine lassen Probe (jetzt 600 KB Hunks) und TheWire13 rund 115 KB Fast-RAM (Live-Versuch 4), davon nehmen GUI-Code und -Statik schon ≈ 90 KB; Chip hat nach den 80 KiB Bitplanes ≈ 100 KB frei, und die Arena wird nur vom Modell gelesen (`gui_add_message` 3 ms). Fast-RAM bekommt die Arena nur, wenn über 1 MiB zusammenhängend frei ist. Das Log meldet `gui: … arena 48 KiB in Chip RAM, Fast RAM a -> b bytes free`, die `GUI:`-Zeile am Ende Ticks, Durchschnitt/Maximum je Tick, Ticks über 100 ms, Nachrichten, verworfene, gezeichnete Zeilen, Scrolls.
+
+**Was auf dem Schirm steht** (Chatliste → Selbst-Chat „Du“, der `chat.txt`-Partner, die Partner der gespeicherten Sitzungen; Kopfzeile/Status): „Schlüssel werden berechnet“ → „Warte auf den TCP/IP-Stack“ → „DNS: web.whatsapp.com“ → „TCP zu a.b.c.d:443“ → „TLS 1.3 zu web.whatsapp.com“ → „WebSocket offen, Noise XX“ → „Noise XX steht, Anmeldung“ → „angemeldet als :N, passiv“ → „web.whatsapp.com, Noise XX, online“ → „Verbindung beendet“ / „Fehler: …“, am Ende „Ende – Taste schließt“ (20 s). Eingehende Texte stehen links (auch im Selbst-Chat, damit zu sehen ist, was vom Telefon kam), gesendete rechts mit Uhr → ✓ → ✓✓.
+
+Offen bleibt: Zeitzone fest CET (`gui_set_tz(3600)`), Namen nur aus `notify` (keine Kontaktliste), Gruppen werden nicht angezeigt (der Core bestätigt sie nur).
 
 ### Nachrichtenspeicher
 

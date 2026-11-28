@@ -372,7 +372,7 @@ run: build/amiga/x25519bench
 # WhatsApp probe on the Amiga: the host probe's core over bsdsocket.library (net/bsdsock_io.c), TheWire13 as the
 # stack, FS-UAE's emulated A2065 on slirp (tools/run-fsuae-net.sh, docs/NETWORK.md). Network, several minutes.
 PROBE_UNITY := bench/amiga/wa_probe_unity.c
-build/amiga/wa_probe.s: $(PROBE_UNITY) $(CRYPTO_SRC) $(PROBE_CORE) $(PROBE_PROTO) $(PROBE_HDR) ui/screen.c ui/screen.h ui/amiga13.h net/bsdsock_io.c net/bsdsock_io.h net/bsdsocket13.h bench/wa_probe_amiga.c
+build/amiga/wa_probe.s: $(PROBE_UNITY) $(CRYPTO_SRC) $(PROBE_CORE) $(PROBE_PROTO) $(PROBE_HDR) ui/screen.c ui/screen.h ui/amiga13.h ui/gui.c ui/gui.h ui/font8.c ui/font8.h ui/ftext.c ui/ftext.h net/bsdsock_io.c net/bsdsock_io.h net/bsdsocket13.h bench/wa_probe_amiga.c
 	@mkdir -p build/amiga
 	$(VC) $(VCFLAGS) $(PROBE_INC) $(PROBE_UNITY) -o=$@
 

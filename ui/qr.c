@@ -399,7 +399,7 @@ int qr_encode(qr *q, qr_work *w, const uint8_t *data, uint32_t len, uint32_t ecc
 }
 
 /* ---- PBM ---------------------------------------------------------------- */
-static uint32_t put_dec(char *out, uint32_t v)     /* v < 10000 */
+static uint32_t pbm_put_dec(char *out, uint32_t v)     /* v < 10000 */
 {
     static const uint16_t pow10[4] = { 1000, 100, 10, 1 };
     uint32_t i, len = 0;
@@ -423,8 +423,8 @@ uint32_t qr_render_pbm(const qr *q, char *out, uint32_t cap, uint32_t scale)
     rowbytes = (width + 7u) >> 3;
 
     head[hlen++] = 'P'; head[hlen++] = '4'; head[hlen++] = '\n';
-    hlen += put_dec(head + hlen, width); head[hlen++] = ' ';
-    hlen += put_dec(head + hlen, width); head[hlen++] = '\n';
+    hlen += pbm_put_dec(head + hlen, width); head[hlen++] = ' ';
+    hlen += pbm_put_dec(head + hlen, width); head[hlen++] = '\n';
     for (need = hlen, i = 0; i < width; i++) need += rowbytes;
     if (need > cap) return 0;
     for (i = 0; i < hlen; i++) out[pos++] = head[i];

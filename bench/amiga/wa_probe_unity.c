@@ -33,3 +33,7 @@
 #include "../../proto/signal.c"
 #include "../../ui/qr.c"
 #include "../../ui/screen.c"
+/* the chat interface (docs/UI.md "Client-Oberfläche"): after ui/screen.c, as in bench/amiga/gui_demo_unity.c */
+#include "../../ui/font8.c"
+#include "../../ui/ftext.c"
+#include "../../ui/gui.c"

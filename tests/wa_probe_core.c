@@ -259,7 +259,11 @@ static void spin_ladders(uint32_t gap_ms, uint32_t *count)
 
 tls13 *wa_probe_tls(void) { return &t; }
 
-static int fail(const char *fmt, const char *a, uint32_t b) { wa_fmt(io->result, sizeof io->result, fmt, a, b); return 0; }
+/* the chat interface's view of the connection (io->on_state) and of the server's clock (t= attributes, io->on_time) */
+static void state(int s, const char *detail) { if (io->on_state) io->on_state(io->ctx, s, detail); }
+static uint32_t dec_value(const wab_value *v);
+static void server_time(const wab_node *n) { uint32_t t; if (io->on_time && n && (t = dec_value(wab_get_attr(n, "t"))) != 0) io->on_time(io->ctx, t); }
+static int fail(const char *fmt, const char *a, uint32_t b) { wa_fmt(io->result, sizeof io->result, fmt, a, b); state(WA_CONN_ERROR, io->result); return 0; }
 
 static int tls_connect(x509_cert *root, x509_cert *inter, hmac_drbg *rng, tls13_keypair *kp, x509_cache *cache)
 {
@@ -358,7 +362,6 @@ int wa_probe_prepare(wa_probe_io *pio)
 
 static int recv_frame(uint32_t timeout_ms, uint8_t **plain, uint32_t *plen);
 static void frames_reset(void);
-static uint32_t dec_value(const wab_value *v);
 
 /* TCP is connected: TLS -> WebSocket -> Noise XX with `payload` as the ClientPayload; the first decrypted server
  * frame is *plain[0..*plain_len) inside the message buffer. Shared by the probe, the pairing connection and the login connection. */
@@ -373,6 +376,7 @@ static int handshake(const uint8_t *payload, uint32_t payload_len, uint8_t **pla
 
     pend_len = 0; pump_quiet = 0; frames_reset();
     if (payload_len + 16 > sizeof payload_ct) return fail("RESULT: ClientPayload too long", 0, 0);
+    state(WA_CONN_TLS, "TLS 1.3");
     if (!io->tunnel) {
         /* use_cache: a first connection fills the certificate cache (full chain verification), then the real one
          * must hit it and skip the chain - as a second A500 session would after storing the entry in ENVARC: */
@@ -422,6 +426,7 @@ static int handshake(const uint8_t *payload, uint32_t payload_len, uint8_t **pla
     }
 
     /* WebSocket upgrade */
+    state(WA_CONN_WS, "WebSocket + Noise XX");
     n = ws_client_start(&w, io->host, "/ws/chat", "https://web.whatsapp.com", msgbuf, WA_PROBE_MSGBUF, &rng, out, sizeof out);
     w.stream = 1;                                   /* long messages (the offline batch after login) arrive frame by frame */
     if (!n || !app_send(out, n)) return fail("RESULT: WebSocket request failed", 0, 0);
@@ -538,6 +543,7 @@ static int handshake(const uint8_t *payload, uint32_t payload_len, uint8_t **pla
                *plain_len + 16, *plain_len, (uint32_t)(*plain)[0], (uint32_t)(*plain)[1], (uint32_t)(*plain)[2], (uint32_t)(*plain)[3]); logl(line);
     }
     io->t_accepted = ms();
+    state(WA_CONN_NOISE, "Noise accepted");
     return 1;
 }
 
@@ -551,6 +557,7 @@ static void close_ws(void)
 {
     uint8_t cl[16]; uint32_t n = ws_frame_close(&w, 1000, cl, sizeof cl);
     if (n) app_send(cl, n);
+    state(WA_CONN_CLOSED, "closed");
     /* tickets arrive after the handshake, interleaved with application data: report the final count here */
     if (!io->tunnel) { io->tls_tickets = t.tickets; wa_fmt(line, sizeof line, "tls: %u NewSessionTicket(s) received during the connection (PSK resumption not implemented)", t.tickets); logl(line); }
 }
@@ -765,8 +772,13 @@ static char last_msg_id[24];
 static int handle_async(const wab_node *n)
 {
     if (wab_str_eq(&n->tag, "stream:error") || wab_str_eq(&n->tag, "xmlstreamend") || wab_str_eq(&n->tag, "failure")) { logl("login: the server ended the stream"); return 0; }
+    server_time(n);
     if (wab_str_eq(&n->tag, "receipt")) {
-        const wab_value *id = wab_get_attr(n, "id"); char ty[24], fr[64];
+        const wab_value *id = wab_get_attr(n, "id"), *rt = wab_get_attr(n, "type"); char ty[24], fr[64];
+        if (io->on_ack && id && id->kind == WAB_STR && !wab_get_attr(n, "participant")) {
+            attr_cstr(n, "id", fr, sizeof fr);                              /* the chat interface matches the id against its own messages */
+            io->on_ack(io->ctx, fr, rt && rt->kind == WAB_STR && wab_str_eq(&rt->str, "read") ? WA_MSG_READ : WA_MSG_DELIVERED);
+        }
         if (last_msg_id[0] && id && id->kind == WAB_STR && wab_str_eq(&id->str, last_msg_id)) {
             io->t_msg_receipt = ms();
             wa_fmt(line, sizeof line, "msg: receipt for our message %s from %s: %s (%T s after sending)", last_msg_id, attr_cstr(n, "from", fr, sizeof fr),
@@ -777,6 +789,7 @@ static int handle_async(const wab_node *n)
     if (wab_str_eq(&n->tag, "notification")) return send_ack(n);
     if (wab_str_eq(&n->tag, "ack")) {
         const wab_value *id = wab_get_attr(n, "id"), *cl = wab_get_attr(n, "class"); char er[16];
+        if (io->on_ack && id && id->kind == WAB_STR && cl && cl->kind == WAB_STR && wab_str_eq(&cl->str, "message")) { char ib[32]; io->on_ack(io->ctx, attr_cstr(n, "id", ib, sizeof ib), wab_get_attr(n, "error") ? WA_MSG_FAILED : WA_MSG_SENT); }
         if (last_msg_id[0] && id && id->kind == WAB_STR && wab_str_eq(&id->str, last_msg_id) && cl && cl->kind == WAB_STR && wab_str_eq(&cl->str, "message")) {
             io->t_msg_ack = ms();
             wa_fmt(line, sizeof line, "msg: the server acknowledged our message %s %T s after sending%s%s", last_msg_id, io->t_msg_ack - io->t_msg_sent,
@@ -832,7 +845,21 @@ static int iq_is_result(const wab_node *r) { const wab_value *ty = r ? wab_get_a
 /* ---- messages: Signal sessions, <message> in and out (docs/SIGNAL.md; whatsmeow send.go, message.go, receipt.go) ---- */
 static sig_local me_local;
 static uint8_t msg_pt[1024], msg_ct[1400], msg_plain[SIG_BODY_MAX], msg_devid[600];   /* the phone's first message to a new device was 2757 bytes (live attempt 2) */
-static char chat_line[256];
+static char chat_line[512];
+/* the next typed line and its destination: chat_input_to (the chat interface: the selected chat) when set, else chat_input
+ * (console, to chat_user); 1 = chat_line holds a line */
+static int next_chat_line(const char **user, uint32_t *device, int *lid)
+{
+    static char ubuf[32];
+    if (io->chat_input_to) {
+        ubuf[0] = 0; *device = io->chat_device; *lid = io->chat_lid;
+        if (!io->chat_input_to(io->ctx, ubuf, sizeof ubuf, device, lid, chat_line, sizeof chat_line)) return 0;
+        *user = ubuf[0] ? ubuf : io->chat_user;
+        return 1;
+    }
+    if (io->chat_input && io->chat_input(io->ctx, chat_line, sizeof chat_line)) { *user = io->chat_user; *device = io->chat_device; *lid = io->chat_lid; return 1; }
+    return 0;
+}
 
 static void core_random(void *ctx, uint8_t *out, uint32_t n) { (void)ctx; drbg_generate(&rng, out, n); }
 static void local_init(void)
@@ -952,14 +979,15 @@ static uint32_t text_latin1(char *dst, uint32_t cap, const uint8_t *s, uint32_t 
 
 /* the text of a decrypted Message: conversation(1), extendedTextMessage(6).text(1), deviceSentMessage(31).message(2) (recursive);
  * protocolMessage(12) and senderKeyDistributionMessage(2) are named; 1 = text found */
+static const uint8_t *text_utf8; static uint32_t text_utf8_len;    /* the last text message_text found, as received (for on_text) */
 static int message_text(const uint8_t *p, uint32_t len, char *out, uint32_t cap, int depth)
 {
     const uint8_t *end = p + len, *d; uint32_t f, wire, v, l; char fields[64]; uint32_t fo = 0; int proto_type = -1;
     while (pb_next(&p, end, &f, &wire, &v, &d, &l)) {
-        if (f == 1 && wire == PB_BYTES) { text_latin1(out, cap, d, l); return 1; }
+        if (f == 1 && wire == PB_BYTES) { text_latin1(out, cap, d, l); text_utf8 = d; text_utf8_len = l; return 1; }
         if (f == 6 && wire == PB_BYTES) {
             const uint8_t *q = d, *qe = d + l; uint32_t f2, w2, v2, l2; const uint8_t *d2;
-            while (pb_next(&q, qe, &f2, &w2, &v2, &d2, &l2)) if (f2 == 1 && w2 == PB_BYTES) { text_latin1(out, cap, d2, l2); return 1; }
+            while (pb_next(&q, qe, &f2, &w2, &v2, &d2, &l2)) if (f2 == 1 && w2 == PB_BYTES) { text_latin1(out, cap, d2, l2); text_utf8 = d2; text_utf8_len = l2; return 1; }
         }
         if (f == 31 && wire == PB_BYTES && depth < 2) {
             const uint8_t *q = d, *qe = d + l; uint32_t f2, w2, v2, l2; const uint8_t *d2;
@@ -1055,6 +1083,7 @@ static int handle_message(const wab_node *n)
         wa_fmt(fromstr, sizeof fromstr, "%s:%u", user, (uint32_t)from->jid.device);
         wa_fmt(line, sizeof line, "msg: %s in %T s (%u bytes plaintext): %s%s%s", have ? "TEXT" : "decrypted", io->d_decrypt, plen, have ? "\"" : "", text, have ? "\"" : ""); logl(line);
         if (have && io->chat_recv) io->chat_recv(io->ctx, fromstr, text);
+        if (have && io->on_text) { char pn[48]; io->on_text(io->ctx, user, from->jid.device, lid, wab_get_attr(n, "notify") ? attr_cstr(n, "notify", pn, sizeof pn) : "", dec_value(wab_get_attr(n, "t")), (const char *)text_utf8, text_utf8_len); }
         io->msgs_received++; io->t_msg_received = ms();
     }
     return send_receipt(n, user);
@@ -1063,7 +1092,14 @@ static int handle_message(const wab_node *n)
 /* a text to user:device: session from the store or a new one from the prekey bundle (X3DH), Message protobuf, WhatsApp
  * padding, Signal encryption, <message id type=text to><participants><to jid><enc v=2 type=pkmsg|msg/></to></participants>
  * [<device-identity/>]</message>; the server's <ack> and the peer's <receipt> are reported by handle_async */
+static int send_text_inner(const char *user, uint32_t device, int lid, const char *text);
 static int send_text(const char *user, uint32_t device, int lid, const char *text)
+{
+    int r = send_text_inner(user, device, lid, text);
+    if (io->on_sent) io->on_sent(io->ctx, user, device, lid, text, r ? last_msg_id : "", r);
+    return r;
+}
+static int send_text_inner(const char *user, uint32_t device, int lid, const char *text)
 {
     static wab_node msg, parts, to, enc, devid; static wab_attr ma[3], ta[1], ea[2]; static wab_node children[2];
     static heartbeat hb; sig_session *s; uint32_t t0, plen, clen, dlen = 0; int is_pk, r;
@@ -1145,7 +1181,7 @@ static uint32_t make_prekeys(uint32_t count, const char *when)
 
 static int post_login(void)
 {
-    char id[32]; const wab_node *r; uint32_t t_end, last_ka; int gone;
+    char id[32]; const wab_node *r; uint32_t t_end, last_ka, cd; int gone, cl; const char *cu;
     /* 1. how many one-time prekeys of ours does the server hold */
     next_iq_id(id, sizeof id);
     if (!send_iq1(id, "encrypt", "get", "count", "prekey count query")) return fail("RESULT: logged in, but sending the prekey count query failed", 0, 0);
@@ -1189,6 +1225,7 @@ static int post_login(void)
     r = wait_result(id, 30000);
     if (!iq_is_result(r)) return fail("RESULT: logged in, but <active/> was not accepted (see recv: line)", 0, 0);
     io->active_set = 1; io->t_active = ms();
+    state(WA_CONN_ONLINE, "active");
     wa_fmt(line, sizeof line, "login: <active/> accepted %T s after <success>; staying online for %T s", io->t_active - io->t_login_accepted, io->linger_ms); logl(line);
     /* 3b. the offline batch: right after <active/> the server delivers everything that waited for us (receipts,
           notifications, status updates, messages - 29 stanzas in one 170 KB WebSocket message in the first live chat
@@ -1234,10 +1271,10 @@ static int post_login(void)
     while (ms() < t_end) {
         const wab_node *n; uint32_t now = ms(), left = t_end - now;
         if (now - last_ka >= 25000) { if (!send_keepalive()) break; last_ka = now; }
-        if (io->sessions && io->chat_input && io->chat_input(io->ctx, chat_line, sizeof chat_line)) {
+        if (io->sessions && next_chat_line(&cu, &cd, &cl)) {
             if (chat_line[0] == '/' && chat_line[1] == 'q') { logl("chat: /quit"); break; }
-            if (!io->chat_user) logl("chat: no peer configured (chat_user), line dropped");
-            else if (chat_line[0] && !send_text(io->chat_user, io->chat_device, io->chat_lid, chat_line)) logl("chat: the line was not sent");
+            if (!cu) logl("chat: no peer configured (chat_user), line dropped");
+            else if (chat_line[0] && !send_text(cu, cd, cl, chat_line)) logl("chat: the line was not sent");
             continue;
         }
         n = recv_node(left < 1000 ? left : 1000, &gone);
@@ -1281,6 +1318,7 @@ static int expect_success(const uint8_t *plain, uint32_t plen)
     if (!n) return fail("RESULT: login: first frame undecodable", 0, 0);
     if (wab_str_eq(&n->tag, "success")) {
         io->logged_in = 1; io->t_login_accepted = ms();
+        server_time(n); state(WA_CONN_LOGIN, "logged in");
         wa_fmt(line, sizeof line, "login: <success> - logged in as %s:%u@%s (lid %s, server time %s)", io->creds->jid_user, io->creds->jid_device, WA_SERVER_JID,
                attr_cstr(n, "lid", b1, sizeof b1), attr_cstr(n, "t", b2, sizeof b2)); logl(line);
         return 1;

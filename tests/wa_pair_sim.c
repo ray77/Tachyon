@@ -89,6 +89,32 @@ static void chat_recv(void *ctx, const char *from, const char *text)
     if (recv_n < 2) snprintf(recv_text[recv_n], sizeof recv_text[0], "%s", text);
     recv_n++;
 }
+/* the chat interface's callbacks (bench/wa_probe_amiga.c sets them; here they only record what the core reports) */
+static int gui_sim;                                   /* 1 = the fake server also sends a read receipt for our message */
+static int st_n; static int st_seq[16]; static uint32_t tm_last, tm_n;
+static int txt_n; static char txt_user[32], txt_name[32], txt_utf8[2][200]; static uint32_t txt_ts, txt_dev; static int txt_lid;
+static int snt_n, snt_ok; static char snt_id[2][32], snt_text[2][64]; static int ack_n, ack_st[8]; static char gack_id[8][32]; static int cit_calls;
+static void gui_on_state(void *ctx, int state, const char *detail) { (void)ctx; (void)detail; if (st_n < 16) st_seq[st_n] = state; st_n++; }
+static void gui_on_time(void *ctx, uint32_t t) { (void)ctx; tm_last = t; tm_n++; }
+static void gui_on_text(void *ctx, const char *user, uint32_t device, int lid, const char *pushname, uint32_t ts, const char *utf8, uint32_t len)
+{
+    (void)ctx; snprintf(txt_user, sizeof txt_user, "%s", user); snprintf(txt_name, sizeof txt_name, "%s", pushname); txt_ts = ts; txt_dev = device; txt_lid = lid;
+    if (txt_n < 2) snprintf(txt_utf8[txt_n], sizeof txt_utf8[0], "%.*s", (int)len, utf8);
+    txt_n++;
+}
+static void gui_on_sent(void *ctx, const char *user, uint32_t device, int lid, const char *text, const char *msg_id, int ok)
+{
+    (void)ctx; (void)device; (void)lid; CHECK(strcmp(user, "4917612345678") == 0);
+    if (snt_n < 2) { snprintf(snt_id[snt_n], sizeof snt_id[0], "%s", msg_id); snprintf(snt_text[snt_n], sizeof snt_text[0], "%s", text); }
+    snt_n++; snt_ok += ok;
+}
+static void gui_on_ack(void *ctx, const char *msg_id, int status) { (void)ctx; if (ack_n < 8) { snprintf(gack_id[ack_n], sizeof gack_id[0], "%s", msg_id); ack_st[ack_n] = status; } ack_n++; }
+/* one line composed in the GUI for the phone's number, once */
+static int gui_chat_input_to(void *ctx, char *user, uint32_t ucap, uint32_t *device, int *lid, char *line, uint32_t cap)
+{
+    (void)ctx; if (cit_calls++) return 0;
+    snprintf(user, ucap, "4917612345678"); *device = 0; *lid = 0; snprintf(line, cap, "Zeile aus der GUI \xc3\xa4"); return 1;
+}
 /* Bob's (the phone's) prekey bundle as the server lists it: registration BE32, type 05, identity, skey{id BE24, value,
  * signature}, key{id, value} */
 static void enqueue_bundle(const wab_value *iq_id)
@@ -111,14 +137,15 @@ static void enqueue_bundle(const wab_value *iq_id)
 /* <message from=phone id type=text t><enc v=2 type=pkmsg|msg>vector</enc></message> */
 static void enqueue_phone_message(const char *vector, const char *id, const char *type)
 {
-    static wab_node m, enc; static wab_attr ma[4], ea[2]; static uint8_t body[2][1024]; static int slot; uint32_t l;
+    static wab_node m, enc; static wab_attr ma[5], ea[2]; static uint8_t body[2][1024]; static int slot; uint32_t l;
     uint8_t *b = body[slot & 1]; slot++;
     l = vec(vector, b, 1024); CHECK(l > 50);
     wab_node_init(&enc, "enc"); ea[0].key = wab_s("v"); ea[0].val = wab_text("2"); ea[1].key = wab_s("type"); ea[1].val = wab_text(type); enc.attrs = ea; enc.n_attrs = 2; enc.val = wab_bytes(b, l);
     wab_node_init(&m, "message");
     ma[0].key = wab_s("from"); ma[0].val = wab_jid_value("4917612345678", "s.whatsapp.net", 0);
     ma[1].key = wab_s("id"); ma[1].val = wab_text(id); ma[2].key = wab_s("type"); ma[2].val = wab_text("text"); ma[3].key = wab_s("t"); ma[3].val = wab_text("1764300010");
-    m.attrs = ma; m.n_attrs = 4; m.val.kind = WAB_LIST; m.children = &enc; m.n_children = 1;
+    ma[4].key = wab_s("notify"); ma[4].val = wab_text("Telefon");                 /* the sender's pushname, as the server adds it */
+    m.attrs = ma; m.n_attrs = 5; m.val.kind = WAB_LIST; m.children = &enc; m.n_children = 1;
     enqueue_node(&m);
 }
 
@@ -233,6 +260,12 @@ static int io_send(void *ctx, const uint8_t *p, uint32_t n)
                     /* the server's ack, then (first message only) the phone's two answers: a prekey message starting a new session, a plain one */
                     wab_node_init(&ack, "ack"); aa[0].key = wab_s("class"); aa[0].val = wab_text("message"); aa[1].key = wab_s("id"); aa[1].val = *id; aa[2].key = wab_s("from"); aa[2].val = *to;
                     ack.attrs = aa; ack.n_attrs = 3; enqueue_node(&ack);
+                    if (gui_sim) {                                           /* the phone read it: <receipt from id type=read t> */
+                        static wab_node rc; static wab_attr rca[4];
+                        wab_node_init(&rc, "receipt"); rca[0].key = wab_s("from"); rca[0].val = *to; rca[1].key = wab_s("id"); rca[1].val = *id;
+                        rca[2].key = wab_s("type"); rca[2].val = wab_text("read"); rca[3].key = wab_s("t"); rca[3].val = wab_text("1764300020");
+                        rc.attrs = rca; rc.n_attrs = 4; enqueue_node(&rc);
+                    }
                     /* both answers are prekey messages: libsignal keeps sending those until it has seen a message of ours on the new session */
                     if (!phone_sent) { phone_sent = 1; enqueue_phone_message("wa_pkmsg1", "PHONE0000000001", "pkmsg"); enqueue_phone_message("wa_msg2", "PHONE0000000002", "pkmsg"); }
                 }
@@ -474,6 +507,8 @@ int main(int argc, char **argv)
         { wa_prekey *k = &prekeys.k[prekeys.n++]; k->id = 5; for (i = 0; i < 32; i++) k->priv[i] = (uint8_t)(i * 37 + 23); k->priv[0] &= 248; k->priv[31] &= 127; k->priv[31] |= 64; x25519_base_comb(k->pub, k->priv); k->uploaded = 1; if (prekeys.next_id <= 5) prekeys.next_id = 6; }
         io.sessions = &sessions; io.sessions_loaded = 0; io.save_sessions = save_sessions; io.chat_recv = chat_recv; io.chat_input = 0;
         io.chat_user = "4917612345678"; io.chat_device = 0; io.chat_lid = 0; io.chat_send = "Hallo vom Amiga"; io.linger_ms = 3000;
+        io.on_state = gui_on_state; io.on_time = gui_on_time; io.on_text = gui_on_text; io.on_sent = gui_on_sent; io.on_ack = gui_on_ack;   /* the chat interface listens */
+        st_n = tm_n = txt_n = snt_n = snt_ok = ack_n = 0; tm_last = 0;
         bundles = msgs = receipts = sessions_saved = recv_n = 0; enc_out_len = 0; memset(rcpt_type, 0, sizeof rcpt_type); memset(rcpt_id, 0, sizeof rcpt_id); memset(recv_text, 0, sizeof recv_text);
         wab_node_init(&n, "success"); a[0].key = wab_s("t"); a[0].val = wab_text("1764300000"); a[1].key = wab_s("lid"); a[1].val = wab_jid_value("123456789012345", "lid", 7); n.attrs = a; n.n_attrs = 2;
         CHECK(wab_encode_frame(&n, b, sizeof b, &l) == WAB_OK);
@@ -487,6 +522,15 @@ int main(int argc, char **argv)
         CHECK(recv_n == 2 && strcmp(recv_text[0], "Antwort vom Telefon: hallo Amiga!") == 0 && strcmp(recv_text[1], "zweite Nachricht, gleiche Sitzung \xe4\xf6\xfc") == 0);   /* UTF-8 -> Latin-1 for the console */
         CHECK(wa_prekeys_find(&prekeys, 5) == 0 && prekeys.n == 6);          /* the one-time prekey is gone; 3 uploaded + 3 refilled remain */
         CHECK(sessions.n == 1 && sessions_saved >= 3 && stanza_acks == 2);   /* no ack for decrypted messages: receipts only */
+        /* what the chat interface saw: both texts as UTF-8 with the pushname and the stanza's time, our message with its id,
+         * the server's ack as SENT, the connection's states, the server clock from <success t> and the stanzas */
+        CHECK(txt_n == 2 && strcmp(txt_user, "4917612345678") == 0 && txt_dev == 0 && txt_lid == 0 && strcmp(txt_name, "Telefon") == 0 && txt_ts == 1764300010);
+        CHECK(strcmp(txt_utf8[0], "Antwort vom Telefon: hallo Amiga!") == 0 && strcmp(txt_utf8[1], "zweite Nachricht, gleiche Sitzung \xc3\xa4\xc3\xb6\xc3\xbc") == 0);
+        CHECK(snt_n == 1 && snt_ok == 1 && strcmp(snt_id[0], msg_id) == 0 && strcmp(snt_text[0], "Hallo vom Amiga") == 0);
+        CHECK(ack_n == 2 && strcmp(gack_id[0], msg_id) == 0 && ack_st[0] == WA_MSG_SENT);                      /* our ack, then the batch's read receipt */
+        CHECK(strcmp(gack_id[1], "ABCDEF1234") == 0 && ack_st[1] == WA_MSG_READ);                             /* (an id the interface does not know: ignored there) */
+        CHECK(st_n == 3 && st_seq[0] == WA_CONN_LOGIN && st_seq[1] == WA_CONN_ONLINE && st_seq[2] == WA_CONN_CLOSED);   /* the sim skips the handshake */
+        CHECK(tm_n >= 3 && tm_last == 1764300002);                                                           /* <success t>, the messages, the batch's stanzas */
         { f = fopen("build/msg_pkmsg.bin", "wb"); if (f) { fwrite(enc_out, 1, enc_out_len, f); fclose(f); } }
         /* the store survives a write/read round trip and the next connection sends a plain message on the phone's session */
         {   static uint8_t rec[SIG_STORE_MAX_SIZE]; uint32_t rl = sig_store_write(rec, sizeof rec, &sessions);
@@ -496,11 +540,22 @@ int main(int argc, char **argv)
         io.sessions = &sessions; io.sessions_loaded = 1; io.save_sessions = save_sessions; io.chat_recv = chat_recv; io.chat_input = 0;
         io.chat_user = "4917612345678"; io.chat_device = 0; io.chat_lid = 0; io.chat_send = "zweiter Text, bestehende Sitzung"; io.linger_ms = 1500;
         bundles = msgs = receipts = recv_n = 0; enc_is_pk = -1;
+        /* a line composed in the chat interface goes out through chat_input_to (destination included), the phone's read
+         * receipt comes back as WA_MSG_READ */
+        io.on_state = gui_on_state; io.on_time = gui_on_time; io.on_text = gui_on_text; io.on_sent = gui_on_sent; io.on_ack = gui_on_ack; io.chat_input_to = gui_chat_input_to;
+        st_n = tm_n = txt_n = snt_n = snt_ok = ack_n = cit_calls = 0; gui_sim = 1;
         wab_node_init(&n, "success"); a[0].key = wab_s("t"); a[0].val = wab_text("1764300000"); a[1].key = wab_s("lid"); a[1].val = wab_jid_value("123456789012345", "lid", 7); n.attrs = a; n.n_attrs = 2;
         CHECK(wab_encode_frame(&n, b, sizeof b, &l) == WAB_OK);
         r = wa_probe_sim_login(&io, b, l);
         printf("%s\n", io.result);
-        CHECK(r == 1 && bundles == 0 && msgs == 1 && enc_is_pk == 0 && io.msgs_sent == 1 && io.sessions_started == 0 && io.msgs_received == 0 && receipts == 0);
+        CHECK(r == 1 && bundles == 0 && msgs == 2 && enc_is_pk == 0 && io.msgs_sent == 2 && io.sessions_started == 0 && io.msgs_received == 0 && receipts == 0);
+        CHECK(cit_calls >= 2 && snt_n == 2 && snt_ok == 2 && strcmp(snt_text[0], "zweiter Text, bestehende Sitzung") == 0 && strcmp(snt_text[1], "Zeile aus der GUI \xc3\xa4") == 0);
+        CHECK(strcmp(snt_id[1], msg_id) == 0 && strcmp(snt_id[0], snt_id[1]) != 0);
+        CHECK(ack_n == 5 && ack_st[0] == WA_MSG_SENT && ack_st[1] == WA_MSG_READ && strcmp(gack_id[1], snt_id[0]) == 0);   /* scripted text: ack + read receipt (before <active/>) */
+        CHECK(ack_st[2] == WA_MSG_READ && strcmp(gack_id[2], "ABCDEF1234") == 0);                                            /* the batch's receipt */
+        CHECK(ack_st[3] == WA_MSG_SENT && ack_st[4] == WA_MSG_READ && strcmp(gack_id[4], snt_id[1]) == 0);                   /* the GUI line, in the linger loop */
+        CHECK(stanza_acks == 4 && tm_last == 1764300020);                    /* notification + 3 receipts acknowledged; the clock follows the last receipt */
+        gui_sim = 0; io.chat_input_to = 0;
     }
     /* ---- F: the offline batch as one long WebSocket message: a 40 KB stanza (longer than a TLS record, far shorter
      * than the 176 KiB message buffer) is collected, decrypted in place, decoded and acknowledged, the six 3 KB stanzas

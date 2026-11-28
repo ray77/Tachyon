@@ -18,7 +18,10 @@
  *              phone is device 0), line 2: a text to send once after <active/> (may be empty), line 3: seconds to stay
  *              online (default 180). Typed lines in the console window go to the peer; incoming texts are printed.
  *              Sessions live in SYS:tachyon.sessions (written as .tmp, then renamed).
- *   pair.txt   present: pairing / login mode (docs/PROTOCOL.md 11) instead of the plain probe. The credentials record
+ *   pair.txt   present: pairing / login mode (docs/PROTOCOL.md 11) instead of the plain probe; the chat interface (ui/gui.c,
+ *              docs/UI.md "Client-Oberfläche") takes the screen for the whole run: chat list, conversation, status line with
+ *              the connection state, typed lines go to the selected chat, incoming texts and acks appear as they arrive.
+ *              The credentials record
  *              SYS:tachyon.creds (proto/creds.c) is loaded when present (paired -> login, else the stored identity
  *              pairs); without it a new identity is generated. The QR codes are drawn on the client screen
  *              (ui/screen.c, 8x4 or 6x3 pixels per module) with a countdown; the record is written as soon as the
@@ -40,6 +43,7 @@
 #include "../proto/nextkeys.h"
 #include "../proto/signal.h"
 #include "../ui/screen.h"
+#include "../ui/gui.h"
 
 struct ExecBase *SysBase;
 struct DosLibrary *DOSBase;
@@ -50,10 +54,10 @@ static ULONG tick0;
 static ULONG wa_addr;
 static char aline[300];
 
-static int slen(const char *s) { int n = 0; while (s[n]) n++; return n; }
+static int str_len(const char *s) { int n = 0; while (s[n]) n++; return n; }
 static void out(const char *s)
 {
-    int n = slen(s);
+    int n = str_len(s);
     if (con) Write(con, (APTR)s, n);
     if (logfile) Write(logfile, (APTR)s, n);
 }
@@ -71,16 +75,20 @@ static uint32_t now_ms(void) { return (ticks_now() - tick0) * 20; }
  * CRYPTO_YIELD hook prints a dot every 2 s on the console (not into the log file) and, with the screen open, in its
  * bottom line - otherwise the user takes the silent AmigaDOS window for a crash. The heartbeat chains to this hook. */
 static int screen_open;
+static int gui_on, qr_visible;               /* the chat interface owns the screen (pair/login mode); a QR code covers it */
+static void gui_tick(void);
+static uint32_t gui_last_tick;
 static uint32_t prog_last; static int con_dots, scr_dots;
 static void progress_tick(void *ctx)
 {
     static uint32_t calls; uint32_t now; (void)ctx;
     if (++calls & 15) return;                 /* DateStamp only every 16th yield (the heartbeat already asks once per yield) */
     now = now_ms();
+    if (gui_on && now - gui_last_tick >= 200) gui_tick();   /* keys and the clock while the 68000 computes (X3DH: a minute) */
     if (now - prog_last < 2000) return;
     prog_last = now;
     if (con) { Write(con, (APTR)".", 1); con_dots++; }
-    if (screen_open) {
+    if (screen_open && !gui_on) {
         if (scr_dots >= 76) { scr_fill(0, SCR_H - 10, SCR_W, 8, SCR_PAL_BG); scr_dots = 0; }
         scr_text(8 + 8 * scr_dots++, SCR_H - 10, SCR_PAL_LTGREY, ".");
     }
@@ -169,7 +177,204 @@ static void chat_recv(void *ctx, const char *from, const char *text)
     char l[260]; (void)ctx;
     wa_fmt(l, sizeof l, "\n*** %s: %s\n\n", from, text);
     if (con_dots) { if (con) Write(con, (APTR)"\n", 1); con_dots = 0; }
-    if (con) Write(con, (APTR)l, slen(l));
+    if (con) Write(con, (APTR)l, str_len(l));
+}
+
+
+/* ---- the chat interface (ui/gui.c): the core's event callbacks feed the model, the ticks paint and read keys ---------- */
+#define GUI_ARENA_SIZE (48UL * 1024UL)
+static UBYTE *gui_arena; static int gui_arena_chip;                 /* Fast RAM when the stack left enough, else Chip */
+static ULONG fast_before_gui, fast_after_gui;
+static char self_jid[GUI_JID_MAX];                                   /* "<own number>@s.whatsapp.net": the self chat */
+static const char *host_now = "";                                     /* SYS:now.txt when the Amiga clock is unset (main sets it) */
+static uint32_t unix_base, unix_base_ms;                             /* the server's clock (t attributes) anchored to now_ms */
+static int gui_in, gui_quit;                                         /* reentrancy guard; Esc Esc / Amiga-Q seen */
+static uint32_t gui_ticks, gui_tick_sum, gui_tick_max, gui_sec_last, gui_slow_ticks;
+static UBYTE chat_named[GUI_MAX_CHATS];                              /* 1 = the chat shows a pushname, not the number */
+/* lines composed in the GUI wait here for the core's chat_input_to (one per linger-loop iteration, at most 1 s later) */
+struct out_line { char user[32]; int lid; ULONG gui_id; int len; char text[504]; };
+static struct out_line outq[4]; static int outq_head, outq_n; static ULONG sending_gui_id;
+/* our message ids on the wire -> GUI message ids, for the server's <ack> and the peer's <receipt> */
+struct sent_ref { char msg_id[24]; ULONG gui_id; }; static struct sent_ref sent[8]; static int sent_next;
+
+static int str_eq(const char *a, const char *b) { while (*a && *a == *b) { a++; b++; } return *a == *b; }
+static void scpy(char *d, const char *s, uint32_t cap) { uint32_t i = 0; while (s[i] && i + 1 < cap) { d[i] = s[i]; i++; } d[i] = 0; }
+
+/* seconds since 1970: the server's clock once a stanza carried t=, before that the Amiga clock (DateStamp) when it is
+ * set, else the host time from SYS:now.txt ("YYYYMMDDHHMMSSZ", anchored at program start by gui_start) */
+static uint32_t now_unix(void)
+{
+    struct DateStamp ds;
+    if (unix_base) return unix_base + (now_ms() - unix_base_ms) / 1000;
+    DateStamp(&ds);
+    if (ds.ds_Days < 17000) return 0;                                /* before 2024-07: the clock was never set (1978) */
+    return ((uint32_t)ds.ds_Days + 2922) * 86400UL + (uint32_t)ds.ds_Minute * 60UL + (uint32_t)ds.ds_Tick / 50;
+}
+static uint32_t dig(const char *s, int n) { uint32_t v = 0; while (n--) v = v * 10 + (uint32_t)(*s++ - '0'); return v; }
+static uint32_t clockstr_to_unix(const char *s)                      /* days from civil (H. Hinnant), 32-bit unsigned */
+{
+    uint32_t y = dig(s, 4), m = dig(s + 4, 2), d = dig(s + 6, 2), era, yoe, doy, doe;
+    if (y < 2000 || m < 1 || m > 12 || d < 1) return 0;
+    if (m <= 2) y--;
+    era = y / 400; yoe = y - era * 400; doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + d - 1; doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return (era * 146097 + doe - 719468) * 86400UL + dig(s + 8, 2) * 3600UL + dig(s + 10, 2) * 60UL + dig(s + 12, 2);
+}
+static int is_self(const char *user, int lid) { return str_eq(user, creds.jid_user) || (lid && creds.lid_user[0] && str_eq(user, creds.lid_user)); }
+/* the chat for a sender/recipient: the self chat for our own number or LID, else "<user>@s.whatsapp.net" / "<lid>@lid";
+ * a pushname replaces the number as the name once seen */
+static int chat_for(const char *user, int lid, const char *pushname)
+{
+    char jid[GUI_JID_MAX]; int c;
+    if (is_self(user, lid)) { c = gui_find_chat(self_jid); return c >= 0 ? c : gui_add_chat(self_jid, "Du"); }
+    wa_fmt(jid, sizeof jid, "%s@%s", user, lid ? "lid" : "s.whatsapp.net");
+    c = gui_find_chat(jid);
+    if (c < 0) { c = gui_add_chat(jid, pushname && *pushname ? pushname : user); if (c >= 0) chat_named[c] = pushname && *pushname; }
+    else if (pushname && *pushname && !chat_named[c]) { gui_set_chat_name(c, pushname); chat_named[c] = 1; }
+    return c;
+}
+static void remember_sent(const char *msg_id, ULONG gui_id) { scpy(sent[sent_next & 7].msg_id, msg_id, sizeof sent[0].msg_id); sent[sent_next & 7].gui_id = gui_id; sent_next++; }
+static ULONG lookup_sent(const char *msg_id) { int i; for (i = 0; i < 8; i++) if (sent[i].msg_id[0] && str_eq(sent[i].msg_id, msg_id)) return sent[i].gui_id; return 0; }
+
+/* GUI_ACT_SEND: the composed line becomes a pending bubble and waits in the queue for the core */
+static void queue_outgoing(void)
+{
+    char utf8[2 * GUI_INPUT_MAX + 4]; int n = gui_take_outgoing(utf8, sizeof utf8), chat = gui_action_chat(), i; const char *jid = gui_chat_jid(chat); ULONG id; struct out_line *o;
+    if (n <= 0 || !jid[0]) return;
+    while (n > (int)sizeof outq[0].text - 1 || (n > 0 && ((UBYTE)utf8[n] & 0xC0) == 0x80)) n--;   /* cut at a code point (GUI_TEXT_MAX) */
+    utf8[n] = 0;
+    id = gui_add_message(chat, 1, now_unix(), utf8, n, GUI_ST_PENDING);
+    if (outq_n >= 4) { gui_set_status(chat, id, GUI_ST_FAILED); log_line(0, "chat: outgoing queue full, line dropped"); return; }
+    o = &outq[(outq_head + outq_n) & 3]; outq_n++;
+    for (i = 0; jid[i] && jid[i] != '@' && i + 1 < (int)sizeof o->user; i++) o->user[i] = jid[i];
+    o->user[i] = 0; o->lid = jid[i] == '@' && jid[i + 1] == 'l'; o->gui_id = id; o->len = n;
+    for (i = 0; i <= n; i++) o->text[i] = utf8[i];
+}
+/* the core asks once per linger-loop iteration: GUI lines first (with their destination), then a console line (to chat_user) */
+static int chat_input_to(void *ctx, char *user, uint32_t ucap, uint32_t *device, int *lid, char *line, uint32_t cap)
+{
+    *device = 0; *lid = 0; user[0] = 0;
+    if (outq_n) {
+        struct out_line *o = &outq[outq_head & 3]; uint32_t i;
+        outq_head++; outq_n--;
+        scpy(user, o->user, ucap); *lid = o->lid; sending_gui_id = o->gui_id;
+        for (i = 0; i < (uint32_t)o->len && i + 1 < cap; i++) line[i] = o->text[i];
+        line[i] = 0;
+        return 1;
+    }
+    if (gui_quit) { gui_quit = 0; scpy(line, "/quit", cap); return 1; }
+    return chat_input(ctx, line, cap);
+}
+/* one GUI step: a key (poll), the clock, what changed on the screen; never blocks, ~25 ms for a key echo, 140 ms for a
+ * new message, up to 0.5 s for a chat switch (docs/UI.md). Called from io_recv's slices and from the yield hook. */
+static void gui_tick(void)
+{
+    uint32_t t0, d, u; LONG key; int act;
+    if (!gui_on || gui_in || qr_visible) return;
+    gui_in = 1; t0 = now_ms();
+    key = scr_wait_key(0);
+    act = gui_pump(key);
+    if (act == GUI_ACT_SEND) queue_outgoing();
+    else if (act == GUI_ACT_QUIT) gui_quit = 1;
+    u = now_unix();
+    if (u != gui_sec_last) { gui_sec_last = u; gui_set_time(u); }
+    gui_redraw_dirty();
+    d = now_ms() - t0; gui_ticks++; gui_tick_sum += d; if (d > gui_tick_max) gui_tick_max = d; if (d > 100) gui_slow_ticks++;
+    gui_last_tick = now_ms(); gui_in = 0;
+}
+
+/* ---- the core's event callbacks ---- */
+static void on_state(void *ctx, int state, const char *detail)
+{
+    char l[64]; (void)ctx;
+    if (!gui_on) return;
+    switch (state) {
+    case WA_CONN_TLS:    gui_set_connection(GUI_CONN_CONNECTING, "TLS 1.3 zu web.whatsapp.com ..."); break;
+    case WA_CONN_WS:     gui_set_connection(GUI_CONN_HANDSHAKE, "WebSocket offen, Noise XX ..."); break;
+    case WA_CONN_NOISE:  gui_set_connection(GUI_CONN_HANDSHAKE, creds.paired ? "Noise XX steht, Anmeldung ..." : "Noise XX steht, Pairing ..."); break;
+    case WA_CONN_LOGIN:  wa_fmt(l, sizeof l, "angemeldet als :%u, passiv", creds.jid_device); gui_set_connection(GUI_CONN_ONLINE, l); break;
+    case WA_CONN_ONLINE: gui_set_connection(GUI_CONN_ONLINE, "web.whatsapp.com, Noise XX, online"); break;
+    case WA_CONN_CLOSED: gui_set_connection(GUI_CONN_OFFLINE, "Verbindung beendet"); break;
+    default:             wa_fmt(l, sizeof l, "Fehler: %s", detail && detail[0] == 'R' && detail[7] == ' ' ? detail + 8 : detail ? detail : "?"); gui_set_connection(GUI_CONN_ERROR, l); break;
+    }
+    gui_redraw_dirty();
+}
+static void on_time(void *ctx, uint32_t unix_seconds)
+{
+    (void)ctx;
+    if (!unix_seconds) return;
+    if (!unix_base) { char l[96]; wa_fmt(l, sizeof l, "clock: server time %u, the GUI clock follows it (Amiga clock %s)", unix_seconds, now_unix() ? "was set" : "unset"); log_line(0, l); }
+    unix_base = unix_seconds; unix_base_ms = now_ms();
+    if (gui_on) gui_set_time(unix_seconds);
+}
+static void on_text(void *ctx, const char *user, uint32_t device, int lid, const char *pushname, uint32_t ts, const char *utf8, uint32_t len)
+{
+    int chat; (void)ctx; (void)device;
+    if (!gui_on) return;
+    chat = chat_for(user, lid, pushname);
+    if (chat < 0) { log_line(0, "gui: chat list full (32), text not shown"); return; }
+    if (!gui_add_message(chat, 0, ts ? ts : now_unix(), utf8, (int)len, GUI_ST_READ)) log_line(0, "gui: message store full, text not shown");
+}
+static void on_sent(void *ctx, const char *user, uint32_t device, int lid, const char *text, const char *msg_id, int ok)
+{
+    ULONG gid = sending_gui_id; (void)ctx; (void)device;
+    sending_gui_id = 0;
+    if (!gui_on) return;
+    if (!gid) {                                                          /* the scripted CHAT_SEND text or a console line */
+        int chat = chat_for(user, lid, 0);
+        if (chat < 0) return;
+        gid = gui_add_message(chat, 1, now_unix(), text, -1, ok ? GUI_ST_PENDING : GUI_ST_FAILED);
+    } else if (!ok) gui_set_status(-1, gid, GUI_ST_FAILED);
+    if (ok && gid && msg_id && msg_id[0]) remember_sent(msg_id, gid);
+}
+static void on_ack(void *ctx, const char *msg_id, int status)
+{
+    ULONG gid; (void)ctx;
+    if (!gui_on || !(gid = lookup_sent(msg_id))) return;
+    gui_set_status(-1, gid, status == WA_MSG_SENT ? GUI_ST_SENT : status == WA_MSG_DELIVERED ? GUI_ST_DELIVERED : status == WA_MSG_READ ? GUI_ST_READ : GUI_ST_FAILED);
+}
+
+/* screen + GUI before the key computation, so the user sees the state from the first second; 0 = ok */
+static int gui_start(void)
+{
+    uint32_t t0 = now_ms(), i; int rc; char l[160];
+    if ((rc = scr_open()) != 0) { wa_fmt(l, sizeof l, "screen: scr_open failed (%u) - running without the GUI", (uint32_t)rc); log_line(0, l); return -1; }
+    screen_open = 1;
+    fast_before_gui = AvailMem(MEMF_FAST);
+    /* the arena goes to Chip RAM: on the 2 MiB machine the probe (600 KB) and TheWire13 leave ~115 KB of Fast RAM (live
+     * attempt 4), and the GUI code and statics already take ~90 KB of that; Chip has ~100 KB spare after the 80 KiB of
+     * bitplanes, and the arena is only read for the model (gui_add_message 3 ms). Fast RAM only when plenty is left. */
+    if (AvailMem(MEMF_FAST | MEMF_LARGEST) >= 1024UL * 1024UL) gui_arena = (UBYTE *)AllocMem(GUI_ARENA_SIZE, MEMF_FAST | MEMF_CLEAR);
+    if (!gui_arena) { gui_arena = (UBYTE *)AllocMem(GUI_ARENA_SIZE, MEMF_CHIP | MEMF_CLEAR); gui_arena_chip = 1; }
+    if (!gui_arena) { gui_arena = (UBYTE *)AllocMem(GUI_ARENA_SIZE, MEMF_PUBLIC | MEMF_CLEAR); gui_arena_chip = 0; }
+    if (!gui_arena || gui_init(gui_arena, GUI_ARENA_SIZE) != 0) { log_line(0, "gui: no memory for the 48 KiB arena - running without the GUI"); scr_close(); screen_open = 0; return -1; }
+    gui_on = 1;
+    gui_set_tz(3600);                                                    /* CET; summer time would need +7200 */
+    if (!now_unix() && host_now[0] && (unix_base = clockstr_to_unix(host_now)) != 0) unix_base_ms = now_ms();   /* the Amiga clock is unset: host time */
+    gui_set_time(now_unix());
+    wa_fmt(self_jid, sizeof self_jid, "%s@s.whatsapp.net", creds.jid_user[0] ? creds.jid_user : "0");
+    if (creds.jid_user[0]) gui_add_chat(self_jid, "Du");
+    if (chat_peer[0]) chat_for(chat_peer, 0, 0);
+    if (sessions) for (i = 0; i < sessions->n; i++) chat_for(sessions->e[i].user, sessions->e[i].lid, 0);
+    gui_set_connection(GUI_CONN_CONNECTING, "Schl\xFCssel werden berechnet ...");
+    gui_redraw_all();
+    fast_after_gui = AvailMem(MEMF_FAST);
+    wa_fmt(l, sizeof l, "gui: screen + chat interface up in %u ms: %u chats, arena 48 KiB in %s RAM, text %s, Fast RAM %u -> %u bytes free", now_ms() - t0, (uint32_t)gui_chat_count(),
+           gui_arena_chip ? "Chip" : "Fast", gui_text_mode() == GUI_TEXT_FAST ? "own renderer" : "OS Text()", fast_before_gui, fast_after_gui);
+    log_line(0, l);
+    return 0;
+}
+/* the end of the run stays on the screen for a while (a key ends the wait) */
+static void gui_end(int ok, const char *result)
+{
+    uint32_t t0; char l[64];
+    if (!gui_on) return;
+    wa_fmt(l, sizeof l, "%s - Taste schlie\xDFt", ok ? "Ende" : "Abbruch");
+    gui_set_connection(ok ? GUI_CONN_OFFLINE : GUI_CONN_ERROR, l);
+    gui_redraw_dirty();
+    (void)result;
+    t0 = now_ms();
+    while (now_ms() - t0 < 20000) { if (scr_wait_key(25) != SCR_KEY_TIMEOUT) break; gui_tick(); }
+    gui_on = 0;
 }
 
 static void consume_nextkeys(void *ctx) { (void)ctx; DeleteFile((STRPTR)"SYS:tachyon.next"); log_line(0, "keys: SYS:tachyon.next consumed (deleted)"); }
@@ -208,7 +413,8 @@ static void screen_text_line(int row, int pen, const char *s)
 static void show_qr(void *ctx, const char *text, const qr *code, uint32_t valid_ms, uint32_t index, uint32_t count)
 {
     int sx, sy, n = code->size, w, h, x, y; char l[96]; uint32_t t0 = now_ms(); (void)ctx; (void)text;
-    if (!screen_open) {
+    if (gui_on) { qr_visible = 1; scr_fill(0, 12, SCR_W, SCR_H - 12, SCR_PAL_BG); scr_text(8, 16, SCR_PAL_LTGREY, "WhatsApp am Telefon: Einstellungen > Verknuepfte Geraete > Geraet hinzufuegen, dann diesen Code scannen."); }
+    else if (!screen_open) {
         int rc = scr_open();
         if (rc) { logf1("screen: scr_open failed (%u) - the code is only in the log", (const char *)(ULONG)rc, 0); return; }
         screen_open = 1;
@@ -243,19 +449,34 @@ static void qr_hide(void *ctx, const char *status)
 {
     (void)ctx;
     if (!screen_open) return;
+    if (gui_on) { qr_visible = 0; gui_set_connection(GUI_CONN_HANDSHAKE, status); gui_redraw_all(); return; }
     scr_fill(0, QR_TOP, SCR_W, SCR_H - QR_TOP - 24, SCR_PAL_BG);
     screen_text_line(SCR_H - 20, SCR_PAL_LTGREEN, status);
     screen_text_line(SCR_H - 10, SCR_PAL_BG, ""); scr_dots = 0;
 }
 
 static int io_send(void *ctx, const uint8_t *p, uint32_t n) { (void)ctx; return bsdsock_send(&net, p, n); }
-static int32_t io_recv(void *ctx, uint8_t *p, uint32_t cap, uint32_t timeout_ms) { (void)ctx; return (int32_t)bsdsock_recv(&net, p, cap, timeout_ms); }
+/* the socket read; while the GUI is up a wait is cut into 200-ms slices with a GUI tick between them, so a typed key
+ * echoes within ~0.2 s even though the core waits up to a second per call (polls with timeout 0 pass straight through) */
+static int32_t io_recv(void *ctx, uint8_t *p, uint32_t cap, uint32_t timeout_ms)
+{
+    (void)ctx;
+    if (!gui_on || timeout_ms < 100) return (int32_t)bsdsock_recv(&net, p, cap, timeout_ms);
+    for (;;) {
+        uint32_t slice = timeout_ms < 200 ? timeout_ms : 200; int32_t r = (int32_t)bsdsock_recv(&net, p, cap, slice);
+        if (r != 0) return r;
+        timeout_ms -= slice;
+        gui_tick();
+        if (!timeout_ms) return 0;
+    }
+}
 static int io_reconnect(void *ctx) { (void)ctx; return bsdsock_connect(&net, wa_addr, 443); }
 
 static void finish(void)
 {
     BPTR done;
     if (screen_open) { scr_close(); screen_open = 0; }
+    if (gui_arena) { FreeMem(gui_arena, GUI_ARENA_SIZE); gui_arena = 0; }
     bsdsock_close(&net);
     if (logfile) Close(logfile);
     chip_free_all();
@@ -282,7 +503,7 @@ int main(void)
     out("Tachyon WhatsApp probe on the A500: bsdsocket.library -> TLS 1.3 -> WebSocket -> Noise XX\n");
     { static const char hint[] = "Bitte warten. Der 68000 rechnet: Identitaet, Schluessel und Prekeys bis zu 60 s, dann TLS ca. 32 s und Noise ca. 42 s\n"
                                  "je Verbindung; ein Punkt alle 2 s heisst: es geht weiter. Beim Pairing erscheint der QR-Code auf einem eigenen Schirm.\n";
-      if (con) Write(con, (APTR)hint, slen(hint)); }
+      if (con) Write(con, (APTR)hint, str_len(hint)); }
 
     /* inputs */
     if (read_file("SYS:seed.bin", seed, 64) != 64) { out("RESULT: SYS:seed.bin missing (64 bytes of entropy needed)\n"); finish(); return 10; }
@@ -363,31 +584,40 @@ int main(void)
         }
     }
 
+    /* the chat interface (pair/login mode): screen and GUI before the key computation; the core reports into it */
+    host_now = nowstr;
+    if (pair_mode && gui_start() == 0) {
+        io.on_state = on_state; io.on_time = on_time; io.on_text = on_text; io.on_sent = on_sent; io.on_ack = on_ack; io.chat_input_to = chat_input_to;
+    }
+
     /* offline part first: the three X25519 key pairs (~10 s on the 68000) while the stack starts in parallel */
     t_prep = now_ms();
     crypto_yield_hook = progress_tick; prog_last = now_ms();     /* dots while computing; the heartbeat chains to it */
-    if (!wa_probe_prepare(&io)) { out(io.result); out("\n"); finish(); return 10; }
+    if (!wa_probe_prepare(&io)) { out(io.result); out("\n"); gui_end(0, io.result); finish(); return 10; }
     t_prep = now_ms() - t_prep;
+    if (gui_on) { gui_set_connection(GUI_CONN_CONNECTING, "Warte auf den TCP/IP-Stack ..."); gui_tick(); }
 
     /* the stack: TheWire13 is started by the Startup-Sequence just after us and needs a few seconds */
     for (tries = 0; tries < 120; tries++) {
         if (bsdsock_open(&net)) { if (bsdsock_stack_ready(&net)) break; bsdsock_close(&net); }
-        Delay(25);
+        Delay(25); gui_tick();
     }
-    if (!net.base) { log_line(0, "net: bsdsocket.library did not open within 60 s - is the TCP/IP stack running?"); out("RESULT: no bsdsocket.library\n"); finish(); return 10; }
+    if (!net.base) { log_line(0, "net: bsdsocket.library did not open within 60 s - is the TCP/IP stack running?"); out("RESULT: no bsdsocket.library\n"); gui_end(0, "no stack"); finish(); return 10; }
     logf1("net: bsdsocket.library v%u open, stack answers (socket() ok) after %u tries", (const char *)(ULONG)net.base->lib_Version, tries + 1);
     t_dns = now_ms();
+    if (gui_on) { gui_set_connection(GUI_CONN_CONNECTING, "DNS: web.whatsapp.com ..."); gui_tick(); }
     if (!bsdsock_resolve(&net, "web.whatsapp.com", waip[0] ? waip : 0, &wa_addr)) {
         logf1("net: %s failed, errno %u, and no SYS:waip.txt fallback", net.fail ? net.fail : "resolve", (uint32_t)net.err);
-        out("RESULT: name resolution failed\n"); finish(); return 10;
+        out("RESULT: name resolution failed\n"); gui_end(0, "dns"); finish(); return 10;
     }
     t_dns = now_ms() - t_dns;
     bsdsock_ntoa(wa_addr, addr);
     logf1("dns: web.whatsapp.com -> %s in %u ms", addr, t_dns);
     t_conn = now_ms();
+    if (gui_on) { char l[48]; wa_fmt(l, sizeof l, "TCP zu %s:443 ...", addr); gui_set_connection(GUI_CONN_CONNECTING, l); gui_tick(); }
     if (!bsdsock_connect(&net, wa_addr, 443)) {
         logf1("tcp: %s failed, errno %u", net.fail ? net.fail : "connect", (uint32_t)net.err);
-        out("RESULT: TCP connect failed\n"); finish(); return 10;
+        out("RESULT: TCP connect failed\n"); gui_end(0, "tcp"); finish(); return 10;
     }
     t_conn = now_ms() - t_conn;
     logf1("tcp: connected to %s:443 in %u ms", addr, t_conn);
@@ -416,7 +646,14 @@ int main(void)
             if (io.prekeys_loaded) write_prekeys(0);
             if (io.creds_loaded) write_creds(0);
         }
+        if (gui_on) {
+            struct gui_stats st; gui_stats(&st);
+            wa_fmt(aline, sizeof aline, "GUI: %u ticks, %u ms average, %u ms max, %u over 100 ms; %u chats, %u messages (%u dropped), %u rows drawn, %u scrolls; arena in %s RAM, Fast RAM %u free after init\n",
+                   gui_ticks, gui_ticks ? gui_tick_sum / gui_ticks : 0, gui_tick_max, gui_slow_ticks, (uint32_t)st.chats, (uint32_t)st.msgs, st.dropped, st.rows_drawn, st.scrolls, gui_arena_chip ? "Chip" : "Fast", fast_after_gui);
+            out(aline);
+        }
         out(io.result); out("\n");
+        gui_end(ok, io.result);
         finish();
         return ok ? 0 : 5;
     }
