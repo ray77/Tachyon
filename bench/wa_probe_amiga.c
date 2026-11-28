@@ -601,6 +601,7 @@ int main(void)
     crypto_yield_hook = progress_tick; prog_last = now_ms();     /* dots while computing; the heartbeat chains to it */
     if (!wa_probe_prepare(&io)) { out(io.result); out("\n"); gui_end(0, io.result); finish(); return 10; }
     t_prep = now_ms() - t_prep;
+    { char l[120]; wa_fmt(l, sizeof l, "mem: after the buffers (%u Chip blocks): Chip %u KB free, Fast %u KB free (before the stack starts)", (uint32_t)chip_n, (uint32_t)AvailMem(MEMF_CHIP) / 1024, (uint32_t)AvailMem(MEMF_FAST) / 1024); log_line(0, l); }
     if (gui_on) { gui_set_connection(GUI_CONN_CONNECTING, "Warte auf den TCP/IP-Stack ..."); gui_tick(); }
 
     /* the stack: TheWire13 is started by the Startup-Sequence just after us and needs a few seconds */

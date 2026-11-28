@@ -53,17 +53,22 @@ static uint32_t pend_len;
 /* raw socket bytes read during a long computation (heartbeat poll, once a second) wait here for the pump, so the
  * network side never backs up for tens of seconds: in live attempt 2 FS-UAE's A2065 emulation died with 170 KB queued
  * while the 68000 computed for 50 s. The pump takes staged bytes before reading the socket again. */
-static uint32_t stage_len; static int in_pump;
+static char line[640];
+static uint32_t stage_len, stage_peak; static int in_pump, stage_full_noted;   /* peak: the most the staging buffer held in this run (RESULT line) */
+static void logl(const char *s);
 static void drain_poll(void *hio)
 {
     int32_t r; (void)hio;
-    if (in_pump || !io || stage_len >= WA_PROBE_STAGE) return;
+    if (in_pump || !io) return;
+    if (stage_len >= WA_PROBE_STAGE) {                /* the window stays closed from here on: say so once per fill (live attempt 6 lost the line this way) */
+        if (!stage_full_noted) { stage_full_noted = 1; wa_fmt(line, sizeof line, "ws: staging buffer full (%u bytes) while computing: the socket is not read until the pump runs", stage_len); logl(line); }
+        return;
+    }
     r = io->recv(io->ctx, stage + stage_len, WA_PROBE_STAGE - stage_len, 0);
-    if (r > 0) { stage_len += (uint32_t)r; io->rx_bytes += (uint32_t)r; }
+    if (r > 0) { stage_len += (uint32_t)r; io->rx_bytes += (uint32_t)r; if (stage_len > stage_peak) stage_peak = stage_len; }
 }
 static uint8_t rdbuf[8192];
 static uint32_t t_start;
-static char line[640];
 
 /* prepared offline (wa_probe_prepare), consumed by wa_probe_run */
 static hmac_drbg rng; static x509_cert root, inter; static tls13_keypair kp;
@@ -209,7 +214,7 @@ static int pump_inner(int want_tls_state, int want_msg, uint32_t timeout_ms)
         }
         now = ms();
         if (now > deadline) { if (!pump_quiet) logl("timeout"); return 0; }
-        if (stage_len) { uint32_t i, c = stage_len < sizeof rdbuf ? stage_len : (uint32_t)sizeof rdbuf; cp(rdbuf, stage, c); stage_len -= c; for (i = 0; i < stage_len; i++) stage[i] = stage[i + c]; r = (int32_t)c; }
+        if (stage_len) { uint32_t i, c = stage_len < sizeof rdbuf ? stage_len : (uint32_t)sizeof rdbuf; cp(rdbuf, stage, c); stage_len -= c; for (i = 0; i < stage_len; i++) stage[i] = stage[i + c]; r = (int32_t)c; stage_full_noted = 0; }
         else { r = io->recv(io->ctx, rdbuf, sizeof rdbuf, deadline - now); if (r > 0) io->rx_bytes += (uint32_t)r; }
         if (r == 0) { if (!pump_quiet) logl("timeout"); return 0; }
         if (r < 0) { logl("socket closed by server"); return 0; }
@@ -561,6 +566,7 @@ static void close_ws(void)
     uint8_t cl[16]; uint32_t n = ws_frame_close(&w, 1000, cl, sizeof cl);
     if (n) app_send(cl, n);
     state(WA_CONN_CLOSED, "closed");
+    if (stage_peak) { wa_fmt(line, sizeof line, "ws: the staging buffer held at most %u of %u bytes while the 68000 computed", stage_peak, (uint32_t)WA_PROBE_STAGE); logl(line); }
     /* tickets arrive after the handshake, interleaved with application data: report the final count here */
     if (!io->tunnel) { io->tls_tickets = t.tickets; wa_fmt(line, sizeof line, "tls: %u NewSessionTicket(s) received during the connection (PSK resumption not implemented)", t.tickets); logl(line); }
 }
