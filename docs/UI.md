@@ -257,6 +257,8 @@ Seit dem 2026-11-28 ist die Oberfläche in die A500-Probe eingebaut (`bench/wa_p
 
 **Live-Lauf 6 (2026-11-28, BENCHMARKS.md Schritte 25 und 26):** GUI 1,5 s nach Programmstart, „online“ bei 54,7 s, 143 Ticks à 19 ms (Maximum 300 ms), die getippte Zeile als ausstehende Blase; die Verbindung endete im Offline-Stapel, bevor die Zeile gesendet wurde. Daraus behoben: ein Tick holt alle wartenden Tasten (vorher eine je 200 ms – „Zeitlupeneingabe“ während der 68000 rechnet), die Uhr folgt nur `t=`-Werten von Nicht-Offline-Stanzas und nie rückwärts.
 
+**Live-Lauf 8 (2026-11-28, BENCHMARKS.md Schritt 27):** 22 Minuten online, vier in der GUI getippte Zeilen gesendet und vom Server bestätigt (Acks 1 bis 9 s später, auf dem Telefon zwei blaue Haken); 4626 Ticks à 8 ms (Maximum 280 ms). Tasten kamen gebündelt und das Layout war US (y/z, keine Umlaute); beides danach behoben (b78b358, f26953c), Prüfung in Lauf 9.
+
 Offen bleibt: Zeitzone fest CET (`gui_set_tz(3600)`), Namen nur aus `notify` (keine Kontaktliste), Gruppen werden nicht angezeigt (der Core bestätigt sie nur), Esc Esc beendet den Lauf (für Tests riskant: ein Tipp-Fehler schließt die Verbindung).
 
 ### Nachrichtenspeicher

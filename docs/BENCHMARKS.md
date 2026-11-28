@@ -554,3 +554,33 @@ Der Empfangspfad ist zwei Schritte weiter als in Lauf 5: die 166-KB-History-Stan
 
 **Nachtrag Läufe 7 und 7b (2026-11-28, 10:50 und 10:56):** Lauf 7 endete bei 3,5 s ohne Verbindung („no memory for the receive buffers“: 96 KB Staging passten neben Schirm, 48-KiB-Arena und 258 KB Core-Puffern nicht ins Chip-RAM; seitdem Staging 64/32/16/8 KB nach Angebot, Arena 32 KiB). Lauf 7b: Schlüssel neu 16,5 s, `<success>` 66,8 s, `<active/>` 69,1 s, die 166-KB-Stanza kam trotz des Acks aus Lauf 6 wieder (59,1 s Empfang, 2,8 KB/s), und 39,6 s in ihre Entschlüsselung hinein setzte der Server die Verbindung zurück (`send` errno 54), bei nur 2,8 KB im 32-KB-Staging-Puffer – kein Nullfenster. Verdacht jetzt: kein Anwendungs-Keepalive (`<iq xmlns=w:p><ping/>`) zwischen `<active/>` und der Linger-Schleife; Hebel beim Core (Signal-Sitzung). Oberfläche: Tippen blieb zäh, weil der Yield-Hook die Uhr nur bei jedem 16. Aufruf las und AES-GCM nur alle 0,25 s yieldet (Tick alle 3–4 s); mit GUI prüft jeder Yield die Uhr (249803e). Chip-RAM nach den Puffern 13 KB, Fast 110 KB.
 
+## 2026-11-28 – Schritt 27: Online bleiben – Keepalive in jeder Phase, vier Zeilen aus der GUI (Live-Lauf 8)
+
+`make run-chat` wie Lauf 7b (2 MiB Fast, GUI, kein `CHAT_SEND`, Linger 300 s, Staging 32 KB), Start 11:10:38, Core mit dem Keepalive-Fix der Signal-Session (504b6aa: `<iq xmlns=w:p><ping/>` alle 20 s ab `<success>` aus `recv_frame`, `drain_poll` und der Chat-Schleife; zu lange Nachrichten bekommen `<ack>` + `<receipt type=sender>`). Erster Lauf, in dem die Verbindung den Offline-Stapel überlebt: 22 Minuten online, Ende regulär durch den Linger-Timer.
+
+| Phase | Lauf 8 |
+|---|---:|
+| Programmstart → Schirm + GUI (1 Chat, Arena 32 KiB im Chip-RAM) | 1,46 s (bei 3,4 s) |
+| Programmstart → `<success>` / `<active/>` | 72,1 s / 74,3 s (48,8 s ab Connect) |
+| 166 587-Byte-Frame: erstes Byte → vollständig entschlüsselt | 77,8 s → 182,0 s (104,1 s: ≈ 60 s Empfang + ≈ 40 s GCM an Ort und Stelle), **kein Abbruch** |
+| die zu lange Eigen-Telefon-Stanza | bestätigt **und quittiert** (`receipt type=sender`), verworfen (182,9 s) |
+| 613-Byte-`pkmsg` (schon in Lauf 6 entschlüsselt, Quittung damals verloren, Server lieferte neu) | „old counter (duplicate)“ nach 0,04 s, bestätigt ohne Retry (188,8 s) |
+| 293-Byte-`pkmsg` | entschlüsselt in 0,42 s → `[protocol message, type 17]` (193,7 s) |
+| Stapelphase | **901,5 s** (bis 976 s): die eigenen Pong-Antworten alle 20 s hielten den 45-s-Ruhe-Timer am Leben (45 der 54 „Stapel-Stanzas“ waren `<iq type=result>` auf unsere Pings) – Fix der Signal-Session danach |
+| `tachyon.next` (TLS + Noise für den nächsten Start) / 10 neue Prekeys | 18,9 s / 41,1 s, online |
+| vier in der GUI getippte Zeilen → gesendet (`pkmsg` + device-identity, 183–216 Byte Signal) | 1039,6 / 1042,2 / 1044,7 / 1047,2 s, je ≈ 0,25 s Verschlüsseln |
+| Server-Acks dazu | 1048,5 / 1049,1 / 1049,4 / 1049,8 s (**1 bis 9 s** nach dem Senden); auf dem Telefon mit zwei blauen Haken |
+| Ende (Linger 300 s nach der Stapelphase), WebSocket geschlossen | ≈ 1338 s; Staging-Spitze 4955 von 32 768 Byte |
+| GUI: Ticks / Mittel / Maximum / über 100 ms | 4626 / 8 ms / 280 ms / 5 |
+| Speicher nach Start beider Programme (SYS:avail.txt) | Fast 61 KB frei, Chip 272 KB frei |
+
+Bilanz der Verbindung: 81 Stanzas, 3 Acks gesendet, 4 Texte gesendet, 1 empfangen, 1 nicht entschlüsselbar, 1 zu lang.
+
+### Einordnung
+
+Die Hypothese aus Schritt 26 (der Server schließt, weil zwischen `<active/>` und der Linger-Schleife kein Anwendungs-Keepalive geht) ist bestätigt: mit dem Ping aus jeder Phase, auch während der 104 s Empfang und Entschlüsselung des langen Frames, blieb die Verbindung 22 Minuten offen, Pong-Antworten kamen alle 20 s. whatsmeow macht dasselbe aus einer eigenen Goroutine (20–30 s, unabhängig vom Empfang) und leert den Socket in drei entkoppelten Stufen; unser Äquivalent ohne Threads ist Staging-Puffer + Yield-Hooks + Ping, und es reicht.
+
+Die GUI-Seite: 4626 Ticks statt 117 (Lauf 7b), weil die Linger-Schleife lang war und jede 200-ms-Scheibe leer auslief; während der 60 s Empfang gab es weiterhin keine Ticks (jeder `recv` lieferte Daten), deshalb kamen Tasten gebündelt – behoben nach dem Lauf in b78b358 (Fenster-Signal in der `WaitSelect`-Maske, Tick alle 200 ms auch bei Datenstrom), und das deutsche Tastaturlayout (y/z vertauscht, keine Umlaute: ROM-Keymap `usa0`) kommt ab Lauf 9 per `setmap d` von der Workbench-Disk (f26953c). Beides ist noch nicht live geprüft.
+
+Der Host-Wrapper `tools/run-fsuae-net.sh` starb während des Laufs an einer gleichzeitigen Änderung derselben Datei (bash liest Skripte inkrementell); FS-UAE lief weiter, Ergebnis und Schlüsseldateien wurden von Hand zurückkopiert (`build/chat8-result.txt`). Skripte werden ab jetzt nicht mehr während eines Laufs geändert.
+
