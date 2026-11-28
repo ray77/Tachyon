@@ -830,6 +830,17 @@ static int handle_async(const wab_node *n)
         return send_ack(n);
     }
     if (wab_str_eq(&n->tag, "notification")) return send_ack(n);
+    if (wab_str_eq(&n->tag, "status") || wab_str_eq(&n->tag, "appdata") || wab_str_eq(&n->tag, "call")) {
+        /* whatsmeow (client.go) feeds <status> and <appdata> to the same handler as <message> and acknowledges them with
+         * <ack class=status ... type=media/>. Unacknowledged, the server re-delivers them on every connection and holds
+         * everything queued behind them (runs 11/12: the five status broadcasts came back with offline=3, then 4, and no
+         * <message> followed). We do not decrypt status media, so the content is dropped. */
+        char ib[40], fr[64], tg[12]; uint32_t tl = n->tag.len < sizeof tg - 1 ? n->tag.len : sizeof tg - 1, ti;
+        for (ti = 0; ti < tl; ti++) tg[ti] = (char)n->tag.p[ti];
+        tg[tl] = 0;
+        wa_fmt(line, sizeof line, "%s: %s from %s acknowledged, not decrypted", tg, attr_cstr(n, "id", ib, sizeof ib), attr_cstr(n, "from", fr, sizeof fr)); logl(line);
+        return send_ack(n);
+    }
     if (wab_str_eq(&n->tag, "ack")) {
         const wab_value *id = wab_get_attr(n, "id"), *cl = wab_get_attr(n, "class"); char er[16];
         if (io->on_ack && id && id->kind == WAB_STR && cl && cl->kind == WAB_STR && wab_str_eq(&cl->str, "message")) { char ib[32]; io->on_ack(io->ctx, attr_cstr(n, "id", ib, sizeof ib), wab_get_attr(n, "error") ? WA_MSG_FAILED : WA_MSG_SENT); }

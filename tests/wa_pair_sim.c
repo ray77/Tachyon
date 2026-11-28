@@ -52,7 +52,7 @@ static uint8_t fatbuf[65536]; static uint32_t fat_len;                          
 static uint8_t big[262144]; static uint32_t big_len, big_off, rx_total;           /* the WebSocket message being served in chunks */
 static uint32_t slow_chunk, slow_ms;                                              /* F: the message trickles in (chunk bytes every slow_ms), as the 68000's TLS layer delivers it */
 static int closed_by_server, closed_after_queue, stage, codes_shown, ticks, pongs, keepalives, acks, signs, errors, closes;
-static int counts, uploads, actives, stanza_acks, upload_keys, bad_upload, fat_acked; static uint32_t rx_before_batch; static char ack_class[2][16], ack_id[2][16], ack_to[2][40];
+static int counts, uploads, actives, stanza_acks, status_acks, upload_keys, bad_upload, fat_acked; static uint32_t rx_before_batch; static char ack_class[2][16], ack_id[2][16], ack_to[2][40];
 static wa_prekeys prekeys; static int prekeys_saved; static void save_prekeys(void *ctx) { (void)ctx; prekeys_saved++; }
 static uint32_t scan_at_code;                                                     /* which code the "phone" scans (1-based); 0 = never */
 static uint32_t exp_first_ms = 3000, exp_next_ms = 1500;
@@ -285,6 +285,13 @@ static int io_send(void *ctx, const uint8_t *p, uint32_t n)
                     if (id && id->kind == WAB_STR && id->str.len == 10 && memcmp(id->str.p, "FATBIG0001", 10) == 0) fat_acked++;
                     if (to && to->kind == WAB_JID) snprintf(ack_to[k], sizeof ack_to[k], "%.*s@%.*s", (int)to->jid.user.len, (const char *)to->jid.user.p, (int)to->jid.server.len, (const char *)to->jid.server.p);
                     CHECK((wab_get_attr(nd, "type") != 0) == (strcmp(ack_class[k], "message") != 0));   /* receipt / notification type copied, none for a message (whatsmeow) */
+                    if (cl && cl->kind == WAB_STR && wab_str_eq(&cl->str, "status")) {
+                        const wab_value *pa = wab_get_attr(nd, "participant"), *ty = wab_get_attr(nd, "type");
+                        status_acks++;
+                        CHECK(to && to->kind == WAB_JID && wab_str_eq(&to->jid.user, "status") && wab_str_eq(&to->jid.server, "broadcast"));
+                        CHECK(pa && pa->kind == WAB_JID && wab_str_eq(&pa->jid.server, "lid") && ty && ty->kind == WAB_STR && wab_str_eq(&ty->str, "media"));
+                        CHECK(id && id->kind == WAB_STR && wab_str_eq(&id->str, "ACA242C50E842BEE"));
+                    }
                 }
                 else if (xmlns && wab_str_eq(&xmlns->str, "w:p")) { keepalives++; CHECK(type && wab_str_eq(&type->str, "get")); CHECK(wab_get_child(nd, "ping") != 0); }
                 else if (xmlns && wab_str_eq(&xmlns->str, "encrypt") && wab_get_child(nd, "count")) {
@@ -318,7 +325,7 @@ static int io_send(void *ctx, const uint8_t *p, uint32_t n)
                     enqueue_result(id, 0);
                 }
                 else if (xmlns && wab_str_eq(&xmlns->str, "passive")) {
-                    wab_node ntf, rcpt, cnt; wab_attr na[4], ra[4], ca[1];
+                    wab_node ntf, rcpt, cnt, sts, senc; wab_attr na[4], ra[4], ca[1], sa[5], sea[1];
                     actives++; CHECK(type && wab_str_eq(&type->str, "set")); CHECK(wab_get_child(nd, "active") != 0);
                     enqueue_result(id, 0);
                     /* what the server then sends: a compressed notification and a receipt (both to be acknowledged) */
@@ -327,6 +334,13 @@ static int io_send(void *ctx, const uint8_t *p, uint32_t n)
                     ntf.attrs = na; ntf.n_attrs = 4; wab_node_init(&cnt, "count"); ca[0].key = wab_s("value"); ca[0].val = wab_text("3"); cnt.attrs = ca; cnt.n_attrs = 1;
                     ntf.val.kind = WAB_LIST; ntf.children = &cnt; ntf.n_children = 1;
                     enqueue_compressed_node(&ntf);
+                    /* a status broadcast as in live runs 11/12 (acknowledged with class=status type=media participant, not decrypted) */
+                    wab_node_init(&sts, "status"); sa[0].key = wab_s("from"); sa[0].val = wab_jid_value("status", "broadcast", 0);
+                    sa[1].key = wab_s("type"); sa[1].val = wab_text("media"); sa[2].key = wab_s("id"); sa[2].val = wab_text("ACA242C50E842BEE");
+                    sa[3].key = wab_s("participant"); sa[3].val = wab_jid_value("123456789012345", "lid", 0); sa[4].key = wab_s("offline"); sa[4].val = wab_text("3");
+                    sts.attrs = sa; sts.n_attrs = 5; wab_node_init(&senc, "enc"); sea[0].key = wab_s("type"); sea[0].val = wab_text("msg"); senc.attrs = sea; senc.n_attrs = 1;
+                    senc.val.kind = WAB_BYTES; senc.val.str.p = (const uint8_t *)"\x33garbage"; senc.val.str.len = 8; sts.val.kind = WAB_LIST; sts.children = &senc; sts.n_children = 1;
+                    enqueue_node(&sts);
                     wab_node_init(&rcpt, "receipt"); ra[0].key = wab_s("from"); ra[0].val = wab_jid_value("4917612345678", "s.whatsapp.net", 0);
                     ra[1].key = wab_s("id"); ra[1].val = wab_text("ABCDEF1234"); ra[2].key = wab_s("type"); ra[2].val = wab_text("read"); ra[3].key = wab_s("t"); ra[3].val = wab_text("1764300002");
                     rcpt.attrs = ra; rcpt.n_attrs = 4;
@@ -411,7 +425,7 @@ static void reset(wa_probe_io *io, wa_creds *creds)
     err_code[0] = err_text[0] = 0;
     memset(creds, 0, sizeof *creds); test_identity(&creds->id);
     io->creds = creds; io->creds_loaded = 1; io->paired_now = 0;
-    counts = uploads = actives = stanza_acks = upload_keys = bad_upload = prekeys_saved = 0; memset(ack_class, 0, sizeof ack_class); memset(ack_id, 0, sizeof ack_id); memset(ack_to, 0, sizeof ack_to);
+    counts = uploads = actives = stanza_acks = status_acks = upload_keys = bad_upload = prekeys_saved = 0; memset(ack_class, 0, sizeof ack_class); memset(ack_id, 0, sizeof ack_id); memset(ack_to, 0, sizeof ack_to);
     wa_prekeys_init(&prekeys); io->prekeys = &prekeys; io->prekeys_loaded = 1; io->prekeys_wanted = 3; io->save_prekeys = save_prekeys; io->linger_ms = 1500;
 }
 
@@ -476,7 +490,7 @@ int main(int argc, char **argv)
         CHECK(io.server_prekeys == 0 && io.prekeys_uploaded == 3 && io.active_set);
         /* after the upload the idle phase regenerates the batch: 3 pending again, record saved twice (upload, refill) */
         CHECK(prekeys_saved == 2 && wa_prekeys_pending(&prekeys) == 3 && prekeys.n == 6 && io.nextkeys_ready == 0);
-        CHECK(stanza_acks == 2 && io.acks_sent == 2 && io.frames_after_login == 5);   /* 3 results + notification + receipt */
+        CHECK(stanza_acks == 3 && io.acks_sent == 3 && status_acks == 1 && io.frames_after_login == 6);   /* 3 results + notification + status + receipt */
         CHECK(strcmp(ack_class[0], "notification") == 0 && strcmp(ack_id[0], "1234567890") == 0 && strcmp(ack_to[0], "@s.whatsapp.net") == 0);
         CHECK(strcmp(ack_class[1], "receipt") == 0 && strcmp(ack_id[1], "ABCDEF1234") == 0 && strcmp(ack_to[1], "4917612345678@s.whatsapp.net") == 0);
         CHECK(closes == 1);
@@ -521,7 +535,7 @@ int main(int argc, char **argv)
         CHECK(strcmp(rcpt_type[0], "sender") == 0 && strcmp(rcpt_id[0], "PHONE0000000001") == 0 && strcmp(rcpt_type[1], "sender") == 0 && strcmp(rcpt_id[1], "PHONE0000000002") == 0);
         CHECK(recv_n == 2 && strcmp(recv_text[0], "Antwort vom Telefon: hallo Amiga!") == 0 && strcmp(recv_text[1], "zweite Nachricht, gleiche Sitzung \xe4\xf6\xfc") == 0);   /* UTF-8 -> Latin-1 for the console */
         CHECK(wa_prekeys_find(&prekeys, 5) == 0 && prekeys.n == 6);          /* the one-time prekey is gone; 3 uploaded + 3 refilled remain */
-        CHECK(sessions.n == 1 && sessions_saved >= 3 && stanza_acks == 2);   /* no ack for decrypted messages: receipts only */
+        CHECK(sessions.n == 1 && sessions_saved >= 3 && stanza_acks == 3);   /* no ack for decrypted messages: receipts only (+ the status broadcast) */
         /* what the chat interface saw: both texts as UTF-8 with the pushname and the stanza's time, our message with its id,
          * the server's ack as SENT, the connection's states, the server clock from <success t> and the stanzas */
         CHECK(txt_n == 2 && strcmp(txt_user, "4917612345678") == 0 && txt_dev == 0 && txt_lid == 0 && strcmp(txt_name, "Telefon") == 0 && txt_ts == 1764300010);
@@ -554,7 +568,7 @@ int main(int argc, char **argv)
         CHECK(ack_n == 5 && ack_st[0] == WA_MSG_SENT && ack_st[1] == WA_MSG_READ && strcmp(gack_id[1], snt_id[0]) == 0);   /* scripted text: ack + read receipt (before <active/>) */
         CHECK(ack_st[2] == WA_MSG_READ && strcmp(gack_id[2], "ABCDEF1234") == 0);                                            /* the batch's receipt */
         CHECK(ack_st[3] == WA_MSG_SENT && ack_st[4] == WA_MSG_READ && strcmp(gack_id[4], snt_id[1]) == 0);                   /* the GUI line, in the linger loop */
-        CHECK(stanza_acks == 4 && tm_last == 1764300020);                    /* notification + 3 receipts acknowledged; the clock follows the last receipt */
+        CHECK(stanza_acks == 5 && tm_last == 1764300020);                    /* notification + status + 3 receipts acknowledged; the clock follows the last receipt */
         gui_sim = 0; io.chat_input_to = 0;
     }
     /* ---- F: the offline batch as one long WebSocket message: a 40 KB stanza (longer than a TLS record, far shorter
@@ -570,10 +584,10 @@ int main(int argc, char **argv)
         r = wa_probe_sim_login(&io, b, l);
         printf("%s\n", io.result);
         CHECK(r == 1 && io.logged_in && actives == 1);
-        CHECK(stanza_acks == 9 && io.acks_sent == 9);                          /* notification + receipt + the 40 KB notification + 6 fat notifications */
+        CHECK(stanza_acks == 10 && io.acks_sent == 10);                        /* notification + status + receipt + the 40 KB notification + 6 fat notifications */
         CHECK(fat_acked == 1);
         CHECK(strcmp(ack_id[1], "FAT0000005") == 0 && strcmp(ack_class[1], "notification") == 0);
-        CHECK(io.frames_after_login == 3 + 2 + 7 + 1);                         /* 3 results, 2 small, 7 fat, the <ib offline> marker */
+        CHECK(io.frames_after_login == 3 + 3 + 7 + 1);                         /* 3 results, 3 small, 7 fat, the <ib offline> marker */
         CHECK(fat_frame == 0 && fat_batch == 0 && big_off == big_len);
         CHECK(io.rx_bytes == rx_total && rx_total > rx_before_batch + 58000);          /* every served byte was counted */
     }
@@ -588,10 +602,10 @@ int main(int argc, char **argv)
         r = wa_probe_sim_login(&io, b, l);
         printf("%s\n", io.result);
         CHECK(r == 1 && io.logged_in && actives == 1);
-        CHECK(stanza_acks == 8 && io.acks_sent == 8);                          /* notification + receipt + 6 fat notifications */
+        CHECK(stanza_acks == 9 && io.acks_sent == 9);                          /* notification + status + receipt + 6 fat notifications */
         CHECK(fat_acked == 0);
         CHECK(strcmp(ack_id[1], "FAT0000005") == 0 && strcmp(ack_class[1], "notification") == 0);
-        CHECK(io.frames_after_login == 3 + 2 + 6 + 1);                         /* 3 results, 2 small, 6 fat, the <ib offline> marker (the skipped frame is not counted) */
+        CHECK(io.frames_after_login == 3 + 3 + 6 + 1);                         /* 3 results, 3 small, 6 fat, the <ib offline> marker (the skipped frame is not counted) */
         CHECK(fat_frame == 0 && fat_batch == 0 && big_off == big_len);
     }
     printf("%s: %d checks, %d failures\n", fails ? "FAIL" : "PASS", checks, fails);
