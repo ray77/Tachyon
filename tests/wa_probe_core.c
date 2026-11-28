@@ -59,7 +59,10 @@ static uint32_t pend_len;
  * while the 68000 computed for 50 s. The pump takes staged bytes before reading the socket again. */
 static char line[640];
 static uint32_t stage_len, stage_peak; static int in_pump, stage_full_noted;   /* peak: the most the staging buffer held in this run (RESULT line) */
+static int in_send;                        /* inside send_node/app_send: no nested application send from a yield hook */
+static uint32_t ka_last;                   /* the last keepalive ping (<iq xmlns=w:p><ping/>) after login */
 static void logl(const char *s);
+static int keepalive_due(void);
 static void drain_poll(void *hio)
 {
     int32_t r; (void)hio;
@@ -70,6 +73,7 @@ static void drain_poll(void *hio)
     }
     r = io->recv(io->ctx, stage + stage_len, stage_cap - stage_len, 0);
     if (r > 0) { stage_len += (uint32_t)r; io->rx_bytes += (uint32_t)r; if (stage_len > stage_peak) stage_peak = stage_len; }
+    keepalive_due();                             /* the server wants application traffic, not only WebSocket pongs (live attempts 4-7b) */
 }
 static uint8_t rdbuf[8192];
 static uint32_t t_start;
@@ -146,15 +150,17 @@ static int flush_tls(void) { if (io->tunnel || !t.out_len) return 1; if (!send_a
 /* plaintext towards the server: through our TLS record layer, or straight into the tunnel */
 static int app_send(const uint8_t *p, uint32_t n)
 {
-    uint32_t off = 0;
-    if (io->tunnel) return send_all(p, n);
+    uint32_t off = 0; int r;
+    in_send++;
+    if (io->tunnel) { r = send_all(p, n); in_send--; return r; }
     while (off < n) {
         int c = tls13_send(&t, p + off, n - off);
-        if (c < 0) return 0;
-        if (c == 0) { if (!flush_tls()) return 0; continue; }
+        if (c < 0) { in_send--; return 0; }
+        if (c == 0) { if (!flush_tls()) { in_send--; return 0; } continue; }
         off += (uint32_t)c;
     }
-    return flush_tls();
+    r = flush_tls(); in_send--;
+    return r;
 }
 static int hb_send(void *hio, const uint8_t *p, uint32_t n) { (void)hio; return app_send(p, n); }
 static void gcm_yield(void) { CRYPTO_YIELD(); }       /* AES-GCM runs (TLS records, the Noise frames) reach the heartbeat too */
@@ -578,13 +584,15 @@ static void close_ws(void)
 /* one binary node, encrypted with the transport keys: 3-byte length + ciphertext */
 static int send_node(const wab_node *n, const char *what)
 {
-    static uint8_t pt[2048], ct[2048 + 16 + 3]; uint32_t len; int e;
+    static uint8_t pt[2048], ct[2048 + 16 + 3]; uint32_t len; int e, r;
     e = wab_encode_frame(n, pt, sizeof pt, &len);
     if (e != WAB_OK) { wa_fmt(line, sizeof line, "wab: encoding %s failed: %s", what, wab_errstr(e)); logl(line); return 0; }
+    in_send++;                                   /* the Noise encryption below yields (AES-GCM): no keepalive from the hook meanwhile */
     noise_transport_encrypt(&tr, pt, len, ct + 3);
     ct[0] = (uint8_t)((len + 16) >> 16); ct[1] = (uint8_t)((len + 16) >> 8); ct[2] = (uint8_t)(len + 16);
     if (io->debug) { wa_fmt(line, sizeof line, "  send %s, %u bytes node:", what, len); log_hex(line, pt, len < 64 ? len : 64); }
-    return ws_send(ct, len + 16 + 3);
+    r = ws_send(ct, len + 16 + 3); in_send--;
+    return r;
 }
 
 /* next WA frame: 1 = decrypted into plain (*plen), 0 = nothing within timeout_ms, -1 = connection gone or a malformed
@@ -642,7 +650,7 @@ static int recv_frame(uint32_t timeout_ms, uint8_t **plain, uint32_t *plen)
                  * 68000 tens of seconds: the heartbeat (pongs, socket poll into the staging buffer) runs meanwhile */
                 if (flen > 16384) { heartbeat_init(&frame_hb, &w, io->now_ms, 4000, hb_send, 0); frame_hb.poll = drain_poll; heartbeat_arm(&frame_hb); }
                 ok = noise_transport_decrypt(&tr, ct, flen, ct);
-                if (flen > 16384) { heartbeat_disarm(); io->pongs += frame_hb.sent; if (frame_hb.error) { logl("ws: heartbeat send failed during the frame's decryption"); frames_reset(); return -1; } }
+                if (flen > 16384) { heartbeat_disarm(); io->pongs += frame_hb.sent; if (frame_hb.error) { wa_fmt(line, sizeof line, "ws: heartbeat send failed during the frame's decryption (%u pongs sent before)", frame_hb.sent); logl(line); frames_reset(); return -1; } }
                 if (!ok) { logl("wab: frame does not decrypt"); frames_reset(); return -1; }
                 if (long_total) { wa_fmt(line, sizeof line, "ws: the %u-byte frame is complete after %T s", 3 + flen, ms() - long_t0); logl(line); long_total = 0; }
                 *plain = ct; *plen = flen - 16;
@@ -663,6 +671,7 @@ static int recv_frame(uint32_t timeout_ms, uint8_t **plain, uint32_t *plen)
         {
             uint32_t now = ms();
             if (now >= deadline) { long_note(skip_left ? skip_done : avail); return 0; }
+            if (!keepalive_due()) { logl("ws: keepalive send failed"); return -1; }
             pump_quiet = 1;
             if (!pump(-1, 1, deadline - now)) { pump_quiet = 0; if (w.state == WS_CLOSED || w.state == WS_ERROR || t.error) return -1; long_note(skip_left ? skip_done : avail); return 0; }
             pump_quiet = 0;
@@ -751,7 +760,18 @@ static int send_keepalive(void)
 {
     static char id[32];
     next_iq_id(id, sizeof id);
+    ka_last = ms();
     return send_iq1(id, "w:p", "get", "ping", "keepalive ping");
+}
+/* a keepalive ping every 20 s from login on, whatever the probe is doing (whatsmeow: 20-30 s, independent of traffic).
+ * The server reset the connection 65-180 s after <active/> in live attempts 4-7b, every time while we were receiving
+ * the offline batch or computing with only WebSocket pongs going out. Called from recv_frame (every wait), from the
+ * heartbeat's poll (computations) and from the chat loop; never nested inside a send or the pump. 0 = send failed. */
+static int keepalive_due(void)
+{
+    if (!io->logged_in || in_send || in_pump) return 1;
+    if (ms() - ka_last < 20000) return 1;
+    return send_keepalive();
 }
 
 /* whatsmeow sendAck (receipt.go): <ack class=tag id to=from [participant] [type]/> for receipts and notifications.
@@ -1072,10 +1092,13 @@ static int handle_message(const wab_node *n)
     if (elen > SIG_BODY_MAX + 160) {
         /* longer than this build decrypts (SIG_BODY_MAX inner bytes; a prekey message adds ~140): the phone's inline
            history bootstrap is such a message (166 KB live). Acknowledged so the server stops re-sending it, lost. */
-        wa_fmt(line, sizeof line, "msg: message %s from %s:%u (%s, %u bytes%s) is longer than this build decrypts (%u): acknowledged, lost",
+        wa_fmt(line, sizeof line, "msg: message %s from %s:%u (%s, %u bytes%s) is longer than this build decrypts (%u): acknowledged and receipted, lost",
                attr_cstr(n, "id", idb, sizeof idb), user, (uint32_t)from->jid.device, is_pk ? "pkmsg" : "msg", elen, wab_get_attr(n, "offline") ? ", offline" : "", (uint32_t)SIG_BODY_MAX); logl(line);
         io->msgs_deferred++;
-        return send_ack(n);
+        /* the <ack> alone did not stop the server from delivering the 166 KB history message again at the next login
+           (live attempt 7b): like a decrypted message it gets a <receipt> (type=sender for our own account) */
+        if (!send_ack(n)) return 0;
+        return send_receipt(n, user);
     }
     s = sig_store_get(io->sessions, user, from->jid.device, lid, is_pk);
     if (!s) { wa_fmt(line, sizeof line, "msg: message %s from %s:%u is a plain msg but we have no session with that device: acknowledged, lost", attr_cstr(n, "id", idb, sizeof idb), user, (uint32_t)from->jid.device); logl(line); io->msgs_failed++; return send_ack(n); }
@@ -1288,7 +1311,7 @@ static int post_login(void)
     t_end = ms() + io->linger_ms; last_ka = ms();
     while (ms() < t_end) {
         const wab_node *n; uint32_t now = ms(), left = t_end - now;
-        if (now - last_ka >= 25000) { if (!send_keepalive()) break; last_ka = now; }
+        if (!keepalive_due()) break; (void)last_ka;
         if (io->sessions && next_chat_line(&cu, &cd, &cl)) {
             if (chat_line[0] == '/' && chat_line[1] == 'q') { logl("chat: /quit"); break; }
             if (!cu) logl("chat: no peer configured (chat_user), line dropped");
@@ -1336,7 +1359,7 @@ static int expect_success(const uint8_t *plain, uint32_t plen)
     if (!n) return fail("RESULT: login: first frame undecodable", 0, 0);
     if (wab_str_eq(&n->tag, "success")) {
         io->logged_in = 1; io->t_login_accepted = ms();
-        server_time(n); state(WA_CONN_LOGIN, "logged in");
+        server_time(n); state(WA_CONN_LOGIN, "logged in"); ka_last = ms();
         wa_fmt(line, sizeof line, "login: <success> - logged in as %s:%u@%s (lid %s, server time %s)", io->creds->jid_user, io->creds->jid_device, WA_SERVER_JID,
                attr_cstr(n, "lid", b1, sizeof b1), attr_cstr(n, "t", b2, sizeof b2)); logl(line);
         return 1;
