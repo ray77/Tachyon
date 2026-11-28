@@ -16,3 +16,7 @@ fullscreen = 0
 video_sync = 0
 zoom = auto
 network_card = a2065
+# no joystick on this Mac: FS-UAE would otherwise map the arrow keys (and right Ctrl/Alt) to a keyboard joystick in
+# port 1, and the Amiga never sees cursor keys (live run 14: no chat switch in the GUI)
+joystick_port_1 = none
+joystick_port_1_mode = nothing

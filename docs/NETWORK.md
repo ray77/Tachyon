@@ -71,7 +71,7 @@ DH0:seed.bin (64 Byte /dev/urandom)  now.txt (UTC)  waip.txt (dig)  gap.txt (GAP
 DH0:C/SetMap (Boot-Disk System/) + DH0:Devs/Keymaps/d (Extras-Disk)   Startup-Sequence: setmap d  (KEYMAP=d, WBEXTRAS=...)
 ```
 
-Tastaturbelegung: FS-UAE schickt die physischen Tastenpositionen des Mac-Keyboards, die ROM-Keymap ist `usa0`. Ohne `SetMap` sieht die GUI deshalb y/z vertauscht und keine Umlaute (Live-Lauf 8, 2026-11-28). `tools/run-fsuae-net.sh` kopiert `System/SetMap` von der Boot-Disk und `Devs/Keymaps/$KEYMAP` von der Extras-Disk (`WBEXTRAS`, Standard `~/Documents/FS-UAE/Floppies/wb133-extras.adf`) und setzt `setmap d` vor den Probe-Start; `KEYMAP=` schaltet es ab, fehlt die Extras-Disk, bleibt es bei der US-Belegung (Meldung im Log). Beide Dateien sind Commodore-Material und liegen nur unter `build/`.
+Tastaturbelegung: FS-UAE schickt die physischen Tastenpositionen des Mac-Keyboards, die ROM-Keymap ist `usa0`. Ohne `SetMap` sieht die GUI deshalb y/z vertauscht und keine Umlaute (Live-Lauf 8, 2026-11-28). `tools/run-fsuae-net.sh` kopiert `System/SetMap` von der Boot-Disk und `Devs/Keymaps/$KEYMAP` von der Extras-Disk (`WBEXTRAS`, Standard `~/Documents/FS-UAE/Floppies/wb133-extras.adf`) und setzt `setmap d` vor den Probe-Start; `KEYMAP=` schaltet es ab, fehlt die Extras-Disk, bleibt es bei der US-Belegung (Meldung im Log). Beide Dateien sind Commodore-Material und liegen nur unter `build/`. Pfeiltasten: ohne angeschlossenen Joystick legt FS-UAE die Cursortasten (und rechte Ctrl/Alt) als Tastatur-Joystick auf Port 1, der Amiga sieht sie dann nicht (Lauf 14: kein Chatwechsel in der GUI); `tools/fsuae/a500-1mb-fast-net.fs-uae` setzt deshalb `joystick_port_1 = none`.
 
 ## 3. Entwurf: `net/bsdsock_io.c`
 
