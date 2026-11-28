@@ -82,7 +82,10 @@ static uint32_t prog_last; static int con_dots, scr_dots;
 static void progress_tick(void *ctx)
 {
     static uint32_t calls; uint32_t now; (void)ctx;
-    if (++calls & 15) return;                 /* DateStamp only every 16th yield (the heartbeat already asks once per yield) */
+    /* without the GUI: DateStamp only every 16th yield (X25519 yields often). With it: every yield - AES-GCM yields only
+     * every 64 blocks (~0.25 s on the 68000), and with the 16-fold divisor the keys were echoed every 3-4 s while a
+     * TLS record or the 166 KB frame was decrypted (live attempt 7b: "typing is very slow") */
+    if ((++calls & 15) && !gui_on) return;
     now = now_ms();
     if (gui_on && now - gui_last_tick >= 200) gui_tick();   /* keys and the clock while the 68000 computes (X3DH: a minute) */
     if (now - prog_last < 2000) return;
