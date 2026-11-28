@@ -20,6 +20,8 @@ ROOT=$(cd "$HERE/.." && pwd)
 FSUAE=/Applications/FS-UAE.app/Contents/MacOS/fs-uae
 XDFTOOL=${XDFTOOL:-$HOME/opt/amitools-venv/bin/xdftool}
 WBADF=${WBADF:-$HOME/Documents/FS-UAE/Floppies/wb133-boot.adf}
+WBEXTRAS=${WBEXTRAS:-$HOME/Documents/FS-UAE/Floppies/wb133-extras.adf}   # Devs/Keymaps lives on the Extras disk
+KEYMAP=${KEYMAP:-d}            # SetMap before the probe: d = German (FS-UAE sends the host's key positions, the ROM keymap is usa0); "" = none
 WIRE=${WIRE:-$ROOT/build/thewire13/TheWire13}
 A2065DEV=${A2065DEV:-$ROOT/build/a2065dev/a2065.device}
 WORK=${TACHYON_NET_WORK:-"$ROOT/build/fsuae-net"}
@@ -42,6 +44,15 @@ rm -rf "$WORK"; mkdir -p "$DH0/S" "$DH0/C" "$DH0/Libs" "$DH0/Devs/Networks"
 cp "$EXE" "$DH0/test"
 # C: commands from the user's Workbench 1.3 disk (Kickstart 1.3 has none in ROM)
 for c in Run Wait Stack Echo ChangeTaskPri Avail; do "$XDFTOOL" "$WBADF" read "c/$c" "$DH0/C/$c" >/dev/null; done
+# keyboard layout: System/SetMap (boot disk) + Devs/Keymaps/<KEYMAP> (Extras disk); without them the GUI sees the US layout
+SETMAP_LINE=""
+if [ -n "$KEYMAP" ]; then
+  if [ -f "$WBEXTRAS" ]; then
+    mkdir -p "$DH0/Devs/Keymaps"
+    "$XDFTOOL" "$WBADF" read system/SetMap "$DH0/C/SetMap" >/dev/null && "$XDFTOOL" "$WBEXTRAS" read "devs/keymaps/$KEYMAP" "$DH0/Devs/Keymaps/$KEYMAP" >/dev/null \
+      && SETMAP_LINE="setmap $KEYMAP\n" || echo "(keymap $KEYMAP not installed: SetMap or Devs/Keymaps/$KEYMAP missing on the disks)"
+  else echo "(no Extras disk at $WBEXTRAS: US keymap; set WBEXTRAS or KEYMAP=)"; fi
+fi
 cp "$WIRE/c/TheWire13" "$WIRE/c/mini_ping" "$WIRE/c/mini_ntp" "$WIRE/c/mini_nslookup" "$DH0/C/" 2>/dev/null || cp "$WIRE/c/TheWire13" "$DH0/C/"
 cp "$WIRE/libs/bsdsocket.library" "$DH0/Libs/"
 # utility.library V37 for 1.3 (make utility13): the a2065.device opens it at init time
@@ -112,8 +123,8 @@ if [ -n "${CHAT_TO:-}" ]; then printf '%s\n%s\n%s\n' "$CHAT_TO" "${CHAT_SEND:-}"
 NET_ORDER=${NET_ORDER:-probe-first}
 if [ "${NET_NOSTACK:-0}" = 1 ]; then printf 'stack %s\ntest\n' "$NET_STACK" > "$DH0/S/Startup-Sequence"   # driver tests without the stack
 elif [ "$NET_ORDER" = probe-first ]; then
-  printf "stack %s\necho \"Tachyon: Probe startet (eigenes Fenster), danach der TCP/IP-Stack TheWire13 - bitte warten\"\n${HOLD_LINE}run >NIL: test\nwait 2\nrun >NIL: C:TheWire13 >SYS:stack.log\nwait %s\navail >SYS:avail.txt\n" "$NET_STACK" "$NET_WAIT" > "$DH0/S/Startup-Sequence"
-else printf "stack %s\necho \"Tachyon: TCP/IP-Stack TheWire13 startet, die Probe folgt in %s s - bitte warten\"\n${HOLD_LINE}run >NIL: C:TheWire13 >SYS:stack.log\nwait %s\navail >SYS:avail.txt\ntest\navail >SYS:avail2.txt\n" "$NET_STACK" "$NET_WAIT" "$NET_WAIT" > "$DH0/S/Startup-Sequence"; fi
+  printf "stack %s\n${SETMAP_LINE}echo \"Tachyon: Probe startet (eigenes Fenster), danach der TCP/IP-Stack TheWire13 - bitte warten\"\n${HOLD_LINE}run >NIL: test\nwait 2\nrun >NIL: C:TheWire13 >SYS:stack.log\nwait %s\navail >SYS:avail.txt\n" "$NET_STACK" "$NET_WAIT" > "$DH0/S/Startup-Sequence"
+else printf "stack %s\n${SETMAP_LINE}echo \"Tachyon: TCP/IP-Stack TheWire13 startet, die Probe folgt in %s s - bitte warten\"\n${HOLD_LINE}run >NIL: C:TheWire13 >SYS:stack.log\nwait %s\navail >SYS:avail.txt\ntest\navail >SYS:avail2.txt\n" "$NET_STACK" "$NET_WAIT" "$NET_WAIT" > "$DH0/S/Startup-Sequence"; fi
 
 # SIGPIPE ignored, inherited by fs-uae across exec: three live runs ended with fs-uae killed hard on a transmit right
 # after a long inbound stall (log cut mid-line, no crash report) - the pattern of slirp writing to a host socket the
