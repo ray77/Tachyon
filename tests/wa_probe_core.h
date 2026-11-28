@@ -144,6 +144,7 @@ typedef struct wa_probe_io {
     uint32_t d_prekeys;                     /* prekey generation time in this run (online, idle phase) */
     uint32_t server_prekeys, prekeys_uploaded, t_active, frames_after_login, acks_sent, messages_seen;
     int have_server_prekeys, active_set;
+    uint32_t server_prekeys_notice; int prekeys_low_notice;   /* <notification type=encrypt><count value=N/>: N, and N < WA_PREKEYS_MIN_SERVER until the upload */
 
     /* results, milliseconds since wa_probe_run started (0 = not reached) */
     uint32_t t_tls, t_ws, t_hello, t_finish, t_accepted;

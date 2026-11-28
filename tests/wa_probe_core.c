@@ -829,7 +829,21 @@ static int handle_async(const wab_node *n)
         }
         return send_ack(n);
     }
-    if (wab_str_eq(&n->tag, "notification")) return send_ack(n);
+    if (wab_str_eq(&n->tag, "notification")) {
+        const wab_value *ty = wab_get_attr(n, "type");
+        if (ty && ty->kind == WAB_STR && wab_str_eq(&ty->str, "encrypt")) {
+            /* whatsmeow handleEncryptNotification: <count value=N/> = our one-time prekeys left on the server (others
+               consumed them fetching our bundle); below WA_PREKEYS_MIN_SERVER the pending batch is uploaded, here at the
+               next idle moment of the chat loop. An <identity/> child would mean our identity changed: logged only. */
+            const wab_node *c = wab_get_child(n, "count");
+            if (c) {
+                io->server_prekeys_notice = dec_value(wab_get_attr(c, "value")); io->prekeys_low_notice = io->server_prekeys_notice < WA_PREKEYS_MIN_SERVER;
+                wa_fmt(line, sizeof line, "prekeys: the server reports %u one-time prekeys of ours left%s", io->server_prekeys_notice,
+                       io->prekeys_low_notice ? ": the pending batch is uploaded at the next idle moment" : ""); logl(line);
+            } else if (wab_get_child(n, "identity")) logl("prekeys: the server reports an identity change (not handled)");
+        }
+        return send_ack(n);
+    }
     if (wab_str_eq(&n->tag, "status") || wab_str_eq(&n->tag, "appdata") || wab_str_eq(&n->tag, "call")) {
         /* whatsmeow (client.go) feeds <status> and <appdata> to the same handler as <message> and acknowledges them with
          * <ack class=status ... type=media/>. Unacknowledged, the server re-delivers them on every connection and holds
@@ -1172,9 +1186,11 @@ static int handle_message(const wab_node *n)
     if (via_alt) {
         /* one device, one record: the entry under the sender's address was the phone's archived session; it moves into
            the decrypting one as its archived state (a late message in it still decrypts) and the duplicate entry goes */
-        if (second) { sig_session_absorb(s, second); sig_store_drop(io->sessions, second); }
-        wa_fmt(line, sizeof line, "sessions: %s:%u@%s and %s:%u@%s are one device: one session kept (under the %s)%s", user, (uint32_t)from->jid.device, lid ? "lid" : WA_SERVER_JID,
-               alt_user, (uint32_t)from->jid.device, alt_lid ? "lid" : WA_SERVER_JID, alt_lid ? "LID" : "number", second ? ", the other archived into it" : ""); logl(line);
+        if (second) {
+            sig_session_absorb(s, second); sig_store_drop(io->sessions, second);
+            wa_fmt(line, sizeof line, "sessions: %s:%u@%s and %s:%u@%s are one device: one session kept (under the %s), the other archived into it", user, (uint32_t)from->jid.device, lid ? "lid" : WA_SERVER_JID,
+                   alt_user, (uint32_t)from->jid.device, alt_lid ? "lid" : WA_SERVER_JID, alt_lid ? "LID" : "number"); logl(line);
+        }
     }
     save_sessions();
     if (used) { wa_fmt(line, sizeof line, "msg: one-time prekey %u consumed, %u left in the record", used, io->prekeys ? io->prekeys->n : 0u); logl(line); if (io->save_prekeys) io->save_prekeys(io->ctx); }
@@ -1305,9 +1321,33 @@ static int send_typed_line(void)
 /* the idle work: key material for the next start (two key pairs, es with the server static just verified) and the
  * next one-time prekey batch, each once per run, with the heartbeat (pongs, pings, socket poll) running. Done when the
  * chat has been idle for 15 s, or at the latest 90 s before the linger ends. 0 = connection lost. */
+/* the pending one-time prekeys go to the server; 1 = accepted, 0 = refused, -1 = the connection failed */
+static int upload_prekeys(void)
+{
+    static wa_prekey_upload up; uint32_t n; const wab_node *iq, *r; char id[32];
+    next_iq_id(id, sizeof id);
+    iq = wa_prekeys_upload_node(&up, id, &io->creds->id, io->prekeys, &n);
+    if (!send_node(iq, "prekey upload")) return -1;
+    r = wait_result(id, 30000);
+    if (!iq_is_result(r)) return 0;
+    wa_prekeys_mark_uploaded(io->prekeys); io->prekeys_uploaded += n; io->prekeys_low_notice = 0;
+    if (io->save_prekeys) io->save_prekeys(io->ctx);
+    wa_fmt(line, sizeof line, "login: %u one-time prekeys uploaded and accepted (registration id %u, signed prekey id %u)", n, io->creds->id.reg_id, io->creds->id.spk_id); logl(line);
+    return 1;
+}
+static int prekeys_low(void) { return io->prekeys && io->prekeys_low_notice && io->logged_in; }   /* the batch is generated first if nothing is pending */
+
 static int idle_work(void)
 {
     static heartbeat hb;
+    if (prekeys_low() && !wa_prekeys_pending(io->prekeys) && io->prekeys->n < WA_PREKEYS_MAX) {
+        if (!make_prekeys(io->prekeys_wanted, "while online, the server runs out")) return 0;
+    }
+    if (prekeys_low() && wa_prekeys_pending(io->prekeys)) {
+        int u = upload_prekeys();
+        if (u < 0) { logl("login: connection lost during the prekey upload"); return 0; }
+        if (!u) { logl("prekeys: the upload was not accepted, not retried in this connection"); io->prekeys_low_notice = 0; }
+    }
     if (io->precompute_next && io->nextkeys && !io->nextkeys_ready) {
         uint32_t t0 = ms();
         heartbeat_init(&hb, &w, io->now_ms, 4000, hb_send, 0); hb.poll = drain_poll;
@@ -1329,6 +1369,7 @@ static int idle_work_due(uint32_t left)
 {
     int pending = (io->precompute_next && io->nextkeys && !io->nextkeys_ready) ||
                   (io->prekeys && wa_prekeys_pending(io->prekeys) < io->prekeys_wanted && io->prekeys->n < WA_PREKEYS_MAX);
+    if (prekeys_low()) return 1;                                                /* the server runs out of our prekeys: now */
     return pending && (left <= 90000 || ms() - last_activity >= 15000);
 }
 
@@ -1347,15 +1388,9 @@ static int post_login(void)
         if (!make_prekeys(io->prekeys_wanted, "online, the server ran out")) return fail("RESULT: logged in, connection lost while generating prekeys", 0, 0);
     }
     if (io->prekeys && io->have_server_prekeys && io->server_prekeys < WA_PREKEYS_MIN_SERVER && wa_prekeys_pending(io->prekeys)) {
-        static wa_prekey_upload up; uint32_t n; const wab_node *iq;
-        next_iq_id(id, sizeof id);
-        iq = wa_prekeys_upload_node(&up, id, &io->creds->id, io->prekeys, &n);
-        if (!send_node(iq, "prekey upload")) return fail("RESULT: logged in, but sending the prekey upload failed", 0, 0);
-        r = wait_result(id, 30000);
-        if (!iq_is_result(r)) return fail("RESULT: logged in, but the prekey upload was not accepted (see recv: line)", 0, 0);
-        wa_prekeys_mark_uploaded(io->prekeys); io->prekeys_uploaded = n;
-        if (io->save_prekeys) io->save_prekeys(io->ctx);
-        wa_fmt(line, sizeof line, "login: %u one-time prekeys uploaded and accepted (registration id %u, signed prekey id %u)", n, io->creds->id.reg_id, io->creds->id.spk_id); logl(line);
+        int u = upload_prekeys();
+        if (u < 0) return fail("RESULT: logged in, but sending the prekey upload failed", 0, 0);
+        if (!u) return fail("RESULT: logged in, but the prekey upload was not accepted (see recv: line)", 0, 0);
     }
     /* 2b. the chat text goes out while we are still passive: prekey bundle, X3DH, <message>, the server's <ack>. The
           offline batch only comes after <active/>, and FS-UAE's A2065 emulation has died shortly after that burst in

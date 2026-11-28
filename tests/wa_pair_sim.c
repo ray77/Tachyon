@@ -46,7 +46,7 @@ static uint8_t queue[16][4096]; static uint32_t qlen[16], qhead, qtail;         
 static int coalesce;                                                              /* deliver the next N (2 by default) queued frames in ONE WebSocket message */
 static int coalesce_n = 2;
 static uint32_t fat_frame;                                                        /* F/G: a frame of this many bytes (longer than a TLS record) leads the message */
-static int fat_batch; static uint32_t fat_first;                                 /* F/G: the "offline batch" after <active/>: fat frame + 6 fat notifications in one message */
+static int fat_batch; static uint32_t fat_first; static int enc_notice;      /* chat scenario: <notification type=encrypt><count value=2/> after the phone's messages -> upload as idle work */                                 /* F/G: the "offline batch" after <active/>: fat frame + 6 fat notifications in one message */
 static uint32_t fat_size; static int fat_real;                                    /* the fat frame: a real 40 KB stanza (F, decoded and acknowledged) or garbage longer than the core's buffer (G, skipped) */
 static uint8_t fatbuf[65536]; static uint32_t fat_len;                            /* F: the encoded fat stanza */
 static uint8_t big[262144]; static uint32_t big_len, big_off, rx_total;           /* the WebSocket message being served in chunks */
@@ -269,7 +269,8 @@ static int io_send(void *ctx, const uint8_t *p, uint32_t n)
                         rc.attrs = rca; rc.n_attrs = 4; enqueue_node(&rc);
                     }
                     /* both answers are prekey messages: libsignal keeps sending those until it has seen a message of ours on the new session */
-                    if (!phone_sent) { phone_sent = 1; enqueue_phone_message("wa_pkmsg1", "PHONE0000000001", "pkmsg", 0); enqueue_phone_message("wa_msg2", "PHONE0000000002", "pkmsg", 1); /* the second from the LID: same device, same session */ }
+                    if (!phone_sent) { phone_sent = 1; enqueue_phone_message("wa_pkmsg1", "PHONE0000000001", "pkmsg", 0); enqueue_phone_message("wa_msg2", "PHONE0000000002", "pkmsg", 1); /* the second from the LID: same device, same session */
+                        }
                 }
                 else if (wab_str_eq(&nd->tag, "receipt")) {
                     const wab_value *to = wab_get_attr(nd, "to"); int k = receipts < 2 ? receipts : 1;
@@ -334,7 +335,7 @@ static int io_send(void *ctx, const uint8_t *p, uint32_t n)
                     /* what the server then sends: a compressed notification and a receipt (both to be acknowledged) */
                     wab_node_init(&ntf, "notification"); na[0].key = wab_s("from"); na[0].val = wab_jid_value("", "s.whatsapp.net", 0);
                     na[1].key = wab_s("id"); na[1].val = wab_text("1234567890"); na[2].key = wab_s("type"); na[2].val = wab_text("encrypt"); na[3].key = wab_s("t"); na[3].val = wab_text("1764300001");
-                    ntf.attrs = na; ntf.n_attrs = 4; wab_node_init(&cnt, "count"); ca[0].key = wab_s("value"); ca[0].val = wab_text("3"); cnt.attrs = ca; cnt.n_attrs = 1;
+                    ntf.attrs = na; ntf.n_attrs = 4; wab_node_init(&cnt, "count"); ca[0].key = wab_s("value"); ca[0].val = wab_text("7"); cnt.attrs = ca; cnt.n_attrs = 1;   /* 7 >= WA_PREKEYS_MIN_SERVER: no upload (the chat scenario tests the low count) */
                     ntf.val.kind = WAB_LIST; ntf.children = &cnt; ntf.n_children = 1;
                     enqueue_compressed_node(&ntf);
                     /* a status broadcast as in live runs 11/12 (acknowledged with class=status type=media participant, not decrypted) */
@@ -348,6 +349,14 @@ static int io_send(void *ctx, const uint8_t *p, uint32_t n)
                     ra[1].key = wab_s("id"); ra[1].val = wab_text("ABCDEF1234"); ra[2].key = wab_s("type"); ra[2].val = wab_text("read"); ra[3].key = wab_s("t"); ra[3].val = wab_text("1764300002");
                     rcpt.attrs = ra; rcpt.n_attrs = 4;
                     enqueue_node(&rcpt);
+                    if (enc_notice) {
+                        static wab_node en, ec; static wab_attr ena[4], eca[1];
+                        wab_node_init(&en, "notification"); ena[0].key = wab_s("from"); ena[0].val = wab_jid_value("", "s.whatsapp.net", 0);
+                        ena[1].key = wab_s("id"); ena[1].val = wab_text("ENC000000001"); ena[2].key = wab_s("type"); ena[2].val = wab_text("encrypt"); ena[3].key = wab_s("t"); ena[3].val = wab_text("1764300002");
+                        en.attrs = ena; en.n_attrs = 4; wab_node_init(&ec, "count"); eca[0].key = wab_s("value"); eca[0].val = wab_text("2"); ec.attrs = eca; ec.n_attrs = 1;
+                        en.val.kind = WAB_LIST; en.children = &ec; en.n_children = 1;
+                        enqueue_node(&en);
+                    }
                     if (fat_batch) {
                         /* F/G: the offline batch as one WebSocket message far longer than a TLS record: a fat frame
                            (F: a real 40 KB notification, decoded and acknowledged; G: 200 KB of garbage, longer than
@@ -428,7 +437,7 @@ static void reset(wa_probe_io *io, wa_creds *creds)
     err_code[0] = err_text[0] = 0;
     memset(creds, 0, sizeof *creds); test_identity(&creds->id);
     io->creds = creds; io->creds_loaded = 1; io->paired_now = 0;
-    counts = uploads = actives = stanza_acks = status_acks = upload_keys = bad_upload = prekeys_saved = 0; memset(ack_class, 0, sizeof ack_class); memset(ack_id, 0, sizeof ack_id); memset(ack_to, 0, sizeof ack_to);
+    enc_notice = 0; counts = uploads = actives = stanza_acks = status_acks = upload_keys = bad_upload = prekeys_saved = 0; memset(ack_class, 0, sizeof ack_class); memset(ack_id, 0, sizeof ack_id); memset(ack_to, 0, sizeof ack_to);
     wa_prekeys_init(&prekeys); io->prekeys = &prekeys; io->prekeys_loaded = 1; io->prekeys_wanted = 3; io->save_prekeys = save_prekeys; io->linger_ms = 1500;
 }
 
@@ -517,7 +526,7 @@ int main(int argc, char **argv)
     if (vec_text) {
         wab_node n; wab_attr a[2]; uint8_t b[256]; uint32_t l; int i;
         printf("--- E: chat: bundle, pkmsg out, two pkmsg in, receipts, session reuse ---\n");
-        reset(&io, &creds); creds.paired = 1; strcpy(creds.jid_user, "4917612345678"); creds.jid_device = 7; strcpy(creds.lid_user, "123456789012345"); creds.lid_device = 7;
+        reset(&io, &creds); creds.paired = 1; strcpy(creds.jid_user, "4917612345678"); creds.jid_device = 7; strcpy(creds.lid_user, "123456789012345"); creds.lid_device = 7; enc_notice = 1;
         creds.adv.details_len = 120; memset(creds.adv.details, 0x5a, 120); memset(creds.adv.account_sig_key, 1, 32); memset(creds.adv.account_sig, 2, 64); memset(creds.adv.device_sig, 3, 64);
         { hmac_drbg prng; drbg_instantiate(&prng, seed, sizeof seed); wa_prekeys_generate(&prekeys, 3, &prng); }
         /* the one-time prekey the phone used (tools/signalvectors: Alice's OPK 5), already uploaded */
@@ -531,14 +540,15 @@ int main(int argc, char **argv)
         CHECK(wab_encode_frame(&n, b, sizeof b, &l) == WAB_OK);
         r = wa_probe_sim_login(&io, b, l);
         printf("%s\n", io.result);
-        CHECK(r == 1 && io.logged_in && uploads == 1 && actives == 1);
+        CHECK(r == 1 && io.logged_in && uploads == 2 && actives == 1);        /* the second upload: the server's <notification type=encrypt><count value=2/> during the chat, as idle work */
+        CHECK(io.server_prekeys == 0 && io.server_prekeys_notice == 2 && !io.prekeys_low_notice && io.prekeys_uploaded == 3 + 3);
         CHECK(bundles == 1 && msgs == 1 && enc_is_pk && enc_out_len > 100 && msg_id[0] == '3');
         CHECK(io.msgs_sent == 1 && io.sessions_started == 1 && io.t_msg_ack > 0 && io.t_msg_sent > 0 && io.d_session > 0);
         CHECK(io.msgs_received == 2 && io.msgs_failed == 0 && receipts == 2 && io.receipts_sent == 2);
         CHECK(strcmp(rcpt_type[0], "sender") == 0 && strcmp(rcpt_id[0], "PHONE0000000001") == 0 && strcmp(rcpt_type[1], "sender") == 0 && strcmp(rcpt_id[1], "PHONE0000000002") == 0);
         CHECK(recv_n == 2 && strcmp(recv_text[0], "Antwort vom Telefon: hallo Amiga!") == 0 && strcmp(recv_text[1], "zweite Nachricht, gleiche Sitzung \xe4\xf6\xfc") == 0);   /* UTF-8 -> Latin-1 for the console */
-        CHECK(wa_prekeys_find(&prekeys, 5) == 0 && prekeys.n == 6);          /* the one-time prekey is gone; 3 uploaded + 3 refilled remain */
-        CHECK(sessions.n == 1 && sessions_saved >= 3 && stanza_acks == 3);   /* no ack for decrypted messages: receipts only (+ the status broadcast) */
+        CHECK(wa_prekeys_find(&prekeys, 5) == 0 && prekeys.n == 9);          /* the one-time prekey is gone; 3 + 3 uploaded + 3 refilled remain */
+        CHECK(sessions.n == 1 && sessions_saved >= 3 && stanza_acks == 4);   /* no ack for decrypted messages: receipts only (+ the status broadcast, the encrypt notification) */
         CHECK(sig_store_get(&sessions, "4917612345678", 0, 0, 0) != 0 && sig_store_get(&sessions, "123456789012345", 0, 1, 0) == 0);   /* the LID message decrypted in the session under the number; no second entry */
         /* what the chat interface saw: both texts as UTF-8 with the pushname and the stanza's time, our message with its id,
          * the server's ack as SENT, the connection's states, the server clock from <success t> and the stanzas */
