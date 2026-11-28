@@ -91,6 +91,7 @@ struct NewWindow {                                    /* 48 bytes */
 #define WFLG_RMBTRAP        0x00010000UL
 #define WFLG_NOCAREREFRESH  0x00020000UL
 #define IDCMP_MOUSEBUTTONS  0x00000008UL
+#define IECODE_LBUTTON      0x68                  /* IntuiMessage Code: left button down (SELECTDOWN) */
 #define IDCMP_RAWKEY        0x00000400UL
 #define IDCMP_VANILLAKEY    0x00200000UL
 

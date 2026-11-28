@@ -37,6 +37,7 @@ struct Screen; struct Window; struct RastPort;
 #define SCR_KEY_RIGHT    0x4E
 #define SCR_KEY_LEFT     0x4F
 #define SCR_KEY_HELP     0x5F
+#define SCR_KEY_MOUSE    0x200      /* left mouse button pressed; scr_last_mouse() has the screen position */
 #define SCR_FOREVER      0xFFFFFFFFUL
 
 /* default palette (12-bit 0RGB words for LoadRGB4): 0 black, 1 background, 2 white, 3 WhatsApp green, ... */
@@ -107,6 +108,8 @@ void scr_wait_blit(void);                              /* WaitBlit: before CPU w
 /* The IDCMP qualifier of the last key scr_wait_key returned (IEQUALIFIER_* bits: 0x0003 shift, 0x0008 ctrl,
  * 0x0030 alt, 0x00C0 Amiga keys), so Shift+cursor and Amiga+letter can be told apart from the plain key. */
 UWORD scr_last_qualifier(void);
+/* screen position (hires pixels, 0..639 x 0..255) of the last SCR_KEY_MOUSE scr_wait_key returned */
+void  scr_last_mouse(WORD *x, WORD *y);
 #define SCR_QUAL_SHIFT 0x0003
 #define SCR_QUAL_CTRL  0x0008
 #define SCR_QUAL_ALT   0x0030

@@ -204,6 +204,7 @@ Palette (`gui_palette`, 0x0RGB): 0 Schwarz, 1 `011` Gesprächshintergrund, 2 `EE
 | Taste | Wirkung |
 |---|---|
 | Tab | Fokus zwischen Chatliste und Eingabe; ein Zeichen tippen holt den Fokus ebenfalls in die Eingabe |
+| Maus, linke Taste | Klick auf einen Listeneintrag wählt den Chat (`GUI_ACT_SWITCH`) und setzt den Fokus in die Eingabe; Klick ins Eingabefeld holt den Fokus; Klick in die obere Hälfte des Gesprächs blättert eine Seite zurück, untere Hälfte vor; Klick auf die Listenfußzeile blättert die Liste (linke Hälfte ↑, rechte ↓, ohne die Auswahl zu ändern). `SCR_KEY_MOUSE` aus `IDCMP_MOUSEBUTTONS`, Position über `scr_last_mouse`; rechte Taste bleibt wegen `WFLG_RMBTRAP` stumm. Kein Mausrad auf dem A500 |
 | Auf / Ab | Fokus Liste: Chat wählen (das Gespräch folgt sofort, `GUI_ACT_SWITCH`); Fokus Eingabe: Verlauf zeilenweise |
 | Shift+Auf / Shift+Ab | Verlauf seitenweise (24 Zeilen), in beiden Fokussen; der A500 hat keine PgUp/PgDn |
 | Return | Fokus Liste: Chat öffnen (Fokus in die Eingabe); Fokus Eingabe: senden (`GUI_ACT_SEND`), Eingabe leeren |

@@ -19,6 +19,7 @@ int  scr_host_cell(int col, int y, int *fg, int *bg);
 int  scr_host_row(int col, int y, int ncols, char *out);
 void scr_host_push_key(LONG key, UWORD qualifier);         /* queue for scr_wait_key */
 void scr_host_set_qualifier(UWORD qualifier);              /* for a key passed to gui_pump directly */
+void scr_host_set_mouse(WORD x, WORD y);                    /* position for a SCR_KEY_MOUSE passed to gui_pump */
 ULONG scr_host_calls(void);                                /* number of scr_* drawing calls so far (cost model) */
 ULONG scr_host_chars(void);                                /* characters drawn through scr_text/scr_text_bg */
 void scr_host_reset_counters(void);

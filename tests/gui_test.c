@@ -189,6 +189,22 @@ int main(int argc, char **argv)
     act = key(SCR_KEY_RAW | SCR_KEY_DOWN);
     CHECK(act == GUI_ACT_SWITCH && gui_current_chat() == c, "Down selects the Stammtisch group (chat %d)", gui_current_chat());
     CHECK(gui_chat_unread(c) == 0, "selecting a chat clears its unread count");
+
+    /* ---- chat switching with the mouse: a click on list entry 0 (y 14..29) selects it and focuses the input ---- */
+    { int before = gui_current_chat();
+      scr_host_set_mouse(40, 14 + 4); act = key(SCR_KEY_MOUSE);
+      CHECK(act == GUI_ACT_SWITCH && gui_current_chat() != before && gui_focus() == 1, "click on list entry 0 switches the chat (%d -> %d) and focuses the input", before, gui_current_chat());
+      scr_host_set_mouse(40, 14 + 16 + 4); act = key(SCR_KEY_MOUSE);
+      CHECK(act == GUI_ACT_SWITCH && gui_current_chat() == c, "click on list entry 1 selects the Stammtisch group again");
+      scr_host_set_mouse(40, 14 + 16 + 4); act = key(SCR_KEY_MOUSE);
+      CHECK(act == GUI_ACT_NONE && gui_current_chat() == c, "a click on the selected entry is no switch");
+      scr_host_set_mouse(300, 2); act = key(SCR_KEY_MOUSE);
+      CHECK(act == GUI_ACT_NONE && gui_current_chat() == c, "a click on the header does nothing");
+      key(9); CHECK(gui_focus() == 0, "Tab back to the list");
+      scr_host_set_mouse(400, 230); act = key(SCR_KEY_MOUSE);
+      CHECK(act == GUI_ACT_NONE && gui_focus() == 1, "a click into the input field focuses it");
+      key(9); CHECK(gui_focus() == 0, "Tab back to the list (the tests below start there)");
+    }
     gui_redraw_dirty();
     shot("group");
     CHECK(row_has(22, 2, 40, "Amiga-Stammtisch N") && row_has(22, 2, 40, "rnber  3 Nachrichten"), "header group name (cut at 24 chars): '%s'", row_text(22, 2, 40));

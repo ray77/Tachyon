@@ -1098,6 +1098,16 @@ static void select_pos(int pos)
     gui_select_chat(order[pos]);
 }
 
+/* page the chat list without moving the selection (mouse on the footer arrows); the selection follows later */
+static void page_list(int dir)
+{
+    int top = list_top + dir * LIST_VISIBLE, max = nchats - LIST_VISIBLE;
+    if (max < 0) max = 0;
+    if (top > max) top = max;
+    if (top < 0) top = 0;
+    if (top != list_top) { list_top = top; list_dirty_all = 1; }
+}
+
 static void scroll_conv(int lines)
 {
     int s = conv_scroll + lines;
@@ -1112,6 +1122,24 @@ int gui_pump(LONG key)
     action_chat = -1;
     if (key == SCR_KEY_TIMEOUT) return GUI_ACT_NONE;
     if (help_open) { help_close(); return GUI_ACT_NONE; }
+    if (key == SCR_KEY_MOUSE) {                                                    /* left click: a list entry picks the chat, the input field takes the focus */
+        WORD mx, my; scr_last_mouse(&mx, &my);
+        if (mx >= 0 && mx < LIST_COLS * 8 && my >= LIST_Y0 && my < LIST_Y0 + LIST_VISIBLE * LIST_ENTRY_H) {
+            int pos = list_top + ((my - LIST_Y0) >> 4), before = cur_chat;     /* LIST_ENTRY_H == 16 */
+            if (pos < nchats) {
+                select_pos(pos);
+                if (focus != 1) { focus = 1; input_dirty = 1; status_dirty = 1; }
+                if (cur_chat != before) { action_chat = cur_chat; return GUI_ACT_SWITCH; }
+            }
+        } else if (mx >= 0 && mx < LIST_COLS * 8 && my >= LIST_FOOT_Y && my < LIST_FOOT_Y + 8) {
+            page_list(mx < 10 * 8 ? -1 : 1);                                      /* footer: left half "up N", right half "down N weitere" */
+        } else if (mx >= CONV_COL * 8 && my >= INPUT_Y0 && my < INPUT_Y0 + INPUT_H) {
+            if (focus != 1) { focus = 1; input_dirty = 1; status_dirty = 1; }
+        } else if (mx >= CONV_COL * 8 && my >= CONV_Y0 && my < CONV_Y0 + CONV_H) {
+            scroll_conv(my < CONV_Y0 + CONV_H / 2 ? CONV_ROWS - 1 : -(CONV_ROWS - 1));   /* upper half: a page back in time, lower half: forward */
+        }
+        return GUI_ACT_NONE;
+    }
     if (key != 27 && esc_armed) { esc_armed = 0; status_dirty = 1; }
     if (key & SCR_KEY_RAW) {
         int code = key & 0xFF;

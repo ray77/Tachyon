@@ -30,6 +30,7 @@ static struct IOStdReq  scr_conreq;
 static void            *scr_console;      /* console.device base (io_Device), 0 when unavailable */
 static int              scr_key_source;
 static UWORD            scr_qual;         /* qualifier of the last key returned (scr_last_qualifier) */
+static WORD             scr_mx, scr_my;   /* position of the last SCR_KEY_MOUSE (scr_last_mouse) */
 
 static struct TextAttr scr_topaz8 = { (STRPTR)"topaz.font", 8, FS_NORMAL, FPF_ROMFONT };
 
@@ -91,7 +92,7 @@ int scr_open(void)
 
     for (i = 0; i < (int)sizeof nw; i++) ((UBYTE *)&nw)[i] = 0;
     nw.LeftEdge = 0; nw.TopEdge = 0; nw.Width = SCR_W; nw.Height = SCR_H; nw.DetailPen = 0; nw.BlockPen = 1;
-    nw.IDCMPFlags = IDCMP_RAWKEY | IDCMP_VANILLAKEY;
+    nw.IDCMPFlags = IDCMP_RAWKEY | IDCMP_VANILLAKEY | IDCMP_MOUSEBUTTONS;
     nw.Flags = WFLG_BACKDROP | WFLG_BORDERLESS | WFLG_ACTIVATE | WFLG_RMBTRAP | WFLG_SIMPLE_REFRESH | WFLG_NOCAREREFRESH;
     nw.Screen = scr_scr; nw.Type = CUSTOMSCREEN;
     scr_win = __int_OpenWindow(Intui, &nw);
@@ -140,6 +141,7 @@ int scr_font_width(void)  { return scr_rp ? scr_rp->TxWidth : 8; }
 int scr_console_ok(void)  { return scr_console != 0; }
 int scr_last_key_source(void) { return scr_key_source; }
 UWORD scr_last_qualifier(void) { return scr_qual; }
+void  scr_last_mouse(WORD *x, WORD *y) { *x = scr_mx; *y = scr_my; }
 
 void scr_scroll_direct(int x, int y, int w, int h, int dy)
 {
@@ -454,11 +456,13 @@ LONG scr_wait_key(ULONG timeout_ticks)
         while ((msg = (struct IntuiMessage *)GetMsg(scr_win->UserPort)) != 0) {
             ULONG cls = msg->Class, dead = 0;
             UWORD code = msg->Code, qual = msg->Qualifier;
+            WORD mx = msg->MouseX, my = msg->MouseY;      /* window = screen: backdrop window at 0,0 */
             LONG key = SCR_KEY_TIMEOUT;
             if (cls == IDCMP_RAWKEY && msg->IAddress) dead = *(ULONG *)msg->IAddress;   /* dead key info */
             ReplyMsg((struct Message *)msg);
             if (cls == IDCMP_VANILLAKEY) { scr_key_source = 'V'; key = code; }
             else if (cls == IDCMP_RAWKEY) key = scr_translate_event(code, qual, dead);
+            else if (cls == IDCMP_MOUSEBUTTONS && code == IECODE_LBUTTON) { scr_mx = mx; scr_my = my; key = SCR_KEY_MOUSE; }   /* SELECTDOWN; releases and the right button (RMBTRAP) are ignored */
             if (key != SCR_KEY_TIMEOUT) { scr_qual = qual; return key; }
         }
         if (timeout_ticks == SCR_FOREVER) { Wait(sig); continue; }

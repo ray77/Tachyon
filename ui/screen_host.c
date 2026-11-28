@@ -16,6 +16,7 @@ static UBYTE *host_plane_ptrs[SCR_DEPTH];
 static UWORD  host_palette[16];
 static int    host_open;
 static UWORD  host_qual;
+static WORD   host_mx, host_my;
 static ULONG  host_calls, host_chars;
 static struct { LONG key; UWORD qual; } host_keys[64];
 static int    host_nkeys, host_key_rd;
@@ -150,6 +151,8 @@ int scr_planes(UBYTE **planes, int max, UWORD *bpr)
 }
 void scr_wait_blit(void) { }
 UWORD scr_last_qualifier(void) { return host_qual; }
+void  scr_last_mouse(WORD *x, WORD *y) { *x = host_mx; *y = host_my; }
+void  scr_host_set_mouse(WORD x, WORD y) { host_mx = x; host_my = y; }
 int scr_font_glyphs(UBYTE *lo, UBYTE *hi, const UBYTE **cd, UWORD *modulo, const ULONG **cl)
 { *lo = 0x20; *hi = 0xFF; *cd = host_chardata[0]; *modulo = 224; *cl = host_charloc; return 1; }
 
