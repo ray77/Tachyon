@@ -32,7 +32,9 @@ static ws_client w;
  * io->alloc, so they live in Chip RAM (~410 KB free on the A500 after the screen; Fast RAM is the scarce one: the stack's
  * TCP pool and the code). Otherwise static. */
 #define WA_PROBE_ARENA 12288
-#define WA_PROBE_STAGE 8192
+#define WA_PROBE_STAGE 98304        /* the heartbeat poll's staging buffer: the rest of the offline batch (33 stanzas,
+                                       ~4 KB without the history frame) must fit while the 68000 computes an X3DH (54 s)
+                                       - live attempt 6 lost the connection with 8 KB here (window closed for a minute) */
 #ifdef WA_PROBE_ALLOC
 static uint8_t *msgbuf, *pend, *inflated, *arena_mem, *stage;
 static int big_buffers(wa_probe_io *pio)
@@ -146,6 +148,7 @@ static int app_send(const uint8_t *p, uint32_t n)
     return flush_tls();
 }
 static int hb_send(void *hio, const uint8_t *p, uint32_t n) { (void)hio; return app_send(p, n); }
+static void gcm_yield(void) { CRYPTO_YIELD(); }       /* AES-GCM runs (TLS records, the Noise frames) reach the heartbeat too */
 
 /* one WebSocket binary message through TLS */
 static int ws_send(const uint8_t *payload, uint32_t len)
@@ -602,7 +605,8 @@ static void long_begin(uint32_t total, uint32_t have)
     long_total = total; long_t0 = ms(); long_next = 32768; long_note_at = ms(); long_note_rx = io->rx_bytes;
     wa_fmt(line, sizeof line, "ws: a %u-byte frame begins (%u bytes of it here, %u bytes received in this run so far)", total, have, io->rx_bytes); logl(line);
 }
-static void frames_reset(void) { msg_off = 0; msg_have = 0; skip_left = 0; w.msg_len = 0; w.msg_ready = 0; w.msg_partial = 0; stage_len = 0; long_total = 0; skip_total = skip_done = 0; }
+static void frames_reset(void) { msg_off = 0; msg_have = 0; skip_left = 0; w.msg_len = 0; w.msg_ready = 0; w.msg_partial = 0; stage_len = 0; long_total = 0; skip_total = skip_done = 0; aes_gcm_yield = gcm_yield; }
+static heartbeat frame_hb;                        /* armed around the decryption of a long frame (37 s for 166 KB live) */
 static int recv_frame(uint32_t timeout_ms, uint8_t **plain, uint32_t *plen)
 {
     uint32_t flen, avail, deadline = ms() + timeout_ms;
@@ -622,10 +626,14 @@ static int recv_frame(uint32_t timeout_ms, uint8_t **plain, uint32_t *plen)
                 skip_left = 3 + flen; skip_total = 3 + flen; skip_done = 0; long_begin(3 + flen, avail); continue;
             }
             if (avail >= 3 + flen) {
-                uint8_t *ct = w.msg + msg_off + 3;
+                uint8_t *ct = w.msg + msg_off + 3; int ok;
                 /* in place: the GCM tag is checked over the whole ciphertext first, then the counter stream is applied
-                 * byte by byte (crypto/ref/aes.c gcm_ctr reads each byte before writing it) */
-                if (!noise_transport_decrypt(&tr, ct, flen, ct)) { logl("wab: frame does not decrypt"); frames_reset(); return -1; }
+                 * byte by byte (crypto/ref/aes.c gcm_ctr reads each byte before writing it). A long frame takes the
+                 * 68000 tens of seconds: the heartbeat (pongs, socket poll into the staging buffer) runs meanwhile */
+                if (flen > 16384) { heartbeat_init(&frame_hb, &w, io->now_ms, 4000, hb_send, 0); frame_hb.poll = drain_poll; heartbeat_arm(&frame_hb); }
+                ok = noise_transport_decrypt(&tr, ct, flen, ct);
+                if (flen > 16384) { heartbeat_disarm(); io->pongs += frame_hb.sent; if (frame_hb.error) { logl("ws: heartbeat send failed during the frame's decryption"); frames_reset(); return -1; } }
+                if (!ok) { logl("wab: frame does not decrypt"); frames_reset(); return -1; }
                 if (long_total) { wa_fmt(line, sizeof line, "ws: the %u-byte frame is complete after %T s", 3 + flen, ms() - long_t0); logl(line); long_total = 0; }
                 *plain = ct; *plen = flen - 16;
                 msg_off += 3 + flen;
@@ -1050,7 +1058,7 @@ static int handle_message(const wab_node *n)
     elen = enc->val.str.len;
     /* the ciphertext as hex (200 bytes per line): an offline replay of exactly this message against the stored
        credentials and prekeys (host, vamos) is worth more than any guess when the 68000 stops here */
-    for (i = 0; i < elen && i < 4000; i += 100) { char pfx[40]; wa_fmt(pfx, sizeof pfx, "enc %s %u/%u: ", is_pk ? "pkmsg" : "msg", i, elen); log_hex(pfx, enc->val.str.p + i, elen - i < 100 ? elen - i : 100); }   /* 100 bytes: the A500 log line holds 300 chars; 4 KB at most */
+    for (i = 0; i < elen && i < (elen <= 1200 ? elen : 100); i += 100) { char pfx[40]; wa_fmt(pfx, sizeof pfx, "enc %s %u/%u: ", is_pk ? "pkmsg" : "msg", i, elen); log_hex(pfx, enc->val.str.p + i, elen - i < 100 ? elen - i : 100); }   /* 100 bytes: the A500 log line holds 300 chars and costs 0.4 s; whole dump only for short messages (the replay) */
     if (elen > SIG_BODY_MAX + 160) {
         /* longer than this build decrypts (SIG_BODY_MAX inner bytes; a prekey message adds ~140): the phone's inline
            history bootstrap is such a message (166 KB live). Acknowledged so the server stops re-sending it, lost. */

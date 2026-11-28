@@ -264,11 +264,17 @@ void aes_gcm_set_key(aes_gcm_key *g, const uint8_t *key, int keybits)
     ghash_tables(g);
 }
 
+/* called every 64 blocks (1 KiB, ~0.25 s on the 68000) of a GHASH or counter run when set: the probe hangs its
+ * heartbeat/socket poll here, so a 166 KB frame's decryption (~37 s live) does not leave the line unread */
+void (*aes_gcm_yield)(void);
+
 static void ghash_update(uint8_t y[16], const aes_gcm_key *g, const uint8_t *data, uint32_t len)
 {
+    uint32_t n = 0;
     while (len >= 16) {
         ghash_block(y, data, g);
         data += 16; len -= 16;
+        if (aes_gcm_yield && (++n & 63) == 0) aes_gcm_yield();
     }
     if (len > 0) {
         uint8_t last[16] = { 0 };
@@ -297,12 +303,13 @@ static void gcm_tag(const aes_gcm_key *g, const uint8_t j0[16],
 static void gcm_ctr(const aes_key *k, const uint8_t j0[16], const uint8_t *in, uint32_t len, uint8_t *out)
 {
     uint8_t ctr[16], ks[16];
-    uint32_t c, i;
+    uint32_t c, i, n = 0;
     for (i = 0; i < 16; i++) ctr[i] = j0[i];
     c = ((uint32_t)ctr[12] << 24) | ((uint32_t)ctr[13] << 16) | ((uint32_t)ctr[14] << 8) | ctr[15];
     while (len > 0) {
         uint32_t take = len < 16 ? len : 16;
         c++;
+        if (aes_gcm_yield && (++n & 63) == 0) aes_gcm_yield();
         put_be32(ctr + 12, c);
         aes_encrypt_block(k, ctr, ks);
         for (i = 0; i < take; i++) out[i] = (uint8_t)(in[i] ^ ks[i]);

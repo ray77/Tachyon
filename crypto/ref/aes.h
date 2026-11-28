@@ -57,4 +57,7 @@ int  aes_gcm_decrypt(const aes_gcm_key *g, const uint8_t iv[12],
 void aes_cbc_encrypt(const aes_key *k, const uint8_t iv[16], const uint8_t *in, uint32_t len, uint8_t *out);
 void aes_cbc_decrypt(aes_key *k, const uint8_t iv[16], const uint8_t *in, uint32_t len, uint8_t *out);
 
+/* optional: called every 64 blocks of a GHASH / counter run (long frames; the probe polls its socket there) */
+extern void (*aes_gcm_yield)(void);
+
 #endif

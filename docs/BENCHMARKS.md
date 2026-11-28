@@ -536,3 +536,19 @@ Was zu sehen war: Kopfzeile mit grünem Punkt „online“, Uhr nach der Serverz
 
 Der Empfangspfad ist zwei Schritte weiter als in Lauf 5: die 166-KB-History-Stanza des Telefons ist zum ersten Mal **bestätigt** (sie sollte beim nächsten Login nicht mehr kommen), und eine echte Offline-Nachricht des Telefons wurde mit X3DH als Responder **entschlüsselt** (eine Protokollnachricht, Typ 5 – App-State-Schlüssel, kein Text). Dann wiederholt sich das Muster der Läufe 4 und 5: nach einer langen Rechenphase, in der der Socket kaum gelesen wird (17 s Decode ohne Lesen, 53 s X3DH mit 8-KB-Staging-Puffer), ist die Verbindung weg; dazu der 39-s-Stall am Frame-Ende. Verdacht: Nullfenster über eine Minute (8-KiB-Fenster + 8 KB Staging) gegen slirp/Server. Nächster Hebel liegt im Core (Signal-Sitzung): Staging-Puffer im Chip-RAM auf ~128 KB (frei: 255 KB) und ein Lesen auch in der Decode-Schleife. Die Oberfläche selbst war unauffällig: 19 ms je Tick, 300 ms Maximum, kein verlorenes Zeichen, Haken/Uhr/Zähler wie vorgesehen.
 
+
+## 2026-11-28 – Schritt 25: Offline-Stapel empfangen – 166-KB-Frame, X3DH als Responder (Live-Versuch 6)
+
+Empfangslauf mit der Chat-GUI auf dem Schirm (SIGNAL.md 6, Versuch 6). Zeiten seit Programmstart.
+
+| Phase | Versuch 6 |
+|---|---:|
+| Programmstart → `<success>` | 50,9 s (Verbindung 44,8 s) |
+| 166 587-Byte-Frame: erstes bis letztes Byte | ~59 s (**~1,7 KB/s**; Versuch 5 ohne Schirm 3,2 KB/s) |
+| Noise-Entschlüsselung des Frames an Ort und Stelle (AES-GCM, 166 KB) | **37 s** (4,5 KB/s) |
+| Decodieren + 40 Hex-Logzeilen + Ack | 17 s (Logzeile 0,4 s) |
+| **X3DH als Responder + erste Entschlüsselung** (613-Byte-PreKeySignalMessage) | **53,6 s** |
+
+### Einordnung
+
+Der Weg herein ist langsamer als der hinaus: 166 KB kosten eine Minute Empfang (TLS-Entschlüsselung, Chip-Bus mit dem Schirm geteilt) und 37 s Noise-Entschlüsselung – zusammen mehr als der ganze Login. Der History-Frame ist jetzt bestätigt und kommt nicht wieder; die laufenden Kosten sind die Offline-Nachrichten (je ~54 s für ein neues Gerät, danach ~1 s je Nachricht). Die GCM-Zeiten sind Software (`crypto/ref/aes.c`); der Blitter-AES/GCM (`crypto/blit`, Schritt 12) ist in der Probe noch nicht eingehängt – dort liegt der nächste Faktor 2–3.
