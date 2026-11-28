@@ -281,7 +281,8 @@ tls13 *wa_probe_tls(void) { return &t; }
 static void state(int s, const char *detail) { if (io->on_state) io->on_state(io->ctx, s, detail); }
 static uint32_t dec_value(const wab_value *v);
 static void server_time(const wab_node *n) { uint32_t t; if (io->on_time && n && !wab_get_attr(n, "offline") && (t = dec_value(wab_get_attr(n, "t"))) != 0) io->on_time(io->ctx, t); }   /* offline stanzas carry the time they were sent */
-static int fail(const char *fmt, const char *a, uint32_t b) { wa_fmt(io->result, sizeof io->result, fmt, a, b); state(WA_CONN_ERROR, io->result); return 0; }
+static void flush_sessions(void);
+static int fail(const char *fmt, const char *a, uint32_t b) { flush_sessions(); wa_fmt(io->result, sizeof io->result, fmt, a, b); state(WA_CONN_ERROR, io->result); return 0; }
 
 static int tls_connect(x509_cert *root, x509_cert *inter, hmac_drbg *rng, tls13_keypair *kp, x509_cache *cache)
 {
@@ -574,6 +575,7 @@ static uint32_t iq_counter; static char iq_prefix[16];
 static void close_ws(void)
 {
     uint8_t cl[16]; uint32_t n = ws_frame_close(&w, 1000, cl, sizeof cl);
+    flush_sessions();
     if (n) app_send(cl, n);
     state(WA_CONN_CLOSED, "closed");
     if (stage_peak) { wa_fmt(line, sizeof line, "ws: the staging buffer held at most %u of %u bytes while the 68000 computed", stage_peak, stage_cap); logl(line); }
@@ -945,7 +947,13 @@ static int user_is_ours(const char *user)
     for (i = 0; user[i] && io->creds->lid_user[i] && user[i] == io->creds->lid_user[i]; i++) ;
     return !user[i] && !io->creds->lid_user[i] && io->creds->lid_user[0];
 }
-static void save_sessions(void) { if (io->save_sessions) io->save_sessions(io->ctx); }
+/* The session record goes to disk (1.3 s on the A500 for three sessions) only after a structural change - a new session,
+ * a DH ratchet step, a consumed one-time prekey, a merge, our own sending chain - and otherwise once the line is idle or
+ * before the connection ends (sessions_dirty). A message key consumed without a save is harmless: the stored state is
+ * then behind by a few counters and the next message makes skipped keys of them (libsignal does the same on a crash). */
+static int sessions_dirty;
+static void save_sessions(void) { if (io->save_sessions) io->save_sessions(io->ctx); sessions_dirty = 0; }
+static void flush_sessions(void) { if (sessions_dirty) save_sessions(); }
 
 /* One device has two addresses: its phone number (@s.whatsapp.net) and its LID (@lid). The phone keeps ONE session
  * record per device of ours and sends from its LID, while we started our session with its number (live run 13: the
@@ -1116,7 +1124,7 @@ static void jid_user(char *dst, uint32_t cap, const wab_jid *j) { uint32_t i; fo
 static int handle_message(const wab_node *n)
 {
     const wab_value *from = wab_get_attr(n, "from"), *part = wab_get_attr(n, "participant"), *enc_type; const wab_node *enc = 0; uint32_t i, plen = 0, used = 0, elen;
-    char user[32], idb[32], ty[16], alt_user[32]; const char *rep_user = user; int lid, is_pk, r, alt_lid = 0, via_alt = 0, rep_lid; sig_session *s, *alt = 0, *second = 0; static heartbeat hb; uint32_t t0;
+    char user[32], idb[32], ty[16], alt_user[32]; const char *rep_user = user; int lid, is_pk, r, alt_lid = 0, via_alt = 0, rep_lid, structural; uint32_t nrecv0; uint8_t pend0, valid0, rk0[32]; sig_session *s, *alt = 0, *second = 0; static heartbeat hb; uint32_t t0;
     if (!from || from->kind != WAB_JID) { logl("msg: <message> without a from JID, acknowledged"); return send_ack(n); }
     if (wab_str_eq(&from->jid.server, "g.us") || wab_str_eq(&from->jid.server, "broadcast") || wab_str_eq(&from->jid.server, "newsletter")) {
         wa_fmt(line, sizeof line, "msg: %s message id %s from %s (sender keys are out of scope): acknowledged, not decrypted", wab_str_eq(&from->jid.server, "g.us") ? "group" : "broadcast/newsletter",
@@ -1137,9 +1145,7 @@ static int handle_message(const wab_node *n)
     is_pk = wab_str_eq(&enc_type->str, "pkmsg");
     if (enc->val.kind != WAB_BYTES && enc->val.kind != WAB_STR) { logl("msg: <enc> without content, acknowledged"); return send_ack(n); }
     elen = enc->val.str.len;
-    /* the ciphertext as hex (200 bytes per line): an offline replay of exactly this message against the stored
-       credentials and prekeys (host, vamos) is worth more than any guess when the 68000 stops here */
-    for (i = 0; i < elen && i < (elen <= 1200 ? elen : 100); i += 100) { char pfx[40]; wa_fmt(pfx, sizeof pfx, "enc %s %u/%u: ", is_pk ? "pkmsg" : "msg", i, elen); log_hex(pfx, enc->val.str.p + i, elen - i < 100 ? elen - i : 100); }   /* 100 bytes: the A500 log line holds 300 chars and costs 0.4 s; whole dump only for short messages (the replay) */
+    /* the ciphertext is dumped as hex only when the decryption fails (below): two log lines cost ~0.8 s on the A500 */
     if (elen > SIG_BODY_MAX + 160) {
         /* longer than this build decrypts (SIG_BODY_MAX inner bytes; a prekey message adds ~140): the phone's inline
            history bootstrap is such a message (166 KB live). Acknowledged so the server stops re-sending it, lost. */
@@ -1167,6 +1173,10 @@ static int handle_message(const wab_node *n)
            is_pk ? "pkmsg" : "msg", attr_cstr(enc, "v", ty, sizeof ty), elen, wab_get_attr(n, "offline") ? " (waited on the server while we were offline)" : "", sig_session_has_state(s) ? "" : " (new session: X3DH as responder)",
            via_alt ? " (in the session stored under its other address, " : "", via_alt ? (alt_lid ? "LID)" : "number)") : ""); logl(line);
     t0 = ms();
+    /* what the state looks like before: a new receive chain, a cleared pending flag or a consumed prekey afterwards is
+       a structural change that is saved at once; a message key alone only marks the record dirty */
+    nrecv0 = s->cur.n_recv; pend0 = s->cur.has_pending; valid0 = s->cur.valid;
+    if (nrecv0) { for (i = 0; i < 32; i++) rk0[i] = s->cur.recv[nrecv0 - 1].ratchet_pub[i]; }
     heartbeat_init(&hb, &w, io->now_ms, 4000, hb_send, 0); hb.poll = drain_poll;
     heartbeat_arm(&hb);
     r = sig_decrypt(s, &me_local, is_pk, enc->val.str.p, elen, msg_plain, sizeof msg_plain, &plen, &used);
@@ -1180,9 +1190,14 @@ static int handle_message(const wab_node *n)
     io->d_decrypt = ms() - t0;
     if (r != SIG_OK) {
         wa_fmt(line, sizeof line, "msg: DECRYPTION FAILED (%s) after %T s: acknowledged without a retry receipt (pacing rule), the message is lost", sig_errstr(r), io->d_decrypt); logl(line);
+        /* the ciphertext as hex (100 bytes per line, up to 1200): an offline replay of exactly this message against the
+           stored credentials, prekeys and sessions (host) is worth more than any guess - live run 13 was solved that way */
+        for (i = 0; i < elen && i < (elen <= 1200 ? elen : 100); i += 100) { char pfx[40]; wa_fmt(pfx, sizeof pfx, "enc %s %u/%u: ", is_pk ? "pkmsg" : "msg", i, elen); log_hex(pfx, enc->val.str.p + i, elen - i < 100 ? elen - i : 100); }
         io->msgs_failed++;
         return send_ack(n);
     }
+    structural = !valid0 || used || s->cur.n_recv != nrecv0 || s->cur.has_pending != pend0 || (second && via_alt);
+    if (!structural && nrecv0) for (i = 0; i < 32; i++) if (rk0[i] != s->cur.recv[s->cur.n_recv - 1].ratchet_pub[i]) { structural = 1; break; }
     if (via_alt) {
         /* one device, one record: the entry under the sender's address was the phone's archived session; it moves into
            the decrypting one as its archived state (a late message in it still decrypts) and the duplicate entry goes */
@@ -1192,7 +1207,7 @@ static int handle_message(const wab_node *n)
                    alt_user, (uint32_t)from->jid.device, alt_lid ? "lid" : WA_SERVER_JID, alt_lid ? "LID" : "number"); logl(line);
         }
     }
-    save_sessions();
+    if (structural) save_sessions(); else sessions_dirty = 1;
     if (used) { wa_fmt(line, sizeof line, "msg: one-time prekey %u consumed, %u left in the record", used, io->prekeys ? io->prekeys->n : 0u); logl(line); if (io->save_prekeys) io->save_prekeys(io->ctx); }
     if (!wa_unpad(msg_plain, &plen)) { logl("msg: decrypted, but the WhatsApp padding is invalid: acknowledged"); io->msgs_failed++; return send_ack(n); }
     {
@@ -1340,6 +1355,7 @@ static int prekeys_low(void) { return io->prekeys && io->prekeys_low_notice && i
 static int idle_work(void)
 {
     static heartbeat hb;
+    flush_sessions();
     if (prekeys_low() && !wa_prekeys_pending(io->prekeys) && io->prekeys->n < WA_PREKEYS_MAX) {
         if (!make_prekeys(io->prekeys_wanted, "while online, the server runs out")) return 0;
     }
@@ -1370,6 +1386,7 @@ static int idle_work_due(uint32_t left)
     int pending = (io->precompute_next && io->nextkeys && !io->nextkeys_ready) ||
                   (io->prekeys && wa_prekeys_pending(io->prekeys) < io->prekeys_wanted && io->prekeys->n < WA_PREKEYS_MAX);
     if (prekeys_low()) return 1;                                                /* the server runs out of our prekeys: now */
+    if (sessions_dirty && (left <= 5000 || ms() - last_activity >= 5000)) return 1;   /* the record: 5 s after the last message */
     return pending && (left <= 90000 || ms() - last_activity >= 15000);
 }
 
@@ -1465,6 +1482,7 @@ static int post_login(void)
 static const char *post_summary(void)
 {
     static char s[256];
+    flush_sessions();
     wa_fmt(s, sizeof s, "; server prekeys %u + %u uploaded, %s, %u stanzas, %u acks, %u texts sent, %u received, %u undecryptable, %u too long, %u KB received%s", io->server_prekeys, io->prekeys_uploaded,
            io->active_set ? "active" : "not active", io->frames_after_login, io->acks_sent, io->msgs_sent, io->msgs_received, io->msgs_failed, io->msgs_deferred, io->rx_bytes / 1024, io->messages_seen && !io->sessions ? ", messages waiting" : "");
     return s;
