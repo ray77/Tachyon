@@ -268,13 +268,19 @@ static int chat_input_to(void *ctx, char *user, uint32_t ucap, uint32_t *device,
  * new message, up to 0.5 s for a chat switch (docs/UI.md). Called from io_recv's slices and from the yield hook. */
 static void gui_tick(void)
 {
-    uint32_t t0, d, u; LONG key; int act;
+    uint32_t t0, d, u; LONG key; int act, n;
     if (!gui_on || gui_in || qr_visible) return;
     gui_in = 1; t0 = now_ms();
-    key = scr_wait_key(0);
-    act = gui_pump(key);
-    if (act == GUI_ACT_SEND) queue_outgoing();
-    else if (act == GUI_ACT_QUIT) gui_quit = 1;
+    /* every key that waits in the window's queue, up to 32 per tick: during a long computation ticks are 200 ms apart
+     * (live run 6: one key per tick made typing crawl), the echo is drawn once afterwards */
+    for (n = 0; n < 32; n++) {
+        key = scr_wait_key(0);
+        if (key == SCR_KEY_TIMEOUT && n) break;
+        act = gui_pump(key);
+        if (act == GUI_ACT_SEND) queue_outgoing();
+        else if (act == GUI_ACT_QUIT) gui_quit = 1;
+        if (key == SCR_KEY_TIMEOUT) break;
+    }
     u = now_unix();
     if (u != gui_sec_last) { gui_sec_last = u; gui_set_time(u); }
     gui_redraw_dirty();
@@ -301,7 +307,7 @@ static void on_state(void *ctx, int state, const char *detail)
 static void on_time(void *ctx, uint32_t unix_seconds)
 {
     (void)ctx;
-    if (!unix_seconds) return;
+    if (!unix_seconds || unix_seconds < now_unix()) return;             /* an older t= (offline stanza) is not the server's clock */
     if (!unix_base) { char l[96]; wa_fmt(l, sizeof l, "clock: server time %u, the GUI clock follows it (Amiga clock %s)", unix_seconds, now_unix() ? "was set" : "unset"); log_line(0, l); }
     unix_base = unix_seconds; unix_base_ms = now_ms();
     if (gui_on) gui_set_time(unix_seconds);
@@ -624,7 +630,7 @@ int main(void)
 
     {
         int ok = wa_probe_run(&io);
-        if (!ok && net.fail) logf1("net: last failed call %s, errno %u", net.fail, (uint32_t)net.err);
+        if (net.fail) logf1("net: last failed socket call %s, errno %u", net.fail, (uint32_t)net.err);   /* also when the core closed the stream itself (a failed send inside the offline batch, live run 6) */
         if (ok && io.noise_cache_valid) {
             BPTR cf = Open((STRPTR)"SYS:noisecache.bin", MODE_NEWFILE);
             if (cf) { Write(cf, io.noise_cache_fp, 32); if (io.noise_leaf_valid) { Write(cf, io.noise_leaf_fp, 32); if (io.noise_static_valid) Write(cf, io.noise_static_out, 32); } Close(cf); log_line(0, io.noise_static_valid ? "noise: certificate cache (intermediate + leaf + server static) written to SYS:noisecache.bin" : io.noise_leaf_valid ? "noise: certificate cache (intermediate + leaf) written to SYS:noisecache.bin" : "noise: certificate cache fingerprint written to SYS:noisecache.bin"); }

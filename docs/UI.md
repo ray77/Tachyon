@@ -255,7 +255,9 @@ Seit dem 2026-11-28 ist die Oberfläche in die A500-Probe eingebaut (`bench/wa_p
 
 **Was auf dem Schirm steht** (Chatliste → Selbst-Chat „Du“, der `chat.txt`-Partner, die Partner der gespeicherten Sitzungen; Kopfzeile/Status): „Schlüssel werden berechnet“ → „Warte auf den TCP/IP-Stack“ → „DNS: web.whatsapp.com“ → „TCP zu a.b.c.d:443“ → „TLS 1.3 zu web.whatsapp.com“ → „WebSocket offen, Noise XX“ → „Noise XX steht, Anmeldung“ → „angemeldet als :N, passiv“ → „web.whatsapp.com, Noise XX, online“ → „Verbindung beendet“ / „Fehler: …“, am Ende „Ende – Taste schließt“ (20 s). Eingehende Texte stehen links (auch im Selbst-Chat, damit zu sehen ist, was vom Telefon kam), gesendete rechts mit Uhr → ✓ → ✓✓.
 
-Offen bleibt: Zeitzone fest CET (`gui_set_tz(3600)`), Namen nur aus `notify` (keine Kontaktliste), Gruppen werden nicht angezeigt (der Core bestätigt sie nur).
+**Live-Lauf 6 (2026-11-28, BENCHMARKS.md Schritt 25):** GUI 1,5 s nach Programmstart, „online“ bei 54,7 s, 143 Ticks à 19 ms (Maximum 300 ms), die getippte Zeile als ausstehende Blase; die Verbindung endete im Offline-Stapel, bevor die Zeile gesendet wurde. Daraus behoben: ein Tick holt alle wartenden Tasten (vorher eine je 200 ms – „Zeitlupeneingabe“ während der 68000 rechnet), die Uhr folgt nur `t=`-Werten von Nicht-Offline-Stanzas und nie rückwärts.
+
+Offen bleibt: Zeitzone fest CET (`gui_set_tz(3600)`), Namen nur aus `notify` (keine Kontaktliste), Gruppen werden nicht angezeigt (der Core bestätigt sie nur), Esc Esc beendet den Lauf (für Tests riskant: ein Tipp-Fehler schließt die Verbindung).
 
 ### Nachrichtenspeicher
 

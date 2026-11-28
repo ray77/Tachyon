@@ -262,7 +262,7 @@ tls13 *wa_probe_tls(void) { return &t; }
 /* the chat interface's view of the connection (io->on_state) and of the server's clock (t= attributes, io->on_time) */
 static void state(int s, const char *detail) { if (io->on_state) io->on_state(io->ctx, s, detail); }
 static uint32_t dec_value(const wab_value *v);
-static void server_time(const wab_node *n) { uint32_t t; if (io->on_time && n && (t = dec_value(wab_get_attr(n, "t"))) != 0) io->on_time(io->ctx, t); }
+static void server_time(const wab_node *n) { uint32_t t; if (io->on_time && n && !wab_get_attr(n, "offline") && (t = dec_value(wab_get_attr(n, "t"))) != 0) io->on_time(io->ctx, t); }   /* offline stanzas carry the time they were sent */
 static int fail(const char *fmt, const char *a, uint32_t b) { wa_fmt(io->result, sizeof io->result, fmt, a, b); state(WA_CONN_ERROR, io->result); return 0; }
 
 static int tls_connect(x509_cert *root, x509_cert *inter, hmac_drbg *rng, tls13_keypair *kp, x509_cache *cache)
