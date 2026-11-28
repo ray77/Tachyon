@@ -55,11 +55,30 @@ static ULONG wa_addr;
 static char aline[300];
 
 static int str_len(const char *s) { int n = 0; while (s[n]) n++; return n; }
+static int gui_on;                           /* below: the chat interface owns the screen */
+/* With the GUI up, log lines are collected and written in one go: every Write() to SYS: costs the 68000 about 0.2 s
+ * (live run 14: three lines per received message), so the buffer is flushed when a receive slice ends empty, every
+ * 2 s while the CPU computes (progress_tick), when it is full, and in finish(). At most 1 KB is lost in a crash. */
+static char logbuf[1024]; static int logbuf_n;
+static void log_flush(void)
+{
+    if (!logbuf_n) return;
+    if (con) Write(con, (APTR)logbuf, logbuf_n);
+    if (logfile) Write(logfile, (APTR)logbuf, logbuf_n);
+    logbuf_n = 0;
+}
 static void out(const char *s)
 {
-    int n = str_len(s);
-    if (con) Write(con, (APTR)s, n);
-    if (logfile) Write(logfile, (APTR)s, n);
+    int n = str_len(s), i;
+    if (!gui_on || n > (int)sizeof logbuf) {
+        log_flush();
+        if (con) Write(con, (APTR)s, n);
+        if (logfile) Write(logfile, (APTR)s, n);
+        return;
+    }
+    if (logbuf_n + n > (int)sizeof logbuf) log_flush();
+    for (i = 0; i < n; i++) logbuf[logbuf_n + i] = s[i];
+    logbuf_n += n;
 }
 
 /* 1/50 s ticks since midnight of day 0, milliseconds since program start */
@@ -75,7 +94,7 @@ static uint32_t now_ms(void) { return (ticks_now() - tick0) * 20; }
  * CRYPTO_YIELD hook prints a dot every 2 s on the console (not into the log file) and, with the screen open, in its
  * bottom line - otherwise the user takes the silent AmigaDOS window for a crash. The heartbeat chains to this hook. */
 static int screen_open;
-static int gui_on, qr_visible;               /* the chat interface owns the screen (pair/login mode); a QR code covers it */
+static int qr_visible;                       /* gui_on (above): the chat interface owns the screen (pair/login mode); a QR code covers it */
 static void gui_tick(void);
 static uint32_t gui_last_tick;
 static uint32_t prog_last; static int con_dots, scr_dots;
@@ -90,6 +109,7 @@ static void progress_tick(void *ctx)
     if (gui_on && now - gui_last_tick >= 200) gui_tick();   /* keys and the clock while the 68000 computes (X3DH: a minute) */
     if (now - prog_last < 2000) return;
     prog_last = now;
+    log_flush();                                            /* lines logged during a long computation reach the file every 2 s */
     if (con) { Write(con, (APTR)".", 1); con_dots++; }
     if (screen_open && !gui_on) {
         if (scr_dots >= 76) { scr_fill(0, SCR_H - 10, SCR_W, 8, SCR_PAL_BG); scr_dots = 0; }
@@ -482,6 +502,7 @@ static int32_t io_recv(void *ctx, uint8_t *p, uint32_t cap, uint32_t timeout_ms)
         if (r < 0) return r;
         if (r > 0) { if (now_ms() - gui_last_tick >= 200) gui_tick(); return r; }
         gui_tick();                                              /* a key (woken) or the slice's end */
+        log_flush();                                             /* the line is idle: write the collected log lines */
         if (outq_pushed != outq_woken) { outq_woken = outq_pushed; return 0; }   /* a line was typed: back to the core once, so the chat loop sends it
                                                                                   * before its next wait (outside the chat loop the core just waits again) */
         used = now_ms() - t0;
@@ -497,6 +518,7 @@ static void finish(void)
     if (screen_open) { scr_close(); screen_open = 0; }
     if (gui_arena) { FreeMem(gui_arena, GUI_ARENA_SIZE); gui_arena = 0; }
     bsdsock_close(&net);
+    gui_on = 0; log_flush();
     if (logfile) Close(logfile);
     chip_free_all();
     if (owncon) { Close(owncon); owncon = 0; con = 0; }
