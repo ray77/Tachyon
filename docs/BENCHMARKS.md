@@ -520,14 +520,14 @@ Empfangslauf mit der Chat-GUI auf dem Schirm (SIGNAL.md 6, Versuch 6). Zeiten se
 | Phase | Versuch 6 |
 |---|---:|
 | Programmstart → `<success>` | 50,9 s (Verbindung 44,8 s) |
-| 166 587-Byte-Frame: erstes bis letztes Byte | ~59 s (**~1,7 KB/s**; Versuch 5 ohne Schirm 3,2 KB/s) |
-| Noise-Entschlüsselung des Frames an Ort und Stelle (AES-GCM, 166 KB) | **37 s** (4,5 KB/s) |
+| 166 587-Byte-Frame: Empfang (164,5 KB in 58,8 s) | **2,8 KB/s** (Versuch 5 ohne Schirm 3,2 KB/s: der Schirm kostet ≈ 12 %) |
+| Noise-Entschlüsselung des Frames an Ort und Stelle (AES-GCM, 166 KB, letzte 2 KB Empfang eingeschlossen) | **39 s** (4,3 KB/s) |
 | Decodieren + 40 Hex-Logzeilen + Ack | 17 s (Logzeile 0,4 s) |
 | **X3DH als Responder + erste Entschlüsselung** (613-Byte-PreKeySignalMessage) | **53,6 s** |
 
 ### Einordnung
 
-Der Weg herein ist langsamer als der hinaus: 166 KB kosten eine Minute Empfang (TLS-Entschlüsselung, Chip-Bus mit dem Schirm geteilt) und 37 s Noise-Entschlüsselung – zusammen mehr als der ganze Login. Der History-Frame ist jetzt bestätigt und kommt nicht wieder; die laufenden Kosten sind die Offline-Nachrichten (je ~54 s für ein neues Gerät, danach ~1 s je Nachricht). Die GCM-Zeiten sind Software (`crypto/ref/aes.c`); der Blitter-AES/GCM (`crypto/blit`, Schritt 12) ist in der Probe noch nicht eingehängt – dort liegt der nächste Faktor 2–3.
+Der Weg herein ist langsamer als der hinaus: 166 KB kosten eine Minute Empfang (TLS-Entschlüsselung) und 39 s Noise-Entschlüsselung – zusammen mehr als der ganze Login. Der History-Frame ist jetzt bestätigt und kommt nicht wieder; die laufenden Kosten sind die Offline-Nachrichten (je ~54 s für ein neues Gerät, danach ~1 s je Nachricht). Die GCM-Zeiten sind Software (`crypto/ref/aes.c`); der Blitter-AES/GCM (`crypto/blit`, Schritt 12) ist in der Probe noch nicht eingehängt – dort liegt der nächste Faktor 2–3.
 
 ## 2026-11-28 – Schritt 26: Chat-Oberfläche in der Probe (Live-Lauf 6, die Sicht der Oberfläche)
 
