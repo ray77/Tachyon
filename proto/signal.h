@@ -97,6 +97,14 @@ int sig_bundle_from_node(sig_bundle *b, const wab_node *user);
 
 void sig_session_init(sig_session *s);                                           /* empty: no state */
 int  sig_session_has_state(const sig_session *s);
+int  sig_session_pending(const sig_session *s);                                   /* our prekey message is still unanswered */
+/* 1 if this session decrypts the message without a DH step or X3DH: a msg whose ratchet key one of its receive chains
+ * knows, or a pkmsg whose base key started one of its states. Cheap (a parse and compares): it picks the session to try
+ * first when one device is stored under two addresses (phone number and LID). */
+int  sig_session_knows(const sig_session *s, int is_pkmsg, const uint8_t *in, uint32_t len);
+/* src's current state becomes dst's archived state (libsignal keeps the archived states of one record: a late message
+ * in the other state still decrypts); src is left untouched */
+void sig_session_absorb(sig_session *dst, const sig_session *src);
 /* X3DH as initiator: verifies the signed prekey signature (mandatory), draws the base key and the first ratchet key,
  * archives a current state; the next sig_encrypt produces a pkmsg */
 int  sig_session_start(sig_session *s, const sig_local *me, const sig_bundle *b);
@@ -119,6 +127,7 @@ typedef struct sig_store { uint32_t n, stamp; sig_entry e[SIG_STORE_MAX]; } sig_
 void         sig_store_init(sig_store *st);
 /* the session of user:device (lid = 1 for @lid users); create = 1 makes an empty one, evicting the least recently used */
 sig_session *sig_store_get(sig_store *st, const char *user, uint32_t device, int lid, int create);
+void         sig_store_drop(sig_store *st, const sig_session *s);                /* removes the entry holding s (a pointer from sig_store_get) */
 uint32_t     sig_store_write(uint8_t *out, uint32_t cap, const sig_store *st);   /* bytes, 0 = does not fit */
 int          sig_store_read(sig_store *st, const uint8_t *in, uint32_t len);     /* 1 = version, size and checksum ok */
 

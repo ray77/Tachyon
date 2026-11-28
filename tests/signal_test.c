@@ -133,8 +133,10 @@ int main(int argc, char **argv)
     check(alice.cur.send_index == 2 && alice.cur.has_pending, "alice: chain stepped twice, prekey message still unacknowledged");
     { static uint8_t big[SIG_BODY_MAX + 32]; check(sig_encrypt(&alice, &la, big, SIG_BODY_MAX + 1, out, sizeof out, &outlen, &is_pk) == SIG_ERR_BUFFER, "oversize plaintext refused"); }
 
+    check(!sig_session_knows(&bob, 1, B("s1_pkmsg1"), V("s1_pkmsg1")->len), "bob: knows() = 0 for a prekey message with a new base key (X3DH needed)");
     push(&rb, "s1_bob1_ratchet_priv");
     dec_eq(&bob, &lb, "s1_pkmsg1", 1, "bob");
+    check(sig_session_knows(&bob, 1, B("s1_pkmsg2"), V("s1_pkmsg2")->len), "bob: knows() = 1 for the second prekey message of the same base key");
     check(used == U("bob_opk_id") && bob_pk.n == 0, "bob: one-time prekey 42 consumed and removed from the record");
     state_eq(&bob.cur, "s1_bob1", "bob");
     check(bob.cur.remote_regid == U("alice_regid") && eqv(bob.cur.remote_ident, 32, "alice_ident_pub") && eqv(bob.cur.base_key, 32, "s1_alice_base_pub"), "bob: remote identity, registration id, base key");
@@ -146,8 +148,10 @@ int main(int argc, char **argv)
 
     enc_eq(&bob, &lb, "s1_msg1", 0); enc_eq(&bob, &lb, "s1_msg2", 0); enc_eq(&bob, &lb, "s1_msg3", 0);
 
+    check(!sig_session_knows(&alice, 0, B("s1_msg2"), V("s1_msg2")->len) && !sig_session_knows(&bob, 0, B("s1_msg2"), V("s1_msg2")->len), "knows() = 0: Alice has not seen Bob's ratchet key yet (DH step ahead); Bob's own message is not his to decrypt");
     push(&ra, "s1_alice2_ratchet_priv");
     dec_eq(&alice, &la, "s1_msg2", 0, "alice");
+    check(sig_session_knows(&alice, 0, B("s1_msg1"), V("s1_msg1")->len) && sig_session_knows(&alice, 0, B("s1_msg3"), V("s1_msg3")->len), "alice: knows() = 1 for the other messages of that chain (no DH step)");
     check(alice.cur.n_skipped == 1 && alice.cur.skipped[0].counter == 0 && !alice.cur.has_pending, "alice: key for counter 0 kept, prekey message acknowledged by Bob's answer");
     state_eq(&alice.cur, "s1_alice2", "alice");
     dec_eq(&alice, &la, "s1_msg1", 0, "alice (skipped key)");
@@ -260,6 +264,16 @@ int main(int argc, char **argv)
     *sig_store_get(&store, "4917612345678", 0, 0, 1) = alice;
     *sig_store_get(&store, "123456789012345", 0, 1, 1) = bob;
     check(store.n == 2 && sig_store_get(&store, "4917612345678", 0, 0, 0) == &store.e[0].s && sig_store_get(&store, "4917612345678", 0, 1, 0) == 0, "store: lookup by user, device and server kind");
+    {   /* one device under two addresses: the LID entry is archived into the number's entry and dropped */
+        sig_session *num = sig_store_get(&store, "4917612345678", 0, 0, 0), *lidp = sig_store_get(&store, "123456789012345", 0, 1, 0);
+        check(num && lidp && num != lidp, "store: two entries for the two addresses");
+        sig_session_absorb(num, lidp);
+        check(num->has_prev && memcmp(&num->prev, &bob.cur, sizeof bob.cur) == 0 && memcmp(&num->cur, &alice.cur, sizeof alice.cur) == 0, "absorb: the other entry's current state became the archived one, the current state untouched");
+        sig_store_drop(&store, lidp);
+        check(store.n == 1 && sig_store_get(&store, "123456789012345", 0, 1, 0) == 0 && sig_store_get(&store, "4917612345678", 0, 0, 0) == &store.e[0].s, "drop: the LID entry is gone, the number's entry stays");
+        *sig_store_get(&store, "4917612345678", 0, 0, 0) = alice; *sig_store_get(&store, "123456789012345", 0, 1, 1) = bob;
+        check(store.n == 2, "store: both entries again for the record tests");
+    }
     n = sig_store_write(rec, sizeof rec, &store);
     check(n == SIG_STORE_SIZE(2) && n == 1 + 8 + 2 * SIG_ENTRY_SIZE + 32, "store: record written");
     printf("      store record: %u bytes for 2 sessions, %u max (%u per session)\n", n, (unsigned)SIG_STORE_MAX_SIZE, (unsigned)SIG_ENTRY_SIZE);

@@ -933,6 +933,27 @@ static int user_is_ours(const char *user)
 }
 static void save_sessions(void) { if (io->save_sessions) io->save_sessions(io->ctx); }
 
+/* One device has two addresses: its phone number (@s.whatsapp.net) and its LID (@lid). The phone keeps ONE session
+ * record per device of ours and sends from its LID, while we started our session with its number (live run 13: the
+ * phone's reply failed the MAC in the session stored under the LID; the session stored under the number decrypted it
+ * offline). alt_address gives the other address of user:device when it is known: our own account from the credentials
+ * (the self chat), otherwise the server's sender_pn / sender_lid attribute of the stanza. 1 = known. */
+static void jid_user(char *dst, uint32_t cap, const wab_jid *j);
+static int alt_address(const char *user, int lid, const wab_node *n, char *alt, uint32_t cap, int *alt_lid)
+{
+    const wab_value *v; uint32_t i;
+    alt[0] = 0; *alt_lid = !lid;
+    if (io->creds && io->creds->lid_user[0]) {
+        const char *ours = lid ? io->creds->lid_user : io->creds->jid_user, *other = lid ? io->creds->jid_user : io->creds->lid_user;
+        for (i = 0; user[i] && ours[i] && user[i] == ours[i]; i++) ;
+        if (!user[i] && !ours[i]) { for (i = 0; other[i] && i + 1 < cap; i++) alt[i] = other[i]; alt[i] = 0; return alt[0] != 0; }
+    }
+    if (!n) return 0;
+    v = wab_get_attr(n, lid ? "sender_pn" : "sender_lid");
+    if (v && v->kind == WAB_JID) { jid_user(alt, cap, &v->jid); return alt[0] != 0; }
+    return 0;
+}
+
 /* <iq xmlns=encrypt type=get to=s.whatsapp.net><key><user jid=user[:device]@server reason=identity/></key></iq> -> the bundle */
 static int fetch_bundle(const char *user, uint32_t device, int lid, sig_bundle *b)
 {
@@ -1081,14 +1102,14 @@ static void jid_user(char *dst, uint32_t cap, const wab_jid *j) { uint32_t i; fo
 static int handle_message(const wab_node *n)
 {
     const wab_value *from = wab_get_attr(n, "from"), *part = wab_get_attr(n, "participant"), *enc_type; const wab_node *enc = 0; uint32_t i, plen = 0, used = 0, elen;
-    char user[32], idb[32], ty[16]; int lid, is_pk, r; sig_session *s; static heartbeat hb; uint32_t t0;
+    char user[32], idb[32], ty[16], alt_user[32]; const char *rep_user = user; int lid, is_pk, r, alt_lid = 0, via_alt = 0, rep_lid; sig_session *s, *alt = 0, *second = 0; static heartbeat hb; uint32_t t0;
     if (!from || from->kind != WAB_JID) { logl("msg: <message> without a from JID, acknowledged"); return send_ack(n); }
     if (wab_str_eq(&from->jid.server, "g.us") || wab_str_eq(&from->jid.server, "broadcast") || wab_str_eq(&from->jid.server, "newsletter")) {
         wa_fmt(line, sizeof line, "msg: %s message id %s from %s (sender keys are out of scope): acknowledged, not decrypted", wab_str_eq(&from->jid.server, "g.us") ? "group" : "broadcast/newsletter",
                attr_cstr(n, "id", idb, sizeof idb), attr_cstr(n, part ? "participant" : "from", user, sizeof user)); logl(line);
         return send_ack(n);
     }
-    jid_user(user, sizeof user, &from->jid); lid = wab_str_eq(&from->jid.server, "lid");
+    jid_user(user, sizeof user, &from->jid); lid = wab_str_eq(&from->jid.server, "lid"); rep_lid = lid; alt_user[0] = 0;
     if (n->val.kind == WAB_LIST) for (i = 0; i < n->n_children; i++) if (wab_str_eq(&n->children[i].tag, "enc")) { enc = &n->children[i]; break; }
     if (!enc) {
         wa_fmt(line, sizeof line, "msg: message %s from %s:%u without <enc>%s: acknowledged", attr_cstr(n, "id", idb, sizeof idb), user, (uint32_t)from->jid.device, wab_get_child(n, "unavailable") ? " (unavailable)" : ""); logl(line);
@@ -1116,14 +1137,31 @@ static int handle_message(const wab_node *n)
         if (!send_ack(n)) return 0;
         return send_receipt(n, user);
     }
-    s = sig_store_get(io->sessions, user, from->jid.device, lid, is_pk);
+    /* the session: under the sender's address, or under the same device's other address (number <-> LID). The one that
+       already knows the message's ratchet (or base) key decrypts without a DH step and goes first; otherwise the one
+       with our unanswered prekey message (the peer's first reply lands there, live run 13), otherwise the exact one. */
+    s = sig_store_get(io->sessions, user, from->jid.device, lid, 0);
+    if (alt_address(user, lid, n, alt_user, sizeof alt_user, &alt_lid)) alt = sig_store_get(io->sessions, alt_user, from->jid.device, alt_lid, 0);
+    if (alt && !sig_session_has_state(alt)) alt = 0;
+    if (s && !sig_session_has_state(s) && alt) s = 0;
+    if (alt && (!s || (!sig_session_knows(s, is_pk, enc->val.str.p, elen) && (sig_session_knows(alt, is_pk, enc->val.str.p, elen) || sig_session_pending(alt))))) {
+        second = s; s = alt; via_alt = 1;              /* the other address first */
+    } else second = alt;
+    if (!s && is_pk) s = sig_store_get(io->sessions, user, from->jid.device, lid, 1);
     if (!s) { wa_fmt(line, sizeof line, "msg: message %s from %s:%u is a plain msg but we have no session with that device: acknowledged, lost", attr_cstr(n, "id", idb, sizeof idb), user, (uint32_t)from->jid.device); logl(line); io->msgs_failed++; return send_ack(n); }
-    wa_fmt(line, sizeof line, "msg: message %s from %s:%u@%s, <enc type=%s v=%s> %u bytes%s%s", attr_cstr(n, "id", idb, sizeof idb), user, (uint32_t)from->jid.device, lid ? "lid" : WA_SERVER_JID,
-           is_pk ? "pkmsg" : "msg", attr_cstr(enc, "v", ty, sizeof ty), elen, wab_get_attr(n, "offline") ? " (waited on the server while we were offline)" : "", sig_session_has_state(s) ? "" : " (new session: X3DH as responder)"); logl(line);
+    wa_fmt(line, sizeof line, "msg: message %s from %s:%u@%s, <enc type=%s v=%s> %u bytes%s%s%s%s", attr_cstr(n, "id", idb, sizeof idb), user, (uint32_t)from->jid.device, lid ? "lid" : WA_SERVER_JID,
+           is_pk ? "pkmsg" : "msg", attr_cstr(enc, "v", ty, sizeof ty), elen, wab_get_attr(n, "offline") ? " (waited on the server while we were offline)" : "", sig_session_has_state(s) ? "" : " (new session: X3DH as responder)",
+           via_alt ? " (in the session stored under its other address, " : "", via_alt ? (alt_lid ? "LID)" : "number)") : ""); logl(line);
     t0 = ms();
     heartbeat_init(&hb, &w, io->now_ms, 4000, hb_send, 0); hb.poll = drain_poll;
     heartbeat_arm(&hb);
     r = sig_decrypt(s, &me_local, is_pk, enc->val.str.p, elen, msg_plain, sizeof msg_plain, &plen, &used);
+    if (r != SIG_OK && r != SIG_ERR_OLD_COUNTER && second) {
+        wa_fmt(line, sizeof line, "msg: %s after %T s in the session stored under the %s: trying the one under the %s", sig_errstr(r), ms() - t0, via_alt ? (alt_lid ? "LID" : "number") : (lid ? "LID" : "number"),
+               via_alt ? (lid ? "LID" : "number") : (alt_lid ? "LID" : "number")); logl(line);
+        r = sig_decrypt(second, &me_local, is_pk, enc->val.str.p, elen, msg_plain, sizeof msg_plain, &plen, &used);
+        if (r == SIG_OK) { sig_session *t = s; s = second; second = t; via_alt = !via_alt; }
+    }
     heartbeat_disarm(); io->pongs += hb.sent;
     io->d_decrypt = ms() - t0;
     if (r != SIG_OK) {
@@ -1131,16 +1169,26 @@ static int handle_message(const wab_node *n)
         io->msgs_failed++;
         return send_ack(n);
     }
+    if (via_alt) {
+        /* one device, one record: the entry under the sender's address was the phone's archived session; it moves into
+           the decrypting one as its archived state (a late message in it still decrypts) and the duplicate entry goes */
+        if (second) { sig_session_absorb(s, second); sig_store_drop(io->sessions, second); }
+        wa_fmt(line, sizeof line, "sessions: %s:%u@%s and %s:%u@%s are one device: one session kept (under the %s)%s", user, (uint32_t)from->jid.device, lid ? "lid" : WA_SERVER_JID,
+               alt_user, (uint32_t)from->jid.device, alt_lid ? "lid" : WA_SERVER_JID, alt_lid ? "LID" : "number", second ? ", the other archived into it" : ""); logl(line);
+    }
     save_sessions();
     if (used) { wa_fmt(line, sizeof line, "msg: one-time prekey %u consumed, %u left in the record", used, io->prekeys ? io->prekeys->n : 0u); logl(line); if (io->save_prekeys) io->save_prekeys(io->ctx); }
     if (!wa_unpad(msg_plain, &plen)) { logl("msg: decrypted, but the WhatsApp padding is invalid: acknowledged"); io->msgs_failed++; return send_ack(n); }
     {
         char text[200], fromstr[48];
         int have = message_text(msg_plain, plen, text, sizeof text, 0);
-        wa_fmt(fromstr, sizeof fromstr, "%s:%u", user, (uint32_t)from->jid.device);
+        /* the chat interface and the console know the device by its phone number: a message from the LID is reported
+           under the number when the credentials or the stanza pair the two (the self chat: our own number) */
+        if (lid && alt_user[0] && !alt_lid) { rep_user = alt_user; rep_lid = 0; }
+        wa_fmt(fromstr, sizeof fromstr, "%s:%u", rep_user, (uint32_t)from->jid.device);
         wa_fmt(line, sizeof line, "msg: %s in %T s (%u bytes plaintext): %s%s%s", have ? "TEXT" : "decrypted", io->d_decrypt, plen, have ? "\"" : "", text, have ? "\"" : ""); logl(line);
         if (have && io->chat_recv) io->chat_recv(io->ctx, fromstr, text);
-        if (have && io->on_text) { char pn[48]; io->on_text(io->ctx, user, from->jid.device, lid, wab_get_attr(n, "notify") ? attr_cstr(n, "notify", pn, sizeof pn) : "", dec_value(wab_get_attr(n, "t")), (const char *)text_utf8, text_utf8_len); }
+        if (have && io->on_text) { char pn[48]; io->on_text(io->ctx, rep_user, from->jid.device, rep_lid, wab_get_attr(n, "notify") ? attr_cstr(n, "notify", pn, sizeof pn) : "", dec_value(wab_get_attr(n, "t")), (const char *)text_utf8, text_utf8_len); }
         io->msgs_received++; io->t_msg_received = ms();
     }
     return send_receipt(n, user);
@@ -1159,8 +1207,12 @@ static int send_text(const char *user, uint32_t device, int lid, const char *tex
 static int send_text_inner(const char *user, uint32_t device, int lid, const char *text)
 {
     static wab_node msg, parts, to, enc, devid; static wab_attr ma[3], ta[1], ea[2]; static wab_node children[2];
-    static heartbeat hb; sig_session *s; uint32_t t0, plen, clen, dlen = 0; int is_pk, r;
+    static heartbeat hb; sig_session *s; uint32_t t0, plen, clen, dlen = 0; int is_pk, r, alt_lid; char alt_user[32];
     s = sig_store_get(io->sessions, user, device, lid, 0);
+    if ((!s || !sig_session_has_state(s)) && alt_address(user, lid, 0, alt_user, sizeof alt_user, &alt_lid)) {
+        sig_session *alt = sig_store_get(io->sessions, alt_user, device, alt_lid, 0);
+        if (alt && sig_session_has_state(alt)) { s = alt; wa_fmt(line, sizeof line, "signal: %s:%u is the device stored under %s:%u@%s: that session is used", user, device, alt_user, device, alt_lid ? "lid" : WA_SERVER_JID); logl(line); }
+    }
     if (!s || !sig_session_has_state(s)) {
         sig_bundle b;
         wa_fmt(line, sizeof line, "signal: no session with %s:%u yet: fetching the prekey bundle", user, device); logl(line);

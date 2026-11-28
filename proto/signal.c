@@ -118,6 +118,8 @@ int sig_bundle_from_node(sig_bundle *b, const wab_node *user)
 /* ---- session setup --------------------------------------------------------------------------------- */
 void sig_session_init(sig_session *s) { sig_zero(s, sizeof *s); }
 int  sig_session_has_state(const sig_session *s) { return s->cur.valid != 0; }
+int  sig_session_pending(const sig_session *s) { return s->cur.valid && s->cur.has_pending; }
+void sig_session_absorb(sig_session *dst, const sig_session *src) { if (src->cur.valid) { dst->prev = src->cur; dst->has_prev = 1; } }
 
 static void archive(sig_session *s)
 {
@@ -389,6 +391,21 @@ int sig_decrypt(sig_session *s, const sig_local *me, int is_pkmsg, const uint8_t
     return r;
 }
 
+int sig_session_knows(const sig_session *s, int is_pkmsg, const uint8_t *in, uint32_t len)
+{
+    if (is_pkmsg) {
+        sig_pkmsg pk;
+        if (parse_pkmsg(in, len, &pk) != SIG_OK) return 0;
+        return (s->cur.valid && ct_eq(s->cur.base_key, pk.base, 32)) || (s->has_prev && s->prev.valid && ct_eq(s->prev.base_key, pk.base, 32));
+    } else {
+        sig_msg m; sig_state st;
+        if (parse_message(in, len, &m) != SIG_OK) return 0;
+        if (s->cur.valid) { st = s->cur; if (find_chain(&st, m.ratchet)) return 1; }
+        if (s->has_prev && s->prev.valid) { st = s->prev; if (find_chain(&st, m.ratchet)) return 1; }
+        return 0;
+    }
+}
+
 /* ---- store ------------------------------------------------------------------------------------------- */
 void sig_store_init(sig_store *st) { sig_zero(st, sizeof *st); }
 
@@ -405,6 +422,17 @@ sig_session *sig_store_get(sig_store *st, const char *user, uint32_t device, int
     for (i = 0; i < SIG_USER_MAX - 1 && user[i]; i++) st->e[idx].user[i] = user[i];
     st->e[idx].device = device; st->e[idx].lid = lid ? 1 : 0; st->e[idx].stamp = ++st->stamp;
     return &st->e[idx].s;
+}
+
+void sig_store_drop(sig_store *st, const sig_session *s)
+{
+    uint32_t i, j;
+    for (i = 0; i < st->n; i++) if (&st->e[i].s == s) {
+        for (j = i + 1; j < st->n; j++) st->e[j - 1] = st->e[j];
+        st->n--;
+        sig_zero(&st->e[st->n], sizeof st->e[st->n]);
+        return;
+    }
 }
 
 typedef struct { uint8_t *p; uint32_t o; } sig_wcur;

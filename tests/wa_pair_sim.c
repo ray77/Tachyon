@@ -135,14 +135,16 @@ static void enqueue_bundle(const wab_value *iq_id)
     enqueue_result(iq_id, &list);
 }
 /* <message from=phone id type=text t><enc v=2 type=pkmsg|msg>vector</enc></message> */
-static void enqueue_phone_message(const char *vector, const char *id, const char *type)
+/* lid = 1: the phone sends from its LID address (live: the phone always does; our session with it is stored under its
+ * number, so the core must find it through the credentials' number <-> LID pair) */
+static void enqueue_phone_message(const char *vector, const char *id, const char *type, int lid)
 {
     static wab_node m, enc; static wab_attr ma[5], ea[2]; static uint8_t body[2][1024]; static int slot; uint32_t l;
     uint8_t *b = body[slot & 1]; slot++;
     l = vec(vector, b, 1024); CHECK(l > 50);
     wab_node_init(&enc, "enc"); ea[0].key = wab_s("v"); ea[0].val = wab_text("2"); ea[1].key = wab_s("type"); ea[1].val = wab_text(type); enc.attrs = ea; enc.n_attrs = 2; enc.val = wab_bytes(b, l);
     wab_node_init(&m, "message");
-    ma[0].key = wab_s("from"); ma[0].val = wab_jid_value("4917612345678", "s.whatsapp.net", 0);
+    ma[0].key = wab_s("from"); ma[0].val = lid ? wab_jid_value("123456789012345", "lid", 0) : wab_jid_value("4917612345678", "s.whatsapp.net", 0);
     ma[1].key = wab_s("id"); ma[1].val = wab_text(id); ma[2].key = wab_s("type"); ma[2].val = wab_text("text"); ma[3].key = wab_s("t"); ma[3].val = wab_text("1764300010");
     ma[4].key = wab_s("notify"); ma[4].val = wab_text("Telefon");                 /* the sender's pushname, as the server adds it */
     m.attrs = ma; m.n_attrs = 5; m.val.kind = WAB_LIST; m.children = &enc; m.n_children = 1;
@@ -267,12 +269,13 @@ static int io_send(void *ctx, const uint8_t *p, uint32_t n)
                         rc.attrs = rca; rc.n_attrs = 4; enqueue_node(&rc);
                     }
                     /* both answers are prekey messages: libsignal keeps sending those until it has seen a message of ours on the new session */
-                    if (!phone_sent) { phone_sent = 1; enqueue_phone_message("wa_pkmsg1", "PHONE0000000001", "pkmsg"); enqueue_phone_message("wa_msg2", "PHONE0000000002", "pkmsg"); }
+                    if (!phone_sent) { phone_sent = 1; enqueue_phone_message("wa_pkmsg1", "PHONE0000000001", "pkmsg", 0); enqueue_phone_message("wa_msg2", "PHONE0000000002", "pkmsg", 1); /* the second from the LID: same device, same session */ }
                 }
                 else if (wab_str_eq(&nd->tag, "receipt")) {
                     const wab_value *to = wab_get_attr(nd, "to"); int k = receipts < 2 ? receipts : 1;
                     receipts++;
-                    CHECK(to && to->kind == WAB_JID && wab_str_eq(&to->jid.user, "4917612345678") && to->jid.device == 0);
+                    CHECK(to && to->kind == WAB_JID && to->jid.device == 0 && (receipts == 1 ? wab_str_eq(&to->jid.user, "4917612345678") && wab_str_eq(&to->jid.server, "s.whatsapp.net")
+                                                                             : wab_str_eq(&to->jid.user, "123456789012345") && wab_str_eq(&to->jid.server, "lid")));   /* the receipt goes to the address the message came from */
                     CHECK(wab_get_attr(nd, "participant") == 0 && wab_get_attr(nd, "recipient") == 0);
                     if (type && type->kind == WAB_STR) snprintf(rcpt_type[k], sizeof rcpt_type[k], "%.*s", (int)type->str.len, (const char *)type->str.p);
                     if (id && id->kind == WAB_STR) snprintf(rcpt_id[k], sizeof rcpt_id[k], "%.*s", (int)id->str.len, (const char *)id->str.p);
@@ -536,6 +539,7 @@ int main(int argc, char **argv)
         CHECK(recv_n == 2 && strcmp(recv_text[0], "Antwort vom Telefon: hallo Amiga!") == 0 && strcmp(recv_text[1], "zweite Nachricht, gleiche Sitzung \xe4\xf6\xfc") == 0);   /* UTF-8 -> Latin-1 for the console */
         CHECK(wa_prekeys_find(&prekeys, 5) == 0 && prekeys.n == 6);          /* the one-time prekey is gone; 3 uploaded + 3 refilled remain */
         CHECK(sessions.n == 1 && sessions_saved >= 3 && stanza_acks == 3);   /* no ack for decrypted messages: receipts only (+ the status broadcast) */
+        CHECK(sig_store_get(&sessions, "4917612345678", 0, 0, 0) != 0 && sig_store_get(&sessions, "123456789012345", 0, 1, 0) == 0);   /* the LID message decrypted in the session under the number; no second entry */
         /* what the chat interface saw: both texts as UTF-8 with the pushname and the stanza's time, our message with its id,
          * the server's ack as SENT, the connection's states, the server clock from <success t> and the stanzas */
         CHECK(txt_n == 2 && strcmp(txt_user, "4917612345678") == 0 && txt_dev == 0 && txt_lid == 0 && strcmp(txt_name, "Telefon") == 0 && txt_ts == 1764300010);
