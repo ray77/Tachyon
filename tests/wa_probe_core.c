@@ -60,7 +60,7 @@ static uint32_t pend_len;
 static char line[640];
 static uint32_t stage_len, stage_peak; static int in_pump, stage_full_noted;   /* peak: the most the staging buffer held in this run (RESULT line) */
 static int in_send;                        /* inside send_node/app_send: no nested application send from a yield hook */
-static uint32_t ka_last;                   /* the last keepalive ping (<iq xmlns=w:p><ping/>) after login */
+static uint32_t ka_last; static char ka_id[32];   /* the last keepalive ping (<iq xmlns=w:p><ping/>) after login, and its id */
 static void logl(const char *s);
 static int keepalive_due(void);
 static void drain_poll(void *hio)
@@ -758,10 +758,15 @@ static int send_iq1(const char *id, const char *xmlns, const char *type, const c
 /* whatsmeow keepAliveLoop: <iq id=.. xmlns=w:p type=get to=s.whatsapp.net><ping/></iq> every 20-30 s */
 static int send_keepalive(void)
 {
-    static char id[32];
-    next_iq_id(id, sizeof id);
+    next_iq_id(ka_id, sizeof ka_id);
     ka_last = ms();
-    return send_iq1(id, "w:p", "get", "ping", "keepalive ping");
+    return send_iq1(ka_id, "w:p", "get", "ping", "keepalive ping");
+}
+/* the server's answer to our keepalive: <iq type=result id=OURS> - not a sign of life of the offline batch */
+static int is_ping_result(const wab_node *n)
+{
+    const wab_value *id = wab_get_attr(n, "id"), *ty = wab_get_attr(n, "type");
+    return wab_str_eq(&n->tag, "iq") && ty && ty->kind == WAB_STR && wab_str_eq(&ty->str, "result") && id && id->kind == WAB_STR && wab_str_eq(&id->str, ka_id);
 }
 /* a keepalive ping every 20 s from login on, whatever the probe is doing (whatsmeow: 20-30 s, independent of traffic).
  * The server reset the connection 65-180 s after <active/> in live attempts 4-7b, every time while we were receiving
@@ -1281,11 +1286,13 @@ static int post_login(void)
              * decryption at ~3 KB/s), and live attempts 4 and 5 ended because this loop gave up after 45 s without a
              * complete stanza, then computed keys while the frame was still streaming in. */
             quiet = io->drain_quiet_ms ? io->drain_quiet_ms : offline_preview ? 45000 : 8000;
-            if (io->rx_bytes != rx_seen) { rx_seen = io->rx_bytes; last = ms(); }
+            /* bytes count only while a long frame is coming in; our own keepalive's results every 20 s do not (live
+             * attempt 8: the batch phase lasted the full 15 minutes on 45 pong results) */
+            if (io->rx_bytes != rx_seen) { rx_seen = io->rx_bytes; if (long_total) last = ms(); }
             if (offline_done || ms() - last >= quiet || ms() - t0 > 900000) break;
             n = recv_node(1000, &gone);
             if (gone) { logl("login: connection closed by the server during the offline batch"); close_ws(); return 1; }
-            if (n) { last = ms(); if (!handle_async(n)) { close_ws(); return 1; } }
+            if (n) { if (!is_ping_result(n)) last = ms(); if (!handle_async(n)) { close_ws(); return 1; } }
         }
         wa_fmt(line, sizeof line, "login: offline batch: %u stanzas in %T s%s", io->frames_after_login - before, ms() - t0, offline_done ? ", <offline> marker seen" : offline_preview ? ", NO <offline> marker (line quiet for 45 s)" : ", nothing announced (quiet for 8 s)"); logl(line);
     }
